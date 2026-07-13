@@ -1,0 +1,266 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  UV_VERSION: "0.11.16"
+
+jobs:
+  unit:
+    name: Unit tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install dependencies
+        run: uv sync --frozen --group dev
+      - name: Run unit tests
+        run: uv run python -m pytest tests --ignore=tests/integration --ignore=tests/soak -q
+
+  quality:
+    name: Lint, types, and coverage
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.14"
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install dependencies
+        run: uv sync --frozen --group dev
+      - name: Lint
+        run: uv run ruff check .
+      - name: Check formatting
+        run: uv run ruff format --check .
+      - name: Type check
+        run: uv run --with pyright==1.1.411 pyright camouflare
+      - name: Enforce coverage floor
+        run: >-
+          uv run --with pytest-cov==7.1.0 python -m pytest tests
+          --ignore=tests/integration --ignore=tests/soak
+          --cov=camouflare --cov-report=term-missing --cov-fail-under=85 -q
+      - name: Validate security exception policy
+        run: >-
+          python scripts/render_security_allowlist.py
+          --source .github/security-allowlist.json
+          --output .github/.trivyignore.generated
+
+  package:
+    name: Build and install package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.14"
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Build wheel and source distribution once
+        run: uv build --out-dir dist
+      - name: Install wheel in a clean virtual environment
+        shell: bash
+        run: |
+          python -m venv /tmp/camouflare-package
+          wheel_path="$(find dist -maxdepth 1 -type f -name '*.whl' -print -quit)"
+          test -n "${wheel_path}"
+          /tmp/camouflare-package/bin/python -m pip install "${wheel_path}"
+          /tmp/camouflare-package/bin/camouflare --version
+          /tmp/camouflare-package/bin/python -c "import camouflare; print(camouflare.__version__)"
+      - name: Upload distributions
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: python-distributions
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  browser-smoke:
+    name: Real Camoufox smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.14"
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install dependencies and Camoufox
+        run: |
+          uv sync --frozen --group dev
+          uv run camoufox fetch
+          uv run playwright install-deps firefox
+      - name: Exercise the real browser against the local fixture
+        env:
+          CAMOUFLARE_RUN_BROWSER_TESTS: "1"
+        run: uv run python -m pytest tests/integration/test_real_browser.py -q
+
+  source-security:
+    name: Source and dependency security
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Render active security exceptions
+        run: >-
+          python3 scripts/render_security_allowlist.py
+          --source .github/security-allowlist.json
+          --output .github/.trivyignore.generated
+      - name: Scan source, lockfile, secrets, and configuration
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,misconfig,secret
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          ignore-unfixed: "false"
+          trivyignores: .github/.trivyignore.generated
+          format: table
+
+  container:
+    name: Container (${{ matrix.arch }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Build linux/${{ matrix.arch }} runtime image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/${{ matrix.arch }}
+          load: true
+          push: false
+          tags: camouflare:ci-${{ matrix.arch }}
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=container-ci-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=container-ci-${{ matrix.arch }}
+      - name: Run health, readiness, and local-target smoke
+        run: bash scripts/container_smoke.sh camouflare:ci-${{ matrix.arch }}
+      - name: Render active security exceptions
+        run: >-
+          python3 scripts/render_security_allowlist.py
+          --source .github/security-allowlist.json
+          --output .github/.trivyignore.generated
+      - name: Scan runtime image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: camouflare:ci-${{ matrix.arch }}
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          ignore-unfixed: "false"
+          trivyignores: .github/.trivyignore.generated
+          format: table
+      - name: Generate runtime SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          image: camouflare:ci-${{ matrix.arch }}
+          format: spdx-json
+          output-file: image-${{ matrix.arch }}.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+      - name: Upload runtime SBOM
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: runtime-sbom-${{ matrix.arch }}
+          path: image-${{ matrix.arch }}.spdx.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Read current and released image sizes
+        id: sizes
+        shell: bash
+        env:
+          ARCH: ${{ matrix.arch }}
+          BASELINE_IMAGE: ghcr.io/${{ github.repository }}:${{ vars.IMAGE_SIZE_BASELINE_TAG || '1.0.0' }}
+        run: |
+          current="$(docker image inspect "camouflare:ci-${ARCH}" --format '{{.Size}}')"
+          baseline=0
+          if docker pull --platform "linux/${ARCH}" "${BASELINE_IMAGE}"; then
+            baseline="$(docker image inspect "${BASELINE_IMAGE}" --format '{{.Size}}')"
+          fi
+          echo "current=${current}" >>"${GITHUB_OUTPUT}"
+          echo "baseline=${baseline}" >>"${GITHUB_OUTPUT}"
+      - name: Warn on image growth above 10 percent
+        run: >-
+          python3 scripts/check_image_size.py
+          --current ${{ steps.sizes.outputs.current }}
+          --baseline ${{ steps.sizes.outputs.baseline }}
+          --threshold 0.10
+          --platform linux/${{ matrix.arch }}
+          --output image-size-${{ matrix.arch }}.json
+      - name: Upload image size record
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: image-size-${{ matrix.arch }}
+          path: image-size-${{ matrix.arch }}.json
+          if-no-files-found: error
+          retention-days: 30

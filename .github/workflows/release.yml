@@ -1,0 +1,448 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  UV_VERSION: "0.11.16"
+  RELEASE_TAG: ${{ github.ref_name }}
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+
+jobs:
+  build-package:
+    name: Validate and build release package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    outputs:
+      artifact-name: ${{ steps.release-inputs.outputs.name }}
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Confirm that HEAD is the requested tag
+        shell: bash
+        run: |
+          tag_commit="$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")"
+          head_commit="$(git rev-parse HEAD)"
+          test "${tag_commit}" = "${head_commit}"
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.14"
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Verify tag, versions, and changelog
+        run: python scripts/verify_release.py "${RELEASE_TAG}"
+      - name: Set reproducible build timestamp
+        shell: bash
+        run: |
+          source_date_epoch="$(git show -s --format=%ct "${GITHUB_SHA}")"
+          echo "SOURCE_DATE_EPOCH=${source_date_epoch}" >>"${GITHUB_ENV}"
+      - name: Build wheel and source distribution once
+        run: uv build --out-dir dist
+      - name: Prepare release evidence directory
+        run: mkdir -p release-assets
+      - name: Identify wheel
+        id: wheel
+        shell: bash
+        run: |
+          wheel_path="$(find dist -maxdepth 1 -type f -name '*.whl' -print -quit)"
+          test -n "${wheel_path}"
+          echo "path=${wheel_path}" >>"${GITHUB_OUTPUT}"
+      - name: Install and verify wheel in a clean environment
+        shell: bash
+        run: |
+          python -m venv /tmp/camouflare-release-package
+          /tmp/camouflare-release-package/bin/python -m pip install "${{ steps.wheel.outputs.path }}"
+          /tmp/camouflare-release-package/bin/camouflare --version
+      - name: Generate package SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          file: ${{ steps.wheel.outputs.path }}
+          format: spdx-json
+          output-file: release-assets/camouflare-wheel.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+      - name: Generate package checksums
+        shell: bash
+        run: sha256sum dist/*.whl dist/*.tar.gz >release-assets/SHA256SUMS
+      - name: Name immutable release inputs
+        id: release-inputs
+        shell: bash
+        run: echo "name=release-inputs-${RELEASE_TAG}-${GITHUB_RUN_ATTEMPT}" >>"${GITHUB_OUTPUT}"
+      - name: Upload immutable release inputs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.release-inputs.outputs.name }}
+          path: |
+            dist/
+            release-assets/
+          if-no-files-found: error
+          retention-days: 30
+
+  release-unit:
+    name: Release unit tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install dependencies
+        run: uv sync --frozen --group dev
+      - name: Run unit tests
+        run: uv run python -m pytest tests --ignore=tests/integration --ignore=tests/soak -q
+
+  release-quality:
+    name: Release lint, types, and coverage
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.14"
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install dependencies
+        run: uv sync --frozen --group dev
+      - name: Lint and format check
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+      - name: Type check
+        run: uv run --with pyright==1.1.411 pyright camouflare
+      - name: Enforce coverage floor
+        run: >-
+          uv run --with pytest-cov==7.1.0 python -m pytest tests
+          --ignore=tests/integration --ignore=tests/soak
+          --cov=camouflare --cov-report=term-missing --cov-fail-under=85 -q
+
+  release-browser:
+    name: Release real-browser integration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.14"
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install dependencies and Camoufox
+        run: |
+          uv sync --frozen --group dev
+          uv run camoufox fetch
+          uv run playwright install-deps firefox
+      - name: Run deterministic integration suite
+        env:
+          CAMOUFLARE_RUN_BROWSER_TESTS: "1"
+        run: uv run python -m pytest tests/integration -q
+
+  release-gate:
+    name: Release security gate (${{ matrix.arch }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Render active security exceptions
+        run: >-
+          python3 scripts/render_security_allowlist.py
+          --source .github/security-allowlist.json
+          --output .github/.trivyignore.generated
+      - name: Scan source, dependencies, secrets, and configuration
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,misconfig,secret
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          ignore-unfixed: "false"
+          trivyignores: .github/.trivyignore.generated
+          format: table
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Build release candidate image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/${{ matrix.arch }}
+          load: true
+          push: false
+          tags: camouflare:release-gate-${{ matrix.arch }}
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=release-image-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=release-image-${{ matrix.arch }}
+      - name: Run container smoke before publication
+        run: bash scripts/container_smoke.sh camouflare:release-gate-${{ matrix.arch }}
+      - name: Scan release candidate image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: camouflare:release-gate-${{ matrix.arch }}
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          ignore-unfixed: "false"
+          trivyignores: .github/.trivyignore.generated
+          format: table
+
+  publish:
+    name: Publish PyPI and multi-arch image
+    needs: [build-package, release-unit, release-quality, release-browser, release-gate]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    environment:
+      name: release
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.14"
+      - name: Download immutable release inputs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.build-package.outputs.artifact-name }}
+          path: .
+      - name: Verify downloaded checksums
+        run: sha256sum --check release-assets/SHA256SUMS
+      - name: Identify wheel
+        id: wheel
+        shell: bash
+        run: |
+          wheel_path="$(find dist -maxdepth 1 -type f -name '*.whl' -print -quit)"
+          test -n "${wheel_path}"
+          echo "path=${wheel_path}" >>"${GITHUB_OUTPUT}"
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Confirm the protected tag still identifies this commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          remote_commit="$({
+            curl --fail --silent --show-error \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/commits/${RELEASE_TAG}"
+          } | python3 -c 'import json, sys; print(json.load(sys.stdin)["sha"])')"
+          test "${remote_commit}" = "${GITHUB_SHA}"
+      - name: Inspect immutable release destinations
+        id: destinations
+        run: >-
+          python3 scripts/check_release_destinations.py
+          --tag "${RELEASE_TAG}"
+          --image "${IMAGE_NAME}"
+          --dist-dir dist
+          --github-output
+      - name: Attest package build provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: |
+            dist/*.whl
+            dist/*.tar.gz
+      - name: Attest package SBOM
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-path: ${{ steps.wheel.outputs.path }}
+          sbom-path: release-assets/camouflare-wheel.spdx.json
+      - name: Derive image metadata
+        id: metadata
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          flavor: latest=false
+          tags: type=semver,pattern={{version}},value=${{ env.RELEASE_TAG }}
+      - name: Build and push a temporary multi-arch candidate
+        if: steps.destinations.outputs.image_exists != 'true'
+        id: candidate
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.IMAGE_NAME }}:build-${{ github.run_id }}-${{ github.run_attempt }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          provenance: mode=max
+          sbom: true
+          cache-from: |
+            type=gha,scope=release-image-amd64
+            type=gha,scope=release-image-arm64
+          cache-to: type=gha,mode=max,scope=release-image-publish
+      - name: Resolve the exact image index
+        id: image
+        shell: bash
+        env:
+          BUILT_DIGEST: ${{ steps.candidate.outputs.digest }}
+          EXISTING_DIGEST: ${{ steps.destinations.outputs.image_digest }}
+          IMAGE_EXISTS: ${{ steps.destinations.outputs.image_exists }}
+        run: |
+          if [[ "${IMAGE_EXISTS}" == "true" ]]; then
+            digest="${EXISTING_DIGEST}"
+          else
+            digest="${BUILT_DIGEST}"
+          fi
+          [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "digest=${digest}" >>"${GITHUB_OUTPUT}"
+      - name: Render active security exceptions
+        run: >-
+          python3 scripts/render_security_allowlist.py
+          --source .github/security-allowlist.json
+          --output .github/.trivyignore.generated
+      - name: Record candidate platform manifests and sizes
+        id: manifests
+        run: >-
+          python3 scripts/report_image_sizes.py
+          "${IMAGE_NAME}@${{ steps.image.outputs.digest }}"
+          --output release-assets/image-sizes.json
+          --github-output
+      - name: Smoke exact linux/amd64 candidate
+        run: >-
+          bash scripts/container_smoke.sh
+          "${IMAGE_NAME}@${{ steps.manifests.outputs.amd64_digest }}"
+      - name: Smoke exact linux/arm64 candidate
+        run: >-
+          bash scripts/container_smoke.sh
+          "${IMAGE_NAME}@${{ steps.manifests.outputs.arm64_digest }}"
+      - name: Verify image revision labels
+        shell: bash
+        env:
+          AMD64_DIGEST: ${{ steps.manifests.outputs.amd64_digest }}
+          ARM64_DIGEST: ${{ steps.manifests.outputs.arm64_digest }}
+          EXPECTED_REVISION: ${{ github.sha }}
+        run: |
+          for platform_digest in "linux/amd64:${AMD64_DIGEST}" "linux/arm64:${ARM64_DIGEST}"; do
+            platform="${platform_digest%%:*}"
+            digest="${platform_digest#*:}"
+            reference="${IMAGE_NAME}@${digest}"
+            docker pull --platform "${platform}" "${reference}"
+            revision="$(docker image inspect "${reference}" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')"
+            test "${revision}" = "${EXPECTED_REVISION}"
+          done
+      - name: Scan exact linux/amd64 candidate
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}@${{ steps.manifests.outputs.amd64_digest }}
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          ignore-unfixed: "false"
+          trivyignores: .github/.trivyignore.generated
+          format: table
+      - name: Scan exact linux/arm64 candidate
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}@${{ steps.manifests.outputs.arm64_digest }}
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          ignore-unfixed: "false"
+          trivyignores: .github/.trivyignore.generated
+          format: table
+      - name: Upload release evidence before publication
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-evidence-${{ env.RELEASE_TAG }}-${{ github.run_attempt }}
+          path: |
+            release-assets/
+            dist/
+          if-no-files-found: error
+          retention-days: 90
+      - name: Promote the scanned index to the immutable release tag
+        if: steps.destinations.outputs.image_exists != 'true'
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ steps.metadata.outputs.tags }}
+          SOURCE_IMAGE: ${{ env.IMAGE_NAME }}@${{ steps.image.outputs.digest }}
+        run: docker buildx imagetools create --tag "${IMAGE_TAG}" "${SOURCE_IMAGE}"
+      - name: Attest published image provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-name: ${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true
+      - name: Publish to PyPI with trusted publishing
+        if: steps.destinations.outputs.pypi_complete != 'true'
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        with:
+          packages-dir: dist/
+          verify-metadata: true
+          skip-existing: true
+          attestations: true

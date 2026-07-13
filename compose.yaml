@@ -1,0 +1,24 @@
+services:
+  camouflare:
+    build: .
+    image: ${CAMOUFLARE_IMAGE:-ghcr.io/mehmetcan/camouflare:1.0.0}
+    ports:
+      - "127.0.0.1:8191:8191"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    shm_size: "2gb"
+    mem_limit: "4g"
+    pids_limit: 512
+    stop_grace_period: 45s
+    environment:
+      LOG_LEVEL: INFO
+      LOG_FORMAT: text
+      CAMOUFLARE_API_TOKEN: ${CAMOUFLARE_API_TOKEN:?Set CAMOUFLARE_API_TOKEN}
+      HEADLESS: virtual
+      CAMOUFOX_GEOIP: "false"
+      POOL_MIN_BROWSERS: "2"
+      POOL_MAX_BROWSERS: "2"
+      POOL_MAX_CONTEXTS_PER_BROWSER: "2"
+      POOL_ACQUIRE_TIMEOUT_MS: "10000"
