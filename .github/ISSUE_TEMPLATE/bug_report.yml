@@ -1,0 +1,44 @@
+name: Bug report
+description: Report a Camouflare defect without sharing sensitive target or credential data.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include real credentials, private proxy details, session cookies, sensitive screenshots, or target-specific bypass instructions.
+        Requests to bypass a specific third-party site's access controls are out of scope.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Describe the observed problem and expected behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Minimal reproduction
+      description: Provide sanitized steps, request payloads, and logs.
+      placeholder: |
+        1. Start Camouflare with ...
+        2. Send ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include OS, Python version, Docker/runtime details, and Camouflare version or commit.
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety checklist
+      options:
+        - label: I removed real credentials, proxy details, session cookies, and sensitive screenshots.
+          required: true
+        - label: This report is not asking for help bypassing a specific third-party site's access controls.
+          required: true

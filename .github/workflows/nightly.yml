@@ -1,0 +1,149 @@
+name: Nightly browser validation
+
+on:
+  schedule:
+    - cron: "17 1 * * *"
+  workflow_dispatch:
+    inputs:
+      smoke_url:
+        description: Optional operator-owned URL for the challenge smoke
+        required: false
+        type: string
+      smoke_expect:
+        description: Optional text required in the challenge-smoke response
+        required: false
+        type: string
+
+concurrency:
+  group: nightly-browser-validation
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  UV_VERSION: "0.11.16"
+
+jobs:
+  linux-browser:
+    name: Full Linux browser integration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.14"
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install dependencies and Camoufox
+        run: |
+          uv sync --frozen --group dev
+          uv run camoufox fetch
+          uv run playwright install-deps firefox
+      - name: Run deterministic integration suite
+        env:
+          CAMOUFLARE_RUN_BROWSER_TESTS: "1"
+        run: uv run python -m pytest tests/integration -q
+
+  macos-source:
+    name: macOS source and browser smoke
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.14"
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install dependencies and Camoufox
+        run: |
+          uv sync --frozen --group dev
+          uv run camoufox fetch
+      - name: Run source tests
+        run: uv run python -m pytest tests --ignore=tests/integration --ignore=tests/soak -q
+      - name: Run deterministic real-browser smoke
+        env:
+          CAMOUFLARE_RUN_BROWSER_TESTS: "1"
+        run: uv run python -m pytest tests/integration/test_real_browser.py -q
+
+  soak:
+    name: One-hour real-browser soak
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.14"
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install dependencies and Camoufox
+        run: |
+          uv sync --frozen --group dev
+          uv run camoufox fetch
+          uv run playwright install-deps firefox
+      - name: Run 1,000-request soak for one hour
+        env:
+          CAMOUFLARE_RUN_SOAK: "1"
+          CAMOUFLARE_SOAK_REQUESTS: "1000"
+          CAMOUFLARE_SOAK_DURATION_SECONDS: "3600"
+          CAMOUFLARE_SOAK_MAX_RSS_GROWTH_PERCENT: "15"
+        run: uv run python -m pytest tests/soak/test_browser_soak.py -q
+
+  external-challenge:
+    name: Opt-in operator URL smoke
+    if: ${{ inputs.smoke_url != '' || vars.SMOKE_URL != '' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.14"
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install dependencies and Camoufox
+        run: |
+          uv sync --frozen --group dev
+          uv run camoufox fetch
+          uv run playwright install-deps firefox
+      - name: Run challenge-enabled browser smoke
+        env:
+          CHALLENGE_SOLVER: click
+          SMOKE_URL: ${{ inputs.smoke_url || vars.SMOKE_URL }}
+          SMOKE_EXPECT: ${{ inputs.smoke_expect || vars.SMOKE_EXPECT }}
+        run: uv run python scripts/external_browser_smoke.py
