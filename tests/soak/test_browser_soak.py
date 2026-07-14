@@ -72,11 +72,14 @@ class SoakConfig:
         return cls(
             requests=_positive_int("CAMOUFLARE_SOAK_REQUESTS", 1_000),
             duration_seconds=_non_negative_float("CAMOUFLARE_SOAK_DURATION_SECONDS", 3_600),
-            warmup_requests=_positive_int("CAMOUFLARE_SOAK_WARMUP_REQUESTS", 25),
+            # Firefox lazily initializes process-level caches and descriptors across
+            # early contexts. Establish a steady-state baseline before measuring
+            # long-run resource growth.
+            warmup_requests=_positive_int("CAMOUFLARE_SOAK_WARMUP_REQUESTS", 100),
             max_rss_growth_percent=_non_negative_float(
                 "CAMOUFLARE_SOAK_MAX_RSS_GROWTH_PERCENT", 15
             ),
-            settle_seconds=_non_negative_float("CAMOUFLARE_SOAK_SETTLE_SECONDS", 2),
+            settle_seconds=_non_negative_float("CAMOUFLARE_SOAK_SETTLE_SECONDS", 5),
             request_timeout_ms=_positive_int("CAMOUFLARE_SOAK_REQUEST_TIMEOUT_MS", 15_000),
         )
 
