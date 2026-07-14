@@ -228,7 +228,6 @@ def make_offline_camoufox_factory() -> BrowserFactory:
         target_os = "macos" if platform.system() == "Darwin" else "linux"
         manager = AsyncCamoufox(
             os=target_os,
-            geoip=False,
             headless=True,
             humanize=False,
             i_know_what_im_doing=True,

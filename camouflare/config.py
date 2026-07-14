@@ -71,7 +71,6 @@ class Settings:
         default_factory=lambda: os.getenv("CAMOUFLARE_API_TOKEN")
     )
     headless: str | bool = field(default_factory=_headless_env)
-    camoufox_geoip: bool = field(default_factory=lambda: _bool_env("CAMOUFOX_GEOIP", False))
     proxy_url: str | None = field(
         default_factory=lambda: os.getenv("PROXY_URL") or os.getenv("PROXY_SERVER")
     )

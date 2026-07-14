@@ -35,6 +35,8 @@ def test_readme_documents_guarded_default_solver() -> None:
     assert "python -m pip install ." in readme
     assert 'python -m pip install "camouflare==1.0.0"' not in readme
     assert "docker compose up --build" in readme
+    assert "CAMOUFOX_GEOIP" not in readme
+    assert "CAMOUFOX_GEOIP" not in compose
 
 
 def test_documentation_html_matches_guarded_default_solver() -> None:
@@ -50,6 +52,7 @@ def test_documentation_html_matches_guarded_default_solver() -> None:
     assert "change-me" not in DOCUMENTATION_HTML
     assert "enabled explicitly with <code>CHALLENGE_SOLVER=click</code>" in DOCUMENTATION_HTML
     assert "out of scope for this project" in DOCUMENTATION_HTML
+    assert "CAMOUFOX_GEOIP" not in DOCUMENTATION_HTML
 
 
 def test_open_source_metadata_files_are_present() -> None:
@@ -76,6 +79,8 @@ def test_pyproject_includes_public_package_metadata() -> None:
     assert metadata["maintainers"] == [{"name": "Mehmetcan"}]
     assert metadata["urls"]["Repository"] == ("https://github.com/mehmetcansahin/camouflare")
     assert "License :: OSI Approved :: Apache Software License" not in metadata["classifiers"]
+    assert "camoufox>=0.4,<0.5" in metadata["dependencies"]
+    assert not any(dependency.startswith("camoufox[") for dependency in metadata["dependencies"])
 
 
 def test_public_files_use_canonical_repository_owner() -> None:
@@ -136,16 +141,14 @@ def test_github_actions_avoid_anonymous_camoufox_release_api_calls() -> None:
         workflow = workflows[workflow_name]
         assert "camoufox fetch" not in workflow
         assert "gh api repos/daijro/camoufox/releases" in workflow
-        assert "gh api repos/P3TERX/GeoLite.mmdb/releases" in workflow
+        assert "P3TERX/GeoLite.mmdb" not in workflow
+        assert "geolite_releases" not in workflow
         assert "scripts/fetch_camoufox.py" in workflow
 
     for workflow_name in ("ci.yml", "release.yml"):
         assert (
             "camoufox_releases=${{ runner.temp }}/camoufox-releases.json"
             in workflows[workflow_name]
-        )
-        assert (
-            "geolite_releases=${{ runner.temp }}/geolite-releases.json" in workflows[workflow_name]
         )
 
 

@@ -97,7 +97,6 @@ requires `CAMOUFLARE_API_TOKEN`. Send either `Authorization: Bearer <token>` or
 | `LOG_LEVEL` | `INFO` | Python logging level. |
 | `CAMOUFLARE_API_TOKEN` | unset | API token required for every endpoint except `/health`; optional only for loopback binds. |
 | `HEADLESS` | Linux: `virtual`; other OSes: `true` | Camoufox mode. Accepts `true`, `false`, or `virtual`; `virtual` uses Xvfb and is Linux-only. |
-| `CAMOUFOX_GEOIP` | `false` | Enable Camoufox IP geolocation discovery. Disabled by default so local and CI browser startup has no external-IP lookup dependency. |
 | `PROXY_URL` / `PROXY_SERVER` | unset | Default proxy URL. |
 | `PROXY_USERNAME` | unset | Default proxy username. |
 | `PROXY_PASSWORD` | unset | Default proxy password. |

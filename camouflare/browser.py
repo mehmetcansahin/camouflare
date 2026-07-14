@@ -99,7 +99,6 @@ def make_camoufox_browser_factory(settings: Settings) -> BrowserFactory:
         from camoufox.async_api import AsyncCamoufox
 
         launch_options: dict[str, Any] = {
-            "geoip": settings.camoufox_geoip,
             "headless": settings.headless,
             "humanize": True,
             "i_know_what_im_doing": True,
