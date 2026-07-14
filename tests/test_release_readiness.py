@@ -126,6 +126,25 @@ def test_github_actions_invoke_pytest_as_a_module() -> None:
                 )
 
 
+def test_github_actions_avoid_anonymous_camoufox_release_api_calls() -> None:
+    workflows = {
+        path.name: path.read_text(encoding="utf-8")
+        for path in (ROOT / ".github" / "workflows").glob("*.yml")
+    }
+
+    for workflow_name in ("ci.yml", "nightly.yml", "release.yml"):
+        workflow = workflows[workflow_name]
+        assert "camoufox fetch" not in workflow
+        assert "gh api repos/daijro/camoufox/releases" in workflow
+        assert "scripts/fetch_camoufox.py" in workflow
+
+    for workflow_name in ("ci.yml", "release.yml"):
+        assert (
+            "camoufox_releases=${{ runner.temp }}/camoufox-releases.json"
+            in workflows[workflow_name]
+        )
+
+
 def test_all_github_actions_are_pinned_to_full_commit_shas() -> None:
     for workflow_path in (ROOT / ".github" / "workflows").glob("*.yml"):
         for line in workflow_path.read_text(encoding="utf-8").splitlines():

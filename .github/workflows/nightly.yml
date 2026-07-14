@@ -44,10 +44,16 @@ jobs:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
           cache-dependency-glob: uv.lock
+      - name: Fetch authenticated Camoufox release metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api repos/daijro/camoufox/releases > "${RUNNER_TEMP}/camoufox-releases.json"
       - name: Install dependencies and Camoufox
+        env:
+          CAMOUFLARE_CAMOUFOX_RELEASES_FILE: ${{ runner.temp }}/camoufox-releases.json
         run: |
           uv sync --frozen --group dev
-          uv run camoufox fetch
+          uv run python scripts/fetch_camoufox.py
           uv run playwright install-deps firefox
       - name: Run deterministic integration suite
         env:
@@ -73,10 +79,16 @@ jobs:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
           cache-dependency-glob: uv.lock
+      - name: Fetch authenticated Camoufox release metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api repos/daijro/camoufox/releases > "${RUNNER_TEMP}/camoufox-releases.json"
       - name: Install dependencies and Camoufox
+        env:
+          CAMOUFLARE_CAMOUFOX_RELEASES_FILE: ${{ runner.temp }}/camoufox-releases.json
         run: |
           uv sync --frozen --group dev
-          uv run camoufox fetch
+          uv run python scripts/fetch_camoufox.py
       - name: Run source tests
         run: uv run python -m pytest tests --ignore=tests/integration --ignore=tests/soak -q
       - name: Run deterministic real-browser smoke
@@ -103,10 +115,16 @@ jobs:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
           cache-dependency-glob: uv.lock
+      - name: Fetch authenticated Camoufox release metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api repos/daijro/camoufox/releases > "${RUNNER_TEMP}/camoufox-releases.json"
       - name: Install dependencies and Camoufox
+        env:
+          CAMOUFLARE_CAMOUFOX_RELEASES_FILE: ${{ runner.temp }}/camoufox-releases.json
         run: |
           uv sync --frozen --group dev
-          uv run camoufox fetch
+          uv run python scripts/fetch_camoufox.py
           uv run playwright install-deps firefox
       - name: Run 1,000-request soak for one hour
         env:
@@ -140,10 +158,16 @@ jobs:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
           cache-dependency-glob: uv.lock
+      - name: Fetch authenticated Camoufox release metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api repos/daijro/camoufox/releases > "${RUNNER_TEMP}/camoufox-releases.json"
       - name: Install dependencies and Camoufox
+        env:
+          CAMOUFLARE_CAMOUFOX_RELEASES_FILE: ${{ runner.temp }}/camoufox-releases.json
         run: |
           uv sync --frozen --group dev
-          uv run camoufox fetch
+          uv run python scripts/fetch_camoufox.py
           uv run playwright install-deps firefox
       - name: Run challenge-enabled browser smoke
         env:

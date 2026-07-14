@@ -14,10 +14,41 @@ import pytest
 from scripts import (
     check_image_size,
     check_release_destinations,
+    fetch_camoufox,
     render_security_allowlist,
     report_image_sizes,
     verify_release,
 )
+
+
+def test_camoufox_release_metadata_wrapper_avoids_anonymous_api_request() -> None:
+    calls: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
+    metadata = [{"tag_name": "v-test", "assets": []}]
+
+    def original_get(url: str, *args: object, **kwargs: object) -> object:
+        calls.append((url, args, kwargs))
+        return object()
+
+    wrapped_get = fetch_camoufox._metadata_aware_get(original_get, metadata)
+    response = wrapped_get(fetch_camoufox.CAMOUFOX_RELEASES_API, timeout=20)
+
+    response.raise_for_status()
+    assert response.json() == metadata
+    assert calls == []
+
+    fallback = wrapped_get("https://example.com/asset.zip", timeout=30)
+    assert fallback is not response
+    assert calls == [("https://example.com/asset.zip", (), {"timeout": 30})]
+
+
+def test_camoufox_release_metadata_file_must_be_an_array(
+    tmp_path: Path,
+) -> None:
+    metadata_path = tmp_path / "releases.json"
+    metadata_path.write_text('{"message":"rate limited"}', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="JSON array of objects"):
+        fetch_camoufox._load_release_metadata(metadata_path)
 
 
 def test_release_verifier_accepts_exact_tag_and_rejects_mismatch(
