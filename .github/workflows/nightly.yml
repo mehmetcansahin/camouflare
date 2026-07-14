@@ -114,6 +114,8 @@ jobs:
           CAMOUFLARE_SOAK_REQUESTS: "1000"
           CAMOUFLARE_SOAK_DURATION_SECONDS: "3600"
           CAMOUFLARE_SOAK_WARMUP_REQUESTS: "100"
+          CAMOUFLARE_SOAK_BROWSER_MAX_USES: "200"
+          CAMOUFLARE_SOAK_REQUEST_TIMEOUT_MS: "60000"
           CAMOUFLARE_SOAK_SETTLE_SECONDS: "5"
           CAMOUFLARE_SOAK_MAX_RSS_GROWTH_PERCENT: "15"
         run: uv run python -m pytest tests/soak/test_browser_soak.py -q

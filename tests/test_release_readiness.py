@@ -151,6 +151,8 @@ def test_ci_and_nightly_cover_real_browser_container_and_soak_gates() -> None:
     assert 'CAMOUFLARE_SOAK_REQUESTS: "1000"' in nightly
     assert 'CAMOUFLARE_SOAK_DURATION_SECONDS: "3600"' in nightly
     assert 'CAMOUFLARE_SOAK_WARMUP_REQUESTS: "100"' in nightly
+    assert 'CAMOUFLARE_SOAK_BROWSER_MAX_USES: "200"' in nightly
+    assert 'CAMOUFLARE_SOAK_REQUEST_TIMEOUT_MS: "60000"' in nightly
     assert 'CAMOUFLARE_SOAK_SETTLE_SECONDS: "5"' in nightly
     assert "runs-on: macos-15" in nightly
     assert "SMOKE_URL" in nightly
