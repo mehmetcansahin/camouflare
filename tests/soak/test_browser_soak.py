@@ -6,7 +6,7 @@ import inspect
 import os
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -63,6 +63,7 @@ class SoakConfig:
     requests: int
     duration_seconds: float
     warmup_requests: int
+    browser_max_uses: int
     max_rss_growth_percent: float
     settle_seconds: float
     request_timeout_ms: int
@@ -76,11 +77,15 @@ class SoakConfig:
             # early contexts. Establish a steady-state baseline before measuring
             # long-run resource growth.
             warmup_requests=_positive_int("CAMOUFLARE_SOAK_WARMUP_REQUESTS", 100),
+            browser_max_uses=_positive_int("CAMOUFLARE_SOAK_BROWSER_MAX_USES", 200),
             max_rss_growth_percent=_non_negative_float(
                 "CAMOUFLARE_SOAK_MAX_RSS_GROWTH_PERCENT", 15
             ),
             settle_seconds=_non_negative_float("CAMOUFLARE_SOAK_SETTLE_SECONDS", 5),
-            request_timeout_ms=_positive_int("CAMOUFLARE_SOAK_REQUEST_TIMEOUT_MS", 15_000),
+            # Browser recycling includes a full process shutdown and relaunch. Use
+            # the public API default so the resource gate does not become a stricter
+            # startup-latency test at lifecycle boundaries.
+            request_timeout_ms=_positive_int("CAMOUFLARE_SOAK_REQUEST_TIMEOUT_MS", 60_000),
         )
 
 
@@ -170,9 +175,21 @@ def _assert_success(response: Response) -> None:
 async def test_real_browser_memory_and_contexts_stay_bounded() -> None:
     config = SoakConfig.from_env()
     server = LocalHttpServer.start()
+    browser_factory = make_offline_camoufox_factory()
+    browser_launches = 0
+
+    async def counted_browser_factory() -> Any:
+        nonlocal browser_launches
+        browser_launches += 1
+        return await browser_factory()
+
+    settings = replace(
+        make_browser_test_settings(),
+        browser_max_uses=config.browser_max_uses,
+    )
     app = create_app(
-        settings=make_browser_test_settings(),
-        browser_factory=make_offline_camoufox_factory(),
+        settings=settings,
+        browser_factory=counted_browser_factory,
         lifespan_enabled=False,
     )
     await app.state.pool.start()
@@ -196,6 +213,7 @@ async def test_real_browser_memory_and_contexts_stay_bounded() -> None:
             baseline_rss = _process_tree_rss_bytes()
             baseline_fds = _process_tree_open_fds()
             baseline_pool = app.state.pool.snapshot()
+            baseline_browser_launches = browser_launches
             assert baseline_rss > 0
             assert baseline_pool.active_contexts == 0
 
@@ -218,6 +236,10 @@ async def test_real_browser_memory_and_contexts_stay_bounded() -> None:
 
             assert elapsed >= config.duration_seconds
             assert server.request_count >= config.warmup_requests + config.requests
+            assert browser_launches > baseline_browser_launches, (
+                "the soak measurement did not exercise browser recycling "
+                f"(browser_max_uses={config.browser_max_uses})"
+            )
             assert await _active_context_count(app.state.pool) == 0
             assert final_pool.browser_slots == baseline_pool.browser_slots
             assert final_pool.active_contexts == baseline_pool.active_contexts
