@@ -1,7 +1,7 @@
 services:
   camouflare:
     build: .
-    image: ${CAMOUFLARE_IMAGE:-ghcr.io/mehmetcan/camouflare:1.0.0}
+    image: ${CAMOUFLARE_IMAGE:-ghcr.io/mehmetcansahin/camouflare:1.0.0}
     ports:
       - "127.0.0.1:8191:8191"
     cap_drop:

@@ -17,7 +17,7 @@ version. Do not overwrite an immutable version tag to make it point at different
 Example using placeholders that must be replaced with reviewed values:
 
 ```bash
-export CAMOUFLARE_IMAGE='ghcr.io/mehmetcan/camouflare@sha256:KNOWN_GOOD_INDEX_DIGEST'
+export CAMOUFLARE_IMAGE='ghcr.io/mehmetcansahin/camouflare@sha256:KNOWN_GOOD_INDEX_DIGEST'
 docker compose pull
 docker compose up -d
 ```

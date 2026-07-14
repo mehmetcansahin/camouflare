@@ -35,9 +35,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/mehmetcan/camouflare"
-Repository = "https://github.com/mehmetcan/camouflare"
-Issues = "https://github.com/mehmetcan/camouflare/issues"
+Homepage = "https://github.com/mehmetcansahin/camouflare"
+Repository = "https://github.com/mehmetcansahin/camouflare"
+Issues = "https://github.com/mehmetcansahin/camouflare/issues"
 
 [project.scripts]
 camouflare = "camouflare.__main__:main"
