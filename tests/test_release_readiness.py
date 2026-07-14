@@ -30,7 +30,8 @@ def test_readme_documents_guarded_default_solver() -> None:
     assert "change-me" not in compose
     assert "Use Camouflare only on systems you own" in readme
     assert "does not accept requests to bypass a specific third-party" in readme
-    assert "has not yet been published to PyPI or GHCR" in readme
+    assert "is not published to PyPI" in readme
+    assert "has not yet been published to GHCR" in readme
     assert "git clone https://github.com/mehmetcansahin/camouflare.git" in readme
     assert "python -m pip install ." in readme
     assert 'python -m pip install "camouflare==1.0.0"' not in readme
@@ -196,4 +197,5 @@ def test_release_is_immutable_approval_gated_and_multi_arch() -> None:
     assert "severity: HIGH,CRITICAL" in release
     assert "attest-build-provenance" in release
     assert "sbom" in release.lower()
-    assert "gh-action-pypi-publish" in release
+    assert "gh-action-pypi-publish" not in release
+    assert "pypi_complete" not in release

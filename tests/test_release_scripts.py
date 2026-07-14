@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-import hashlib
-import io
 import json
 import subprocess
 import sys
 from datetime import date, timedelta
 from pathlib import Path
-from urllib.error import HTTPError
 
 import pytest
 
@@ -193,40 +190,6 @@ def test_image_report_requires_both_release_platforms(
         report_image_sizes.main()
 
 
-def test_release_destination_pypi_check_distinguishes_exists_missing_and_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class Response:
-        status = 200
-
-        def __enter__(self) -> Response:
-            return self
-
-        def __exit__(self, *_: object) -> None:
-            return None
-
-    monkeypatch.setattr(check_release_destinations, "urlopen", lambda *_args, **_kwargs: Response())
-    assert check_release_destinations._pypi_version_exists("camouflare", "1.0.0") is True
-
-    def raise_http(code: int) -> None:
-        raise HTTPError("https://pypi.invalid", code, "error", hdrs=None, fp=None)
-
-    monkeypatch.setattr(
-        check_release_destinations,
-        "urlopen",
-        lambda *_args, **_kwargs: raise_http(404),
-    )
-    assert check_release_destinations._pypi_version_exists("camouflare", "1.0.0") is False
-
-    monkeypatch.setattr(
-        check_release_destinations,
-        "urlopen",
-        lambda *_args, **_kwargs: raise_http(500),
-    )
-    with pytest.raises(RuntimeError, match="HTTP 500"):
-        check_release_destinations._pypi_version_exists("camouflare", "1.0.0")
-
-
 @pytest.mark.parametrize(
     ("result", "expected"),
     [
@@ -265,56 +228,21 @@ def test_release_destination_image_check_rejects_ambiguous_failure(
         check_release_destinations._image_tag_exists("ghcr.io/example/image:1.0.0")
 
 
-def test_pypi_distribution_probe_reads_filenames_and_hashes(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    payload = {
-        "urls": [
-            {
-                "filename": "camouflare-1.0.0-py3-none-any.whl",
-                "digests": {"sha256": "a" * 64},
-            },
-            {
-                "filename": "camouflare-1.0.0.tar.gz",
-                "digests": {"sha256": "b" * 64},
-            },
-        ]
-    }
-    monkeypatch.setattr(
-        check_release_destinations,
-        "urlopen",
-        lambda *_args, **_kwargs: io.BytesIO(json.dumps(payload).encode()),
-    )
-
-    assert check_release_destinations._pypi_distributions("camouflare", "1.0.0") == {
-        "camouflare-1.0.0-py3-none-any.whl": "a" * 64,
-        "camouflare-1.0.0.tar.gz": "b" * 64,
-    }
-
-
-def test_release_destination_accepts_only_a_matching_pypi_subset(
+@pytest.mark.parametrize("digest", [None, f"sha256:{'a' * 64}"])
+def test_release_destination_writes_ghcr_state(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    digest: str | None,
 ) -> None:
-    dist = tmp_path / "dist"
-    dist.mkdir()
-    wheel = dist / "camouflare-1.0.0-py3-none-any.whl"
-    sdist = dist / "camouflare-1.0.0.tar.gz"
-    wheel.write_bytes(b"wheel")
-    sdist.write_bytes(b"sdist")
-    published_subset = {wheel.name: hashlib.sha256(wheel.read_bytes()).hexdigest()}
     github_output = tmp_path / "github-output"
+    references: list[str] = []
     monkeypatch.setenv("GITHUB_OUTPUT", str(github_output))
-    monkeypatch.setattr(
-        check_release_destinations,
-        "_pypi_distributions",
-        lambda _project, _version: published_subset,
-    )
-    monkeypatch.setattr(
-        check_release_destinations,
-        "_image_tag_digest",
-        lambda _reference: None,
-    )
+
+    def image_digest(reference: str) -> str | None:
+        references.append(reference)
+        return digest
+
+    monkeypatch.setattr(check_release_destinations, "_image_tag_digest", image_digest)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -324,21 +252,16 @@ def test_release_destination_accepts_only_a_matching_pypi_subset(
             "v1.0.0",
             "--image",
             "ghcr.io/example/camouflare",
-            "--dist-dir",
-            str(dist),
             "--github-output",
         ],
     )
 
     assert check_release_destinations.main() == 0
-    assert "pypi_complete=false" in github_output.read_text(encoding="utf-8")
-
-    monkeypatch.setattr(
-        check_release_destinations,
-        "_pypi_distributions",
-        lambda _project, _version: {wheel.name: "0" * 64},
-    )
-    assert check_release_destinations.main() == 1
+    assert references == ["ghcr.io/example/camouflare:1.0.0"]
+    output = github_output.read_text(encoding="utf-8")
+    assert f"image_exists={str(digest is not None).lower()}" in output
+    assert f"image_digest={digest or ''}" in output
+    assert "pypi" not in output.lower()
 
 
 def test_image_tag_digest_parses_exact_index_and_rejects_missing_digest(

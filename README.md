@@ -18,9 +18,10 @@ site's access controls.
 
 ## Installation
 
-Camouflare 1.0.0 has not yet been published to PyPI or GHCR. Until the first
-public release, install the current source on Linux or macOS, then fetch the
-Camoufox browser runtime:
+Camouflare is installed from source or run from GHCR; it is not published to PyPI.
+The Camouflare 1.0.0 container has not yet been published to GHCR. Until the first
+container release, install the current source on Linux or macOS, then fetch the Camoufox
+browser runtime:
 
 ```bash
 git clone https://github.com/mehmetcansahin/camouflare.git

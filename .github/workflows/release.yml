@@ -262,7 +262,7 @@ jobs:
           format: table
 
   publish:
-    name: Publish PyPI and multi-arch image
+    name: Publish multi-arch image
     needs: [build-package, release-unit, release-quality, release-browser, release-gate]
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -320,13 +320,12 @@ jobs:
               "https://api.github.com/repos/${GITHUB_REPOSITORY}/commits/${RELEASE_TAG}"
           } | python3 -c 'import json, sys; print(json.load(sys.stdin)["sha"])')"
           test "${remote_commit}" = "${GITHUB_SHA}"
-      - name: Inspect immutable release destinations
+      - name: Inspect immutable release destination
         id: destinations
         run: >-
           python3 scripts/check_release_destinations.py
           --tag "${RELEASE_TAG}"
           --image "${IMAGE_NAME}"
-          --dist-dir dist
           --github-output
       - name: Attest package build provenance
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
@@ -460,11 +459,3 @@ jobs:
           subject-name: ${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.image.outputs.digest }}
           push-to-registry: true
-      - name: Publish to PyPI with trusted publishing
-        if: steps.destinations.outputs.pypi_complete != 'true'
-        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
-        with:
-          packages-dir: dist/
-          verify-metadata: true
-          skip-existing: true
-          attestations: true

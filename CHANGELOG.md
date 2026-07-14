@@ -12,7 +12,7 @@ All notable changes to Camouflare are documented here. The project follows
 - Deterministic real-Camoufox integration tests and a one-hour browser soak test.
 - Configurable request, response, screenshot, solution, timeout, session, and shutdown limits.
 - Request correlation, structured logging, pool/session snapshots, and low-cardinality metrics.
-- PyPI and linux/amd64 plus linux/arm64 release automation with SBOMs and provenance.
+- GHCR release automation for linux/amd64 and linux/arm64 images with SBOMs and provenance.
 
 ### Changed
 
