@@ -8,7 +8,7 @@ Active Cloudflare interstitial and Turnstile handling is disabled by default. Se
 [playwright-captcha](https://pypi.org/project/playwright-captcha/)'s ClickSolver.
 
 Camouflare 1.0 targets a single-user, single-worker local service. Linux and
-macOS source installs are supported; published Docker images target Linux
+macOS source installs are supported; release container builds target Linux
 `amd64` and `arm64`. Windows and shared multi-tenant deployments are out of scope.
 
 Use Camouflare only on systems you own, administer, or have permission to test.
@@ -18,33 +18,23 @@ site's access controls.
 
 ## Installation
 
-Install the supported PyPI package on Linux or macOS, then fetch the Camoufox
-browser runtime:
+Camouflare 1.0.0 has not yet been published to PyPI or GHCR. Until the first
+public release, install the current source on Linux or macOS, then fetch the
+Camoufox browser runtime:
 
 ```bash
-python -m pip install "camouflare==1.0.0"
+git clone https://github.com/mehmetcansahin/camouflare.git
+cd camouflare
+python -m venv .venv
+. .venv/bin/activate
+python -m pip install .
 camoufox fetch
 playwright install-deps firefox  # Linux only
 camouflare --version
 camouflare
 ```
 
-The official multi-architecture container is published from the same release
-tag. A non-loopback container bind requires a token:
-
-```bash
-export CAMOUFLARE_API_TOKEN="$(openssl rand -hex 32)"
-docker run --rm \
-  --name camouflare \
-  --publish 127.0.0.1:8191:8191 \
-  --env CAMOUFLARE_API_TOKEN \
-  --cap-drop ALL \
-  --security-opt no-new-privileges \
-  --shm-size 2g \
-  --memory 4g \
-  --pids-limit 512 \
-  ghcr.io/mehmetcan/camouflare:1.0.0
-```
+For a local container build, follow the [Docker](#docker) instructions below.
 
 ## API
 
@@ -177,7 +167,7 @@ CHALLENGE_SOLVER=click uv run python -m camouflare
 ## Docker
 
 ```bash
-docker build -t camouflare .
+docker build --tag camouflare:local .
 export CAMOUFLARE_API_TOKEN="$(openssl rand -hex 32)"
 docker run --rm \
   --publish 127.0.0.1:8191:8191 \
@@ -187,12 +177,13 @@ docker run --rm \
   --shm-size 2g \
   --memory 4g \
   --pids-limit 512 \
-  camouflare
+  camouflare:local
 ```
 
-For Compose, set `CAMOUFLARE_API_TOKEN` before running `docker compose up`.
-The example `compose.yaml` intentionally fails to start when this variable is
-unset.
+For Compose, set `CAMOUFLARE_API_TOKEN` before running
+`docker compose up --build`. The example `compose.yaml` intentionally fails to
+start when this variable is unset. The explicit build keeps the pre-release
+workflow independent of an unpublished GHCR image.
 
 The Dockerfile pins Ubuntu 24.04, uses `dumb-init`, runs as a non-root user,
 builds a single runtime image, and removes build-only tools after browser assets

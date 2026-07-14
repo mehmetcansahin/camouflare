@@ -4,6 +4,9 @@ Camouflare 1.0 formalizes the project as a single-user, single-worker local serv
 and macOS source installations are supported. Published containers support linux/amd64 and
 linux/arm64; Windows is not supported.
 
+> The PyPI and GHCR commands below apply after 1.0.0 is published. Until then, follow the
+> source installation and local container instructions in the README.
+
 ## Before upgrading
 
 1. Record the current image digest or installed package version and save the existing
@@ -50,7 +53,7 @@ docker compose up -d
 The supplied Compose profile reserves 4 GiB of memory, 2 GiB of shared memory, and 512
 process IDs. It also drops Linux capabilities and enables no-new-privileges. Tune resource
 limits deliberately rather than removing the security options. It pulls
-`ghcr.io/mehmetcan/camouflare:1.0.0` by default; set `CAMOUFLARE_IMAGE` to an immutable
+`ghcr.io/mehmetcansahin/camouflare:1.0.0` by default; set `CAMOUFLARE_IMAGE` to an immutable
 digest for a pinned deployment. The retained `build: .` entry supports an explicit local
 `docker compose build` without changing the production image default.
 

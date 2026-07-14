@@ -30,6 +30,11 @@ def test_readme_documents_guarded_default_solver() -> None:
     assert "change-me" not in compose
     assert "Use Camouflare only on systems you own" in readme
     assert "does not accept requests to bypass a specific third-party" in readme
+    assert "has not yet been published to PyPI or GHCR" in readme
+    assert "git clone https://github.com/mehmetcansahin/camouflare.git" in readme
+    assert "python -m pip install ." in readme
+    assert 'python -m pip install "camouflare==1.0.0"' not in readme
+    assert "docker compose up --build" in readme
 
 
 def test_documentation_html_matches_guarded_default_solver() -> None:
@@ -69,8 +74,25 @@ def test_pyproject_includes_public_package_metadata() -> None:
     assert metadata["license-files"] == ["LICENSE"]
     assert metadata["authors"] == [{"name": "Mehmetcan"}]
     assert metadata["maintainers"] == [{"name": "Mehmetcan"}]
-    assert metadata["urls"]["Repository"] == "https://github.com/mehmetcan/camouflare"
+    assert metadata["urls"]["Repository"] == ("https://github.com/mehmetcansahin/camouflare")
     assert "License :: OSI Approved :: Apache Software License" not in metadata["classifiers"]
+
+
+def test_public_files_use_canonical_repository_owner() -> None:
+    public_files = (
+        ".github/ISSUE_TEMPLATE/config.yml",
+        "CHANGELOG.md",
+        "README.md",
+        "compose.yaml",
+        "docs/rollback.md",
+        "docs/upgrade-to-1.0.md",
+        "pyproject.toml",
+    )
+    legacy_repository = "mehmetcan" + "/camouflare"
+
+    for relative_path in public_files:
+        contents = (ROOT / relative_path).read_text(encoding="utf-8")
+        assert legacy_repository not in contents, f"{relative_path} uses the old owner"
 
 
 def test_release_version_has_one_authoritative_source() -> None:

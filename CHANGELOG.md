@@ -27,5 +27,5 @@ All notable changes to Camouflare are documented here. The project follows
 - High and critical dependency or container findings block releases unless covered by a
   reasoned, time-bounded exception.
 
-[Unreleased]: https://github.com/mehmetcan/camouflare/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/mehmetcan/camouflare/releases/tag/v1.0.0
+[Unreleased]: https://github.com/mehmetcansahin/camouflare/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/mehmetcansahin/camouflare/releases/tag/v1.0.0
