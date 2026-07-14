@@ -21,7 +21,9 @@ COPY pyproject.toml uv.lock README.md LICENSE ./
 COPY --chown=1000:1000 camouflare ./camouflare
 COPY scripts/fetch_camoufox.py ./scripts/fetch_camoufox.py
 
-RUN --mount=type=secret,id=camoufox_releases,required=false set -eux; \
+RUN --mount=type=secret,id=camoufox_releases,required=false \
+    --mount=type=secret,id=geolite_releases,required=false \
+    set -eux; \
     case "${TARGETARCH}" in \
         amd64) uv_target="x86_64-unknown-linux-gnu" ;; \
         arm64) uv_target="aarch64-unknown-linux-gnu" ;; \
@@ -47,6 +49,7 @@ RUN --mount=type=secret,id=camoufox_releases,required=false set -eux; \
     case "${python_target}" in /opt/uv-python/*) ;; *) exit 1 ;; esac && \
     /app/.venv/bin/python --version && \
     CAMOUFLARE_CAMOUFOX_RELEASES_FILE=/run/secrets/camoufox_releases \
+        CAMOUFLARE_GEOLITE_RELEASES_FILE=/run/secrets/geolite_releases \
         /app/.venv/bin/python scripts/fetch_camoufox.py && \
     /app/.venv/bin/playwright install-deps firefox && \
     uv cache clean && \

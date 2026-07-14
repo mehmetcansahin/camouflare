@@ -10,7 +10,11 @@ from pathlib import Path
 from typing import Any
 
 CAMOUFOX_RELEASES_API = "https://api.github.com/repos/daijro/camoufox/releases"
-RELEASES_FILE_ENV = "CAMOUFLARE_CAMOUFOX_RELEASES_FILE"
+GEOLITE_RELEASES_API = "https://api.github.com/repos/P3TERX/GeoLite.mmdb/releases"
+RELEASE_METADATA_FILES = {
+    CAMOUFOX_RELEASES_API: "CAMOUFLARE_CAMOUFOX_RELEASES_FILE",
+    GEOLITE_RELEASES_API: "CAMOUFLARE_GEOLITE_RELEASES_FILE",
+}
 
 
 class _ReleaseMetadataResponse:
@@ -33,25 +37,29 @@ def _load_release_metadata(path: Path) -> list[dict[str, Any]]:
 
 def _metadata_aware_get(
     original_get: Callable[..., Any],
-    release_metadata: list[dict[str, Any]],
+    release_metadata: dict[str, list[dict[str, Any]]],
 ) -> Callable[..., Any]:
     def get(url: str, *args: Any, **kwargs: Any) -> Any:
-        if url.rstrip("/") == CAMOUFOX_RELEASES_API:
-            return _ReleaseMetadataResponse(release_metadata)
+        normalized_url = url.rstrip("/")
+        if normalized_url in release_metadata:
+            return _ReleaseMetadataResponse(release_metadata[normalized_url])
         return original_get(url, *args, **kwargs)
 
     return get
 
 
 def main() -> int:
-    metadata_path = os.getenv(RELEASES_FILE_ENV)
+    release_metadata = {
+        api_url: _load_release_metadata(Path(metadata_path))
+        for api_url, env_name in RELEASE_METADATA_FILES.items()
+        if (metadata_path := os.getenv(env_name)) and Path(metadata_path).is_file()
+    }
 
     from camoufox import pkgman
     from camoufox.__main__ import cli
 
     original_get = pkgman.requests.get
-    if metadata_path and Path(metadata_path).is_file():
-        release_metadata = _load_release_metadata(Path(metadata_path))
+    if release_metadata:
         pkgman.requests.get = _metadata_aware_get(original_get, release_metadata)
 
     try:

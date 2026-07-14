@@ -23,7 +23,12 @@ from scripts import (
 
 def test_camoufox_release_metadata_wrapper_avoids_anonymous_api_request() -> None:
     calls: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
-    metadata = [{"tag_name": "v-test", "assets": []}]
+    camoufox_metadata = [{"tag_name": "v-camoufox", "assets": []}]
+    geolite_metadata = [{"tag_name": "v-geolite", "assets": []}]
+    metadata = {
+        fetch_camoufox.CAMOUFOX_RELEASES_API: camoufox_metadata,
+        fetch_camoufox.GEOLITE_RELEASES_API: geolite_metadata,
+    }
 
     def original_get(url: str, *args: object, **kwargs: object) -> object:
         calls.append((url, args, kwargs))
@@ -33,7 +38,8 @@ def test_camoufox_release_metadata_wrapper_avoids_anonymous_api_request() -> Non
     response = wrapped_get(fetch_camoufox.CAMOUFOX_RELEASES_API, timeout=20)
 
     response.raise_for_status()
-    assert response.json() == metadata
+    assert response.json() == camoufox_metadata
+    assert wrapped_get(fetch_camoufox.GEOLITE_RELEASES_API).json() == geolite_metadata
     assert calls == []
 
     fallback = wrapped_get("https://example.com/asset.zip", timeout=30)

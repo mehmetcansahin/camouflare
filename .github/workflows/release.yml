@@ -182,10 +182,13 @@ jobs:
       - name: Fetch authenticated Camoufox release metadata
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh api repos/daijro/camoufox/releases > "${RUNNER_TEMP}/camoufox-releases.json"
+        run: |
+          gh api repos/daijro/camoufox/releases > "${RUNNER_TEMP}/camoufox-releases.json"
+          gh api repos/P3TERX/GeoLite.mmdb/releases > "${RUNNER_TEMP}/geolite-releases.json"
       - name: Install dependencies and Camoufox
         env:
           CAMOUFLARE_CAMOUFOX_RELEASES_FILE: ${{ runner.temp }}/camoufox-releases.json
+          CAMOUFLARE_GEOLITE_RELEASES_FILE: ${{ runner.temp }}/geolite-releases.json
         run: |
           uv sync --frozen --group dev
           uv run python scripts/fetch_camoufox.py
@@ -232,7 +235,9 @@ jobs:
       - name: Fetch authenticated Camoufox release metadata
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh api repos/daijro/camoufox/releases > "${RUNNER_TEMP}/camoufox-releases.json"
+        run: |
+          gh api repos/daijro/camoufox/releases > "${RUNNER_TEMP}/camoufox-releases.json"
+          gh api repos/P3TERX/GeoLite.mmdb/releases > "${RUNNER_TEMP}/geolite-releases.json"
       - name: Build release candidate image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
@@ -245,6 +250,7 @@ jobs:
           sbom: false
           secret-files: |
             camoufox_releases=${{ runner.temp }}/camoufox-releases.json
+            geolite_releases=${{ runner.temp }}/geolite-releases.json
           cache-from: type=gha,scope=release-image-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=release-image-${{ matrix.arch }}
       - name: Run container smoke before publication
@@ -348,7 +354,9 @@ jobs:
         if: steps.destinations.outputs.image_exists != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh api repos/daijro/camoufox/releases > "${RUNNER_TEMP}/camoufox-releases.json"
+        run: |
+          gh api repos/daijro/camoufox/releases > "${RUNNER_TEMP}/camoufox-releases.json"
+          gh api repos/P3TERX/GeoLite.mmdb/releases > "${RUNNER_TEMP}/geolite-releases.json"
       - name: Build and push a temporary multi-arch candidate
         if: steps.destinations.outputs.image_exists != 'true'
         id: candidate
@@ -363,6 +371,7 @@ jobs:
           sbom: true
           secret-files: |
             camoufox_releases=${{ runner.temp }}/camoufox-releases.json
+            geolite_releases=${{ runner.temp }}/geolite-releases.json
           cache-from: |
             type=gha,scope=release-image-amd64
             type=gha,scope=release-image-arm64
