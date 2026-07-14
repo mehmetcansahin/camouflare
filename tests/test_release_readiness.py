@@ -136,12 +136,16 @@ def test_github_actions_avoid_anonymous_camoufox_release_api_calls() -> None:
         workflow = workflows[workflow_name]
         assert "camoufox fetch" not in workflow
         assert "gh api repos/daijro/camoufox/releases" in workflow
+        assert "gh api repos/P3TERX/GeoLite.mmdb/releases" in workflow
         assert "scripts/fetch_camoufox.py" in workflow
 
     for workflow_name in ("ci.yml", "release.yml"):
         assert (
             "camoufox_releases=${{ runner.temp }}/camoufox-releases.json"
             in workflows[workflow_name]
+        )
+        assert (
+            "geolite_releases=${{ runner.temp }}/geolite-releases.json" in workflows[workflow_name]
         )
 
 

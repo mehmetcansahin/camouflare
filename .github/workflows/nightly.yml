@@ -47,10 +47,13 @@ jobs:
       - name: Fetch authenticated Camoufox release metadata
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh api repos/daijro/camoufox/releases > "${RUNNER_TEMP}/camoufox-releases.json"
+        run: |
+          gh api repos/daijro/camoufox/releases > "${RUNNER_TEMP}/camoufox-releases.json"
+          gh api repos/P3TERX/GeoLite.mmdb/releases > "${RUNNER_TEMP}/geolite-releases.json"
       - name: Install dependencies and Camoufox
         env:
           CAMOUFLARE_CAMOUFOX_RELEASES_FILE: ${{ runner.temp }}/camoufox-releases.json
+          CAMOUFLARE_GEOLITE_RELEASES_FILE: ${{ runner.temp }}/geolite-releases.json
         run: |
           uv sync --frozen --group dev
           uv run python scripts/fetch_camoufox.py
@@ -82,10 +85,13 @@ jobs:
       - name: Fetch authenticated Camoufox release metadata
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh api repos/daijro/camoufox/releases > "${RUNNER_TEMP}/camoufox-releases.json"
+        run: |
+          gh api repos/daijro/camoufox/releases > "${RUNNER_TEMP}/camoufox-releases.json"
+          gh api repos/P3TERX/GeoLite.mmdb/releases > "${RUNNER_TEMP}/geolite-releases.json"
       - name: Install dependencies and Camoufox
         env:
           CAMOUFLARE_CAMOUFOX_RELEASES_FILE: ${{ runner.temp }}/camoufox-releases.json
+          CAMOUFLARE_GEOLITE_RELEASES_FILE: ${{ runner.temp }}/geolite-releases.json
         run: |
           uv sync --frozen --group dev
           uv run python scripts/fetch_camoufox.py
@@ -118,10 +124,13 @@ jobs:
       - name: Fetch authenticated Camoufox release metadata
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh api repos/daijro/camoufox/releases > "${RUNNER_TEMP}/camoufox-releases.json"
+        run: |
+          gh api repos/daijro/camoufox/releases > "${RUNNER_TEMP}/camoufox-releases.json"
+          gh api repos/P3TERX/GeoLite.mmdb/releases > "${RUNNER_TEMP}/geolite-releases.json"
       - name: Install dependencies and Camoufox
         env:
           CAMOUFLARE_CAMOUFOX_RELEASES_FILE: ${{ runner.temp }}/camoufox-releases.json
+          CAMOUFLARE_GEOLITE_RELEASES_FILE: ${{ runner.temp }}/geolite-releases.json
         run: |
           uv sync --frozen --group dev
           uv run python scripts/fetch_camoufox.py
@@ -161,10 +170,13 @@ jobs:
       - name: Fetch authenticated Camoufox release metadata
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh api repos/daijro/camoufox/releases > "${RUNNER_TEMP}/camoufox-releases.json"
+        run: |
+          gh api repos/daijro/camoufox/releases > "${RUNNER_TEMP}/camoufox-releases.json"
+          gh api repos/P3TERX/GeoLite.mmdb/releases > "${RUNNER_TEMP}/geolite-releases.json"
       - name: Install dependencies and Camoufox
         env:
           CAMOUFLARE_CAMOUFOX_RELEASES_FILE: ${{ runner.temp }}/camoufox-releases.json
+          CAMOUFLARE_GEOLITE_RELEASES_FILE: ${{ runner.temp }}/geolite-releases.json
         run: |
           uv sync --frozen --group dev
           uv run python scripts/fetch_camoufox.py
