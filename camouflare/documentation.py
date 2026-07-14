@@ -717,14 +717,6 @@ DOCUMENTATION_HTML = """
             </td>
           </tr>
           <tr>
-            <td><code>CAMOUFOX_GEOIP</code></td>
-            <td><code>false</code></td>
-            <td>
-              Enables Camoufox external-IP geolocation discovery. Disabled by
-              default so local and CI startup remain offline-capable.
-            </td>
-          </tr>
-          <tr>
             <td><code>PROXY_URL</code> / <code>PROXY_SERVER</code></td>
             <td>unset</td>
             <td>Default proxy endpoint for browser contexts.</td>

@@ -33,7 +33,6 @@ docker run --detach --name "${container_name}" \
   --env HOST=0.0.0.0 \
   --env CAMOUFLARE_API_TOKEN="${api_token}" \
   --env HEADLESS=virtual \
-  --env CAMOUFOX_GEOIP=false \
   "${image}" >/dev/null
 
 ready=0

@@ -51,9 +51,8 @@ def test_dockerfile_avoids_dev_dependencies_and_build_tools_at_runtime() -> None
     assert "uv run " not in dockerfile
     assert "/app/.venv/bin/python scripts/fetch_camoufox.py" in dockerfile
     assert "--mount=type=secret,id=camoufox_releases,required=false" in dockerfile
-    assert "--mount=type=secret,id=geolite_releases,required=false" in dockerfile
     assert "CAMOUFLARE_CAMOUFOX_RELEASES_FILE=/run/secrets/camoufox_releases" in dockerfile
-    assert "CAMOUFLARE_GEOLITE_RELEASES_FILE=/run/secrets/geolite_releases" in dockerfile
+    assert "geolite" not in dockerfile.lower()
     assert "/app/.venv/bin/playwright install-deps firefox" in dockerfile
     assert "rm -f /usr/local/bin/uv /usr/local/bin/uvx" in dockerfile
     assert "apt-get purge -y --auto-remove curl" in dockerfile

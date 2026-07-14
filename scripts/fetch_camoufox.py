@@ -10,10 +10,8 @@ from pathlib import Path
 from typing import Any
 
 CAMOUFOX_RELEASES_API = "https://api.github.com/repos/daijro/camoufox/releases"
-GEOLITE_RELEASES_API = "https://api.github.com/repos/P3TERX/GeoLite.mmdb/releases"
 RELEASE_METADATA_FILES = {
     CAMOUFOX_RELEASES_API: "CAMOUFLARE_CAMOUFOX_RELEASES_FILE",
-    GEOLITE_RELEASES_API: "CAMOUFLARE_GEOLITE_RELEASES_FILE",
 }
 
 

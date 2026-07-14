@@ -122,7 +122,7 @@ async def test_camoufox_factory_patches_playwright_before_launch(
 
 
 @pytest.mark.anyio
-async def test_camoufox_geoip_is_offline_by_default_and_explicitly_configurable(
+async def test_camoufox_launch_does_not_enable_geoip(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     options: list[dict[str, object]] = []
@@ -143,9 +143,8 @@ async def test_camoufox_geoip_is_offline_by_default_and_explicitly_configurable(
     monkeypatch.setattr(browser, "validate_runtime_environment", lambda: None)
     monkeypatch.setattr(browser, "patch_playwright_page_error_location", lambda: None)
 
-    default_handle = await browser.make_camoufox_browser_factory(Settings())()
-    enabled_handle = await browser.make_camoufox_browser_factory(Settings(camoufox_geoip=True))()
-    await default_handle.close()
-    await enabled_handle.close()
+    handle = await browser.make_camoufox_browser_factory(Settings())()
+    await handle.close()
 
-    assert [launch["geoip"] for launch in options] == [False, True]
+    assert len(options) == 1
+    assert "geoip" not in options[0]
