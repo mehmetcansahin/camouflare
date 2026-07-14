@@ -32,12 +32,12 @@ only after load testing the configured pool and payload limits.
 
 ## Version and architecture policy
 
-PyPI packages and GHCR images are released from the same `vMAJOR.MINOR.PATCH` tag. Images
-contain linux/amd64 and linux/arm64 manifests and publish attached BuildKit SBOM/provenance.
-Only the exact immutable version tag is published; rolling `latest`, major, and major/minor
-tags are intentionally omitted to prevent a release rerun from moving an established
-channel backward. The official GHCR package is intended to be public; private mirrors
-require `docker login` before Compose or direct pulls.
+GHCR images are released from `vMAJOR.MINOR.PATCH` tags. Images contain linux/amd64 and
+linux/arm64 manifests and publish attached BuildKit SBOM/provenance. Only the exact immutable
+version tag is published; rolling `latest`, major, and major/minor tags are intentionally
+omitted to prevent a release rerun from moving an established channel backward. The official
+GHCR package is intended to be public; private mirrors require `docker login` before Compose
+or direct pulls.
 
 ## Operational checks
 

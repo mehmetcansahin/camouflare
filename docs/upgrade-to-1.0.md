@@ -4,8 +4,9 @@ Camouflare 1.0 formalizes the project as a single-user, single-worker local serv
 and macOS source installations are supported. Published containers support linux/amd64 and
 linux/arm64; Windows is not supported.
 
-> The PyPI and GHCR commands below apply after 1.0.0 is published. Until then, follow the
-> source installation and local container instructions in the README.
+> Camouflare is not published to PyPI. The GHCR commands below apply after 1.0.0 is
+> published. Until then, follow the source installation and local container instructions
+> in the README.
 
 ## Before upgrading
 
@@ -31,12 +32,16 @@ Limit violations continue to use the FlareSolverr-compatible HTTP 500 error enve
 never return a truncated solution. Idle expired sessions are now closed by a background
 reaper, including when no new requests arrive.
 
-## Package upgrade
+## Source upgrade
 
-Install the exact release in a clean environment first, then switch the service:
+After the reviewed `v1.0.0` tag is published, install that exact source tag in a clean
+environment first, then switch the service:
 
 ```bash
-python -m pip install --upgrade "camouflare==1.0.0"
+git clone --branch v1.0.0 --depth 1 \
+  https://github.com/mehmetcansahin/camouflare.git camouflare-1.0.0
+python -m pip install --upgrade ./camouflare-1.0.0
+camoufox fetch
 camouflare --version
 ```
 
