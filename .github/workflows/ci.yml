@@ -139,10 +139,16 @@ jobs:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
           cache-dependency-glob: uv.lock
+      - name: Fetch authenticated Camoufox release metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api repos/daijro/camoufox/releases > "${RUNNER_TEMP}/camoufox-releases.json"
       - name: Install dependencies and Camoufox
+        env:
+          CAMOUFLARE_CAMOUFOX_RELEASES_FILE: ${{ runner.temp }}/camoufox-releases.json
         run: |
           uv sync --frozen --group dev
-          uv run camoufox fetch
+          uv run python scripts/fetch_camoufox.py
           uv run playwright install-deps firefox
       - name: Exercise the real browser against the local fixture
         env:
@@ -192,6 +198,10 @@ jobs:
         uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
       - name: Set up Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Fetch authenticated Camoufox release metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api repos/daijro/camoufox/releases > "${RUNNER_TEMP}/camoufox-releases.json"
       - name: Build linux/${{ matrix.arch }} runtime image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
@@ -202,6 +212,8 @@ jobs:
           tags: camouflare:ci-${{ matrix.arch }}
           provenance: false
           sbom: false
+          secret-files: |
+            camoufox_releases=${{ runner.temp }}/camoufox-releases.json
           cache-from: type=gha,scope=container-ci-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=container-ci-${{ matrix.arch }}
       - name: Run health, readiness, and local-target smoke

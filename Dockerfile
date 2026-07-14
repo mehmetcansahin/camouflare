@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1
+
 FROM ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
 
 ARG TARGETARCH
@@ -17,8 +19,9 @@ WORKDIR /app
 
 COPY pyproject.toml uv.lock README.md LICENSE ./
 COPY --chown=1000:1000 camouflare ./camouflare
+COPY scripts/fetch_camoufox.py ./scripts/fetch_camoufox.py
 
-RUN set -eux; \
+RUN --mount=type=secret,id=camoufox_releases,required=false set -eux; \
     case "${TARGETARCH}" in \
         amd64) uv_target="x86_64-unknown-linux-gnu" ;; \
         arm64) uv_target="aarch64-unknown-linux-gnu" ;; \
@@ -43,7 +46,8 @@ RUN set -eux; \
     python_target="$(readlink -f /app/.venv/bin/python)" && \
     case "${python_target}" in /opt/uv-python/*) ;; *) exit 1 ;; esac && \
     /app/.venv/bin/python --version && \
-    /app/.venv/bin/camoufox fetch && \
+    CAMOUFLARE_CAMOUFOX_RELEASES_FILE=/run/secrets/camoufox_releases \
+        /app/.venv/bin/python scripts/fetch_camoufox.py && \
     /app/.venv/bin/playwright install-deps firefox && \
     uv cache clean && \
     rm -f /usr/local/bin/uv /usr/local/bin/uvx && \
