@@ -200,7 +200,8 @@ async def test_api_token_protects_non_health_endpoints() -> None:
     assert documentation_response.status_code == 401
     assert documentation_response.json() == {"detail": "Unauthorized"}
     assert health_response.status_code == 200
-    assert health_response.json() == {"status": "ok"}
+    assert health_response.json()["status"] == "ok"
+    assert health_response.json()["pool"]["active_contexts"] == 0
 
 
 @pytest.mark.anyio
@@ -517,8 +518,53 @@ async def test_health_reports_liveness_without_creating_request_browser() -> Non
         response = await client.get("/health")
 
     assert response.status_code == 200
-    assert response.json()["status"] == "ok"
+    assert response.json() == {
+        "status": "ok",
+        "pool": {
+            "browser_slots": 0,
+            "creating_slots": 0,
+            "closing_slots": 0,
+            "active_contexts": 0,
+            "transient_contexts": 0,
+            "persistent_contexts": 0,
+            "waiting_requests": 0,
+            "max_slots": 2,
+        },
+    }
     assert factory.created == []
+
+
+@pytest.mark.anyio
+async def test_health_reports_current_browser_pool_snapshot_without_leasing_context() -> None:
+    factory = FakeBrowserFactory()
+    settings = Settings(pool_max_browsers=1, pool_max_contexts_per_browser=2)
+    app = create_app(settings=settings, browser_factory=factory, lifespan_enabled=False)
+    await app.state.pool.start()
+
+    async with (
+        app.state.pool.lease_context(),
+        AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+        ) as client,
+    ):
+        response = await client.get("/health")
+
+    await app.state.pool.close()
+
+    assert response.status_code == 200
+    assert response.json()["pool"] == {
+        "browser_slots": 1,
+        "creating_slots": 0,
+        "closing_slots": 0,
+        "active_contexts": 1,
+        "transient_contexts": 1,
+        "persistent_contexts": 0,
+        "waiting_requests": 0,
+        "max_slots": 2,
+    }
+    assert len(factory.created) == 1
+    assert len(factory.created[0].contexts) == 1
 
 
 @pytest.mark.anyio

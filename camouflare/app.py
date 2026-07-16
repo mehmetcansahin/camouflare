@@ -45,7 +45,14 @@ from camouflare.metrics import (
     request_finished,
     request_started,
 )
-from camouflare.models import HealthResponse, IndexResponse, V1Request, V1Response
+from camouflare.models import (
+    HealthResponse,
+    IndexResponse,
+    PoolHealthResponse,
+    PoolStatus,
+    V1Request,
+    V1Response,
+)
 from camouflare.observability import bind_request_id, reset_request_id, resolve_request_id
 from camouflare.pool import BrowserPool, PersistentCapacityError, PoolAcquireTimeout
 from camouflare.protocols import BrowserFactory
@@ -191,13 +198,17 @@ def create_app(
 
     @app.get(
         "/health",
-        response_model=HealthResponse,
+        response_model=PoolHealthResponse,
         tags=["Service"],
         summary="Check service liveness",
-        description="Returns ok when the API process is alive without leasing a browser.",
+        description=(
+            "Returns ok and the current browser-pool snapshot when the API process "
+            "is alive, without leasing a browser."
+        ),
     )
     async def health() -> Any:
-        return HealthResponse().model_dump()
+        pool = PoolStatus.model_validate(app.state.pool.snapshot())
+        return PoolHealthResponse(pool=pool).model_dump()
 
     @app.get(
         "/ready",

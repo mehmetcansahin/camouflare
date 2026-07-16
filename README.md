@@ -7,7 +7,7 @@ Active Cloudflare interstitial and Turnstile handling is disabled by default. Se
 `CHALLENGE_SOLVER=click` to opt in to clicking challenges through
 [playwright-captcha](https://pypi.org/project/playwright-captcha/)'s ClickSolver.
 
-Camouflare 1.0 targets a single-user, single-worker local service. Linux and
+Camouflare 1.x targets a single-user, single-worker local service. Linux and
 macOS source installs are supported; release container builds target Linux
 `amd64` and `arm64`. Windows and shared multi-tenant deployments are out of scope.
 
@@ -18,10 +18,9 @@ site's access controls.
 
 ## Installation
 
-Camouflare is installed from source or run from GHCR; it is not published to PyPI.
-The Camouflare 1.0.0 container has not yet been published to GHCR. Until the first
-container release, install the current source on Linux or macOS, then fetch the Camoufox
-browser runtime:
+Camouflare is installed from source or run from the immutable
+`ghcr.io/mehmetcansahin/camouflare:1.1.0` image; it is not published to PyPI.
+For a source installation, fetch the Camoufox browser runtime after installing the package:
 
 ```bash
 git clone https://github.com/mehmetcansahin/camouflare.git
@@ -42,7 +41,8 @@ For a local container build, follow the [Docker](#docker) instructions below.
 - `GET /` returns service metadata.
 - `GET /documentation` serves expanded API documentation with commands,
   examples, response shapes, session/proxy notes, and configuration details.
-- `GET /health` returns `{"status":"ok"}` without leasing a browser.
+- `GET /health` returns process liveness and a current browser-pool capacity snapshot
+  without leasing a browser.
 - `GET /ready` checks that the browser pool can create a page and evaluate JS.
 - `GET /metrics` returns Prometheus metrics when `PROMETHEUS_ENABLED=true`.
 - `POST /v1` supports:
@@ -180,10 +180,10 @@ docker run --rm \
   camouflare:local
 ```
 
-For Compose, set `CAMOUFLARE_API_TOKEN` before running
-`docker compose up --build`. The example `compose.yaml` intentionally fails to
-start when this variable is unset. The explicit build keeps the pre-release
-workflow independent of an unpublished GHCR image.
+For Compose, set `CAMOUFLARE_API_TOKEN` before running `docker compose pull` and
+`docker compose up -d`. The example `compose.yaml` intentionally fails to start when this
+variable is unset and defaults to the immutable `1.1.0` image. Its retained `build: .`
+entry supports explicit local builds with `docker compose up --build`.
 
 The Dockerfile pins Ubuntu 24.04, uses `dumb-init`, runs as a non-root user,
 builds a single runtime image, and removes build-only tools after browser assets
