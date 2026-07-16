@@ -22,7 +22,7 @@ def test_settings_reads_env_at_instantiation(monkeypatch: pytest.MonkeyPatch) ->
 def test_version_uses_the_single_package_source(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("VERSION", "9.9.9")
 
-    assert Settings().version == __version__ == "1.0.0"
+    assert Settings().version == __version__ == "1.1.0"
 
 
 def test_settings_ignores_non_integer_env(monkeypatch: pytest.MonkeyPatch) -> None:

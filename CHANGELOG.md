@@ -5,6 +5,13 @@ All notable changes to Camouflare are documented here. The project follows
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-07-16
+
+### Added
+
+- A non-invasive browser-pool snapshot in `/health`, covering browser slots,
+  context usage, waiting requests, and configured capacity.
+
 ## [1.0.0] - 2026-07-11
 
 ### Added
@@ -27,5 +34,6 @@ All notable changes to Camouflare are documented here. The project follows
 - High and critical dependency or container findings block releases unless covered by a
   reasoned, time-bounded exception.
 
-[Unreleased]: https://github.com/mehmetcansahin/camouflare/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/mehmetcansahin/camouflare/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/mehmetcansahin/camouflare/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/mehmetcansahin/camouflare/releases/tag/v1.0.0

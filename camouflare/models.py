@@ -293,3 +293,20 @@ class IndexResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     status: str = Field(default="ok", description="Health status.")
+
+
+class PoolStatus(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    browser_slots: int = Field(description="Current browser slots managed by the pool.")
+    creating_slots: int = Field(description="Browser slots currently being created.")
+    closing_slots: int = Field(description="Browser slots currently being closed.")
+    active_contexts: int = Field(description="Current active browser contexts.")
+    transient_contexts: int = Field(description="Active stateless request contexts.")
+    persistent_contexts: int = Field(description="Active session contexts.")
+    waiting_requests: int = Field(description="Requests waiting for pool capacity.")
+    max_slots: int = Field(description="Configured maximum context capacity.")
+
+
+class PoolHealthResponse(HealthResponse):
+    pool: PoolStatus = Field(description="Current browser-pool capacity snapshot.")

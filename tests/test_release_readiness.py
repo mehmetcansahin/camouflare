@@ -15,7 +15,8 @@ def test_readme_documents_guarded_default_solver() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
 
-    assert '`GET /health` returns `{"status":"ok"}` without leasing a browser' in readme
+    assert "`GET /health` returns process liveness" in readme
+    assert "current browser-pool capacity snapshot" in readme
     assert "`GET /ready` checks that the browser pool can create a page" in readme
     assert "| `CHALLENGE_SOLVER` | `none` |" in readme
     assert "| `HOST` | `127.0.0.1` |" in readme
@@ -31,10 +32,11 @@ def test_readme_documents_guarded_default_solver() -> None:
     assert "Use Camouflare only on systems you own" in readme
     assert "does not accept requests to bypass a specific third-party" in readme
     assert "is not published to PyPI" in readme
-    assert "has not yet been published to GHCR" in readme
+    assert "ghcr.io/mehmetcansahin/camouflare:1.1.0" in readme
+    assert "ghcr.io/mehmetcansahin/camouflare:1.1.0" in compose
     assert "git clone https://github.com/mehmetcansahin/camouflare.git" in readme
     assert "python -m pip install ." in readme
-    assert 'python -m pip install "camouflare==1.0.0"' not in readme
+    assert 'python -m pip install "camouflare==1.1.0"' not in readme
     assert "docker compose up --build" in readme
     assert "CAMOUFOX_GEOIP" not in readme
     assert "CAMOUFOX_GEOIP" not in compose
@@ -108,7 +110,7 @@ def test_release_version_has_one_authoritative_source() -> None:
     assert metadata["tool"]["setuptools"]["dynamic"]["version"] == {
         "attr": "camouflare._version.__version__"
     }
-    assert installed_version("camouflare") == __version__ == "1.0.0"
+    assert installed_version("camouflare") == __version__ == "1.1.0"
 
 
 def test_ci_runs_supported_python_matrix_and_builds_package() -> None:

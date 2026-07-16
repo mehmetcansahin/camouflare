@@ -371,7 +371,10 @@ DOCUMENTATION_HTML = """
         </div>
         <div class="box">
           <p><span class="method">GET</span> <code>/health</code></p>
-          <p>Returns a lightweight liveness response without leasing a browser.</p>
+          <p>
+            Returns a lightweight liveness response and the current browser-pool
+            capacity snapshot without leasing a browser.
+          </p>
         </div>
         <div class="box">
           <p><span class="method">GET</span> <code>/ready</code></p>
@@ -450,7 +453,7 @@ DOCUMENTATION_HTML = """
       <pre><code>{
   "status": "ok",
   "sessions": ["account-a"],
-  "version": "1.0.0"
+  "version": "1.1.0"
 }</code></pre>
 
       <h3 id="sessions-destroy"><code>sessions.destroy</code></h3>
@@ -607,7 +610,7 @@ DOCUMENTATION_HTML = """
   },
   "startTimestamp": 1770000000000,
   "endTimestamp": 1770000001500,
-  "version": "1.0.0"
+  "version": "1.1.0"
 }</code></pre>
       <p>
         Errors use the same envelope with <code>status: "error"</code>.

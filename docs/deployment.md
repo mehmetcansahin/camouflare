@@ -9,8 +9,9 @@ separate users, run separate container instances.
 - Keep the published port on loopback unless remote access is required.
 - `CAMOUFLARE_API_TOKEN` is mandatory for every non-loopback bind and should come from a
   secret store, not an image or Compose file.
-- `/health` is intentionally unauthenticated and reports process liveness only. `/ready`,
-  `/metrics`, documentation, and `/v1` require the configured token.
+- `/health` is intentionally unauthenticated and reports process liveness plus
+  low-cardinality, process-local pool counters. `/ready`, `/metrics`, documentation, and
+  `/v1` require the configured token.
 - Private and loopback target URLs remain available because local-network automation is an
   intentional use case. Restrict network egress at the container or host boundary when the
   target set is narrower.
@@ -41,8 +42,8 @@ or direct pulls.
 
 ## Operational checks
 
-Use `/health` for liveness and authenticated `/ready` for browser-backed readiness. Alert on
-pool acquisition timeouts, browser create/recycle errors, session rejections, and sustained
-growth in active contexts or process memory. Request IDs may be returned to callers, but
-URLs, tokens, cookies, bodies, and proxy credentials must not be copied into operational
-logs.
+Use `/health` for liveness and a non-invasive pool snapshot, and authenticated `/ready` for
+browser-backed readiness. Alert on pool acquisition timeouts, browser create/recycle errors,
+session rejections, and sustained growth in active contexts or process memory. Request IDs
+may be returned to callers, but URLs, tokens, cookies, bodies, and proxy credentials must not
+be copied into operational logs.
