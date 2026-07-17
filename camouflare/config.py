@@ -115,6 +115,12 @@ class Settings:
     shutdown_timeout_seconds: int = field(
         default_factory=lambda: _int_env("SHUTDOWN_TIMEOUT_SECONDS", 30)
     )
+    cleanup_timeout_seconds: int = field(
+        default_factory=lambda: _int_env("CLEANUP_TIMEOUT_SECONDS", 10)
+    )
+    readiness_timeout_ms: int = field(
+        default_factory=lambda: _int_env("READINESS_TIMEOUT_MS", 15_000)
+    )
     prometheus_enabled: bool = field(default_factory=lambda: _bool_env("PROMETHEUS_ENABLED", False))
     challenge_solver: str = field(default_factory=_challenge_solver_env)
     log_format: str = field(default_factory=lambda: os.getenv("LOG_FORMAT", "text").strip().lower())
@@ -137,6 +143,10 @@ class Settings:
     @property
     def pool_acquire_timeout_seconds(self) -> float:
         return self.pool_acquire_timeout_ms / 1000
+
+    @property
+    def readiness_timeout_seconds(self) -> float:
+        return self.readiness_timeout_ms / 1000
 
     @property
     def env_proxy(self) -> dict[str, str] | None:
@@ -194,6 +204,8 @@ def _validate_settings(settings: Settings) -> None:
         "MAX_SESSION_TTL_MINUTES": settings.max_session_ttl_minutes,
         "SESSION_REAPER_INTERVAL_SECONDS": settings.session_reaper_interval_seconds,
         "SHUTDOWN_TIMEOUT_SECONDS": settings.shutdown_timeout_seconds,
+        "CLEANUP_TIMEOUT_SECONDS": settings.cleanup_timeout_seconds,
+        "READINESS_TIMEOUT_MS": settings.readiness_timeout_ms,
     }
     for name, value in positive_limits.items():
         if value <= 0:

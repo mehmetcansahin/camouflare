@@ -1,6 +1,6 @@
 # Production deployment profile
 
-Camouflare 1.0 supports a single user and a single application worker. Sessions and browser
+Camouflare supports a single user and a single application worker. Sessions and browser
 pool state are process-local, so multiple workers do not provide session consistency. For
 separate users, run separate container instances.
 
@@ -9,9 +9,9 @@ separate users, run separate container instances.
 - Keep the published port on loopback unless remote access is required.
 - `CAMOUFLARE_API_TOKEN` is mandatory for every non-loopback bind and should come from a
   secret store, not an image or Compose file.
-- `/health` is intentionally unauthenticated and reports process liveness plus
-  low-cardinality, process-local pool counters. `/ready`, `/metrics`, documentation, and
-  `/v1` require the configured token.
+- `/health` is intentionally unauthenticated and reports only process liveness without
+  reading browser state. `/ready`, `/diagnostics`, `/metrics`, documentation, and `/v1`
+  require the configured token.
 - Private and loopback target URLs remain available because local-network automation is an
   intentional use case. Restrict network egress at the container or host boundary when the
   target set is narrower.
@@ -42,8 +42,15 @@ or direct pulls.
 
 ## Operational checks
 
-Use `/health` for liveness and a non-invasive pool snapshot, and authenticated `/ready` for
-browser-backed readiness. Alert on pool acquisition timeouts, browser create/recycle errors,
-session rejections, and sustained growth in active contexts or process memory. Request IDs
-may be returned to callers, but URLs, tokens, cookies, bodies, and proxy credentials must not
-be copied into operational logs.
+Use `/health` for liveness, authenticated `/ready` for browser-backed readiness, and
+authenticated `/diagnostics` for a passive snapshot that never leases a browser. Diagnostics
+returns HTTP 200 when the snapshot succeeds; alert from `capacity_state` and its counters,
+not from the endpoint status alone.
+
+Enable Prometheus in production. Alert on two consecutive readiness failures,
+`active_contexts == 0` with `usable_context_slots == 0`, any cleanup timeout, and sustained
+browser-process growth. Canary releases should use a one-minute browser max age and a low
+max-use limit for at least three lifecycle cycles, then remain under observation for one full
+production max-age window. Request IDs may be returned to callers, but URLs, tokens, cookies,
+bodies, session ids, and proxy credentials must not be copied into operational logs or
+diagnostics.

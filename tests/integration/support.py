@@ -14,7 +14,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, ClassVar, cast
 from urllib.parse import parse_qs, urlsplit
 
-from camouflare.browser import CamoufoxBrowserHandle
+from camouflare.browser import (
+    CamoufoxBrowserHandle,
+    patch_playwright_cancelled_protocol_future,
+    patch_playwright_page_error_location,
+)
 from camouflare.config import Settings
 
 
@@ -223,6 +227,8 @@ def make_offline_camoufox_factory() -> BrowserFactory:
     """Return a real Camoufox factory that never performs GeoIP network discovery."""
 
     async def factory() -> CamoufoxBrowserHandle:
+        patch_playwright_cancelled_protocol_future()
+        patch_playwright_page_error_location()
         from camoufox.async_api import AsyncCamoufox
 
         target_os = "macos" if platform.system() == "Darwin" else "linux"

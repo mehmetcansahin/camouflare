@@ -1,7 +1,7 @@
 services:
   camouflare:
     build: .
-    image: ${CAMOUFLARE_IMAGE:-ghcr.io/mehmetcansahin/camouflare:1.1.0}
+    image: ${CAMOUFLARE_IMAGE:-ghcr.io/mehmetcansahin/camouflare:1.2.0}
     ports:
       - "127.0.0.1:8191:8191"
     cap_drop:
@@ -21,3 +21,6 @@ services:
       POOL_MAX_BROWSERS: "2"
       POOL_MAX_CONTEXTS_PER_BROWSER: "2"
       POOL_ACQUIRE_TIMEOUT_MS: "10000"
+      CLEANUP_TIMEOUT_SECONDS: "10"
+      READINESS_TIMEOUT_MS: "15000"
+      PROMETHEUS_ENABLED: "true"

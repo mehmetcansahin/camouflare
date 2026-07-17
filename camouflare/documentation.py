@@ -299,7 +299,7 @@ DOCUMENTATION_HTML = """
         Camouflare exposes a FastAPI service for browser-backed requests,
         persistent sessions, proxy routing, cookie capture, screenshots,
         lightweight liveness checks, browser-readiness checks, optional challenge
-        handling, and optional Prometheus metrics.
+        handling, passive diagnostics, and optional Prometheus metrics.
       </p>
       <p class="lede">
         Use Camouflare only on systems you own, administer, or have permission
@@ -312,6 +312,7 @@ DOCUMENTATION_HTML = """
         <a href="/openapi.json">OpenAPI JSON</a>
         <a href="/health">Health</a>
         <a href="/ready">Ready</a>
+        <a href="/diagnostics">Diagnostics</a>
       </div>
     </div>
   </header>
@@ -372,13 +373,21 @@ DOCUMENTATION_HTML = """
         <div class="box">
           <p><span class="method">GET</span> <code>/health</code></p>
           <p>
-            Returns a lightweight liveness response and the current browser-pool
-            capacity snapshot without leasing a browser.
+            Returns a lightweight process-only liveness response without reading
+            browser state.
           </p>
         </div>
         <div class="box">
           <p><span class="method">GET</span> <code>/ready</code></p>
           <p>Runs the browser-readiness probe by creating a page and evaluating JS.</p>
+        </div>
+        <div class="box">
+          <p><span class="method">GET</span> <code>/diagnostics</code></p>
+          <p>
+            Returns a passive, token-protected pool, session, cleanup, and runtime
+            snapshot without leasing browser capacity. A successful snapshot uses
+            HTTP 200 even when <code>capacity_state</code> is not available.
+          </p>
         </div>
         <div class="box">
           <p><span class="method">GET</span> <code>/metrics</code></p>
@@ -453,7 +462,7 @@ DOCUMENTATION_HTML = """
       <pre><code>{
   "status": "ok",
   "sessions": ["account-a"],
-  "version": "1.1.0"
+  "version": "1.2.0"
 }</code></pre>
 
       <h3 id="sessions-destroy"><code>sessions.destroy</code></h3>
@@ -610,7 +619,7 @@ DOCUMENTATION_HTML = """
   },
   "startTimestamp": 1770000000000,
   "endTimestamp": 1770000001500,
-  "version": "1.1.0"
+  "version": "1.2.0"
 }</code></pre>
       <p>
         Errors use the same envelope with <code>status: "error"</code>.
@@ -793,6 +802,16 @@ DOCUMENTATION_HTML = """
             <td><code>SHUTDOWN_TIMEOUT_SECONDS</code></td>
             <td><code>30</code></td>
             <td>Shared browser and session shutdown deadline.</td>
+          </tr>
+          <tr>
+            <td><code>CLEANUP_TIMEOUT_SECONDS</code></td>
+            <td><code>10</code></td>
+            <td>Hard deadline for physical cleanup while logical capacity is released.</td>
+          </tr>
+          <tr>
+            <td><code>READINESS_TIMEOUT_MS</code></td>
+            <td><code>15000</code></td>
+            <td>Total hard deadline for the active browser readiness probe.</td>
           </tr>
           <tr>
             <td><code>LOG_FORMAT</code></td>

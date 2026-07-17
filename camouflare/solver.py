@@ -31,6 +31,7 @@ from camouflare.challenge import (
 from camouflare.challenge import (
     wait_requested as _wait_requested,
 )
+from camouflare.cleanup import CleanupSupervisor
 from camouflare.limits import ResourceLimitError, ResourceLimits
 from camouflare.metrics import record_challenge, record_timeout
 from camouflare.models import V1Request, V1Response
@@ -135,12 +136,17 @@ async def solve_request(
     allow_direct_http_fallback: bool = True,
     allow_direct_http_first: bool = True,
     sleep: Sleep = asyncio.sleep,
+    cleanup_supervisor: CleanupSupervisor | None = None,
+    cleanup_timeout_seconds: float = 10,
 ) -> V1Response:
     """Solve one FlareSolverr-compatible request using an existing page/context."""
     provider = captcha_provider or NoCaptchaProvider()
     active_limits = limits or ResourceLimits()
+    supervisor = cleanup_supervisor or CleanupSupervisor(timeout_seconds=cleanup_timeout_seconds)
+    stack = AsyncExitStack()
+    body_failed = False
     with active_resource_limits(active_limits):
-        async with AsyncExitStack() as stack:
+        try:
             prepare = getattr(provider, "prepare", None)
             if prepare is not None:
                 await stack.enter_async_context(prepare(page=page))
@@ -154,6 +160,26 @@ async def solve_request(
                 allow_direct_http_first=allow_direct_http_first,
                 sleep=sleep,
             )
+        except BaseException:
+            body_failed = True
+            raise
+        finally:
+            try:
+                await supervisor.run(
+                    stack.aclose(),
+                    kind="captcha",
+                    timeout_seconds=cleanup_timeout_seconds,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                if body_failed:
+                    logger.warning(
+                        "Ignoring captcha cleanup error while unwinding a failed request.",
+                        exc_info=True,
+                    )
+                else:
+                    logger.warning("Ignoring captcha cleanup error.", exc_info=True)
 
 
 async def _run_solve(

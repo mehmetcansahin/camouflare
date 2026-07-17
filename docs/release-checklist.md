@@ -20,6 +20,11 @@ change description and approve the protected `release` environment before public
 
 ## Prepare
 
+- [ ] Until this release is deployed, recover an affected existing instance with a planned
+  restart. Do not lower `BROWSER_MAX_AGE_MINUTES`; temporarily keep it above the planned restart
+  interval so the known idle-age failure cannot recur first.
+- [ ] Rotate every API token exposed in logs, chat, incident notes, or other non-secret storage;
+  verify the old token is rejected before publishing.
 - [ ] Update `camouflare.__version__` and package metadata to the same semantic version.
 - [ ] Move reviewed entries from `Unreleased` to a dated changelog heading.
 - [ ] Obtain maintainer approval for the exact changelog/release wording.
@@ -40,6 +45,13 @@ change description and approve the protected `release` environment before public
 ## After publication
 
 - [ ] Pull the immutable image digest and run `/health`, authenticated `/ready`, and local `/v1`.
+- [ ] Run the canary with a one-minute browser max age and low max-use limit for at least three
+  complete lifecycle cycles. Accept only with zero unexpected acquire timeouts, zero unhandled
+  futures/tasks, stable browser-process counts, and no cleanup backlog.
+- [ ] Enable Prometheus alerts for two consecutive readiness failures, `active=0 && usable=0`,
+  cleanup timeouts, and a growing browser-process count.
+- [ ] Observe production for at least one complete configured browser max-age window. If readiness
+  or cleanup regresses, roll back to the recorded immutable digest using the documented procedure.
 - [ ] Record the published digests and workflow URL in the release record.
 - [ ] If publication is interrupted, re-run the same tag-push workflow event. The preflight
   reuses an existing GHCR version only after its platform manifests pass smoke, security,

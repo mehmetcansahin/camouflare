@@ -11,7 +11,7 @@ from camouflare.limits import (
     MAX_URL_LENGTH,
     json_size,
 )
-from camouflare.models import V1Request, V1Response
+from camouflare.models import DiagnosticsResponse, V1Request, V1Response
 
 
 def test_v1_request_accepts_flaresolverr_camel_case_fields() -> None:
@@ -174,6 +174,74 @@ def test_v1_response_serializes_flaresolverr_camel_case_fields() -> None:
     assert response.model_dump(by_alias=True)["endTimestamp"] == 20
     assert response.model_dump(by_alias=True)["solution"]["userAgent"] == "FakeBrowser/1.0"
     assert response.model_dump(by_alias=True)["solution"]["turnstile_token"] == "token"
+
+
+def test_diagnostics_response_validates_bounded_operational_snapshot() -> None:
+    response = DiagnosticsResponse.model_validate(
+        {
+            "status": "ok",
+            "capacity_state": "recovering",
+            "pool": {
+                "ready_browser_slots": 1,
+                "retiring_browser_slots": 1,
+                "creating_slots": 1,
+                "closing_slots": 0,
+                "active_contexts": 2,
+                "transient_contexts": 1,
+                "persistent_contexts": 1,
+                "waiting_requests": 3,
+                "usable_context_slots": 0,
+                "idle_recyclable_slots": 1,
+                "max_browsers": 2,
+                "max_contexts_per_browser": 2,
+                "max_slots": 4,
+            },
+            "sessions": {"active": 1, "in_use": 1, "closing": 1, "max_sessions": 32},
+            "cleanup": {
+                "in_flight": 1,
+                "oldest_age_seconds": 0.25,
+                "by_kind": {"request": 1},
+            },
+            "runtime": {
+                "playwright_version": "1.61.0",
+                "playwright_cancel_patch": "applied",
+            },
+        }
+    )
+
+    assert response.capacity_state == "recovering"
+    assert response.pool.max_slots == 4
+    assert response.cleanup.by_kind == {"request": 1}
+
+
+def test_diagnostics_response_rejects_unknown_capacity_state() -> None:
+    with pytest.raises(ValueError):
+        DiagnosticsResponse.model_validate(
+            {
+                "capacity_state": "mystery",
+                "pool": {
+                    "ready_browser_slots": 0,
+                    "retiring_browser_slots": 0,
+                    "creating_slots": 0,
+                    "closing_slots": 0,
+                    "active_contexts": 0,
+                    "transient_contexts": 0,
+                    "persistent_contexts": 0,
+                    "waiting_requests": 0,
+                    "usable_context_slots": 0,
+                    "idle_recyclable_slots": 0,
+                    "max_browsers": 1,
+                    "max_contexts_per_browser": 1,
+                    "max_slots": 1,
+                },
+                "sessions": {"active": 0, "in_use": 0, "closing": 0, "max_sessions": 1},
+                "cleanup": {"in_flight": 0, "by_kind": {}},
+                "runtime": {
+                    "playwright_version": "unknown",
+                    "playwright_cancel_patch": "not-applicable",
+                },
+            }
+        )
 
 
 def test_v1_request_accepts_structural_limit_boundaries() -> None:

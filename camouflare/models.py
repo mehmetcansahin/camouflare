@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
@@ -295,18 +295,44 @@ class HealthResponse(BaseModel):
     status: str = Field(default="ok", description="Health status.")
 
 
-class PoolStatus(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
+class DiagnosticsPoolStatus(BaseModel):
+    ready_browser_slots: int = Field(ge=0)
+    retiring_browser_slots: int = Field(ge=0)
+    creating_slots: int = Field(ge=0)
+    closing_slots: int = Field(ge=0)
+    active_contexts: int = Field(ge=0)
+    transient_contexts: int = Field(ge=0)
+    persistent_contexts: int = Field(ge=0)
+    waiting_requests: int = Field(ge=0)
+    usable_context_slots: int = Field(ge=0)
+    idle_recyclable_slots: int = Field(ge=0)
+    max_browsers: int = Field(ge=1)
+    max_contexts_per_browser: int = Field(ge=1)
+    max_slots: int = Field(ge=1)
 
-    browser_slots: int = Field(description="Current browser slots managed by the pool.")
-    creating_slots: int = Field(description="Browser slots currently being created.")
-    closing_slots: int = Field(description="Browser slots currently being closed.")
-    active_contexts: int = Field(description="Current active browser contexts.")
-    transient_contexts: int = Field(description="Active stateless request contexts.")
-    persistent_contexts: int = Field(description="Active session contexts.")
-    waiting_requests: int = Field(description="Requests waiting for pool capacity.")
-    max_slots: int = Field(description="Configured maximum context capacity.")
+
+class DiagnosticsSessionStatus(BaseModel):
+    active: int = Field(ge=0)
+    in_use: int = Field(ge=0)
+    closing: int = Field(ge=0)
+    max_sessions: int = Field(ge=1)
 
 
-class PoolHealthResponse(HealthResponse):
-    pool: PoolStatus = Field(description="Current browser-pool capacity snapshot.")
+class DiagnosticsCleanupStatus(BaseModel):
+    in_flight: int = Field(ge=0)
+    oldest_age_seconds: float | None = Field(default=None, ge=0)
+    by_kind: dict[str, int] = Field(default_factory=dict)
+
+
+class DiagnosticsRuntimeStatus(BaseModel):
+    playwright_version: str
+    playwright_cancel_patch: str
+
+
+class DiagnosticsResponse(BaseModel):
+    status: str = "ok"
+    capacity_state: Literal["available", "saturated", "recovering", "unavailable"]
+    pool: DiagnosticsPoolStatus
+    sessions: DiagnosticsSessionStatus
+    cleanup: DiagnosticsCleanupStatus
+    runtime: DiagnosticsRuntimeStatus
