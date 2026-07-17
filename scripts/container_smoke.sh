@@ -5,14 +5,37 @@ image="${1:-camouflare:ci}"
 container_name="camouflare-smoke-${GITHUB_RUN_ID:-local}-${RANDOM}"
 api_token="camouflare-ci-smoke-token"
 pool_acquire_timeout_ms="${CAMOUFLARE_SMOKE_POOL_ACQUIRE_TIMEOUT_MS:-30000}"
+readiness_timeout_ms="${CAMOUFLARE_SMOKE_READINESS_TIMEOUT_MS:-15000}"
+request_timeout_ms="${CAMOUFLARE_SMOKE_REQUEST_TIMEOUT_MS:-60000}"
+curl_timeout_seconds="${CAMOUFLARE_SMOKE_CURL_TIMEOUT_SECONDS:-90}"
 startup_timeout_seconds="${CAMOUFLARE_SMOKE_STARTUP_TIMEOUT_SECONDS:-120}"
 
 if [[ ! "${pool_acquire_timeout_ms}" =~ ^[1-9][0-9]*$ ]]; then
   echo "CAMOUFLARE_SMOKE_POOL_ACQUIRE_TIMEOUT_MS must be a positive integer." >&2
   exit 2
 fi
+if [[ ! "${readiness_timeout_ms}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "CAMOUFLARE_SMOKE_READINESS_TIMEOUT_MS must be a positive integer." >&2
+  exit 2
+fi
+if [[ ! "${request_timeout_ms}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "CAMOUFLARE_SMOKE_REQUEST_TIMEOUT_MS must be a positive integer." >&2
+  exit 2
+fi
+if [[ ! "${curl_timeout_seconds}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "CAMOUFLARE_SMOKE_CURL_TIMEOUT_SECONDS must be a positive integer." >&2
+  exit 2
+fi
 if [[ ! "${startup_timeout_seconds}" =~ ^[1-9][0-9]*$ ]]; then
   echo "CAMOUFLARE_SMOKE_STARTUP_TIMEOUT_SECONDS must be a positive integer." >&2
+  exit 2
+fi
+if ((curl_timeout_seconds * 1000 <= readiness_timeout_ms)); then
+  echo "CAMOUFLARE_SMOKE_CURL_TIMEOUT_SECONDS must exceed the readiness timeout." >&2
+  exit 2
+fi
+if ((curl_timeout_seconds * 1000 <= request_timeout_ms)); then
+  echo "CAMOUFLARE_SMOKE_CURL_TIMEOUT_SECONDS must exceed the request timeout." >&2
   exit 2
 fi
 
@@ -46,6 +69,7 @@ docker run --detach --name "${container_name}" \
   --env CAMOUFLARE_API_TOKEN="${api_token}" \
   --env HEADLESS=virtual \
   --env POOL_ACQUIRE_TIMEOUT_MS="${pool_acquire_timeout_ms}" \
+  --env READINESS_TIMEOUT_MS="${readiness_timeout_ms}" \
   "${image}" >/dev/null
 
 ready=0
@@ -67,15 +91,23 @@ if [[ "${ready}" != 1 ]]; then
   exit 1
 fi
 
-curl --silent --show-error --fail --max-time 90 \
+if ! curl --silent --show-error --fail-with-body --max-time "${curl_timeout_seconds}" \
   --header "Authorization: Bearer ${api_token}" \
-  http://127.0.0.1:18191/ready >"${work_dir}/ready.json"
+  http://127.0.0.1:18191/ready >"${work_dir}/ready.json"; then
+  sed -n '1,40p' "${work_dir}/ready.json" >&2
+  docker logs "${container_name}"
+  exit 1
+fi
 
-curl --silent --show-error --fail --max-time 90 \
+if ! curl --silent --show-error --fail-with-body --max-time "${curl_timeout_seconds}" \
   --header "Authorization: Bearer ${api_token}" \
   --header 'Content-Type: application/json' \
-  --data '{"cmd":"request.get","url":"http://host.docker.internal:18080/","maxTimeout":60000}' \
-  http://127.0.0.1:18191/v1 >"${work_dir}/solution.json"
+  --data "{\"cmd\":\"request.get\",\"url\":\"http://host.docker.internal:18080/\",\"maxTimeout\":${request_timeout_ms}}" \
+  http://127.0.0.1:18191/v1 >"${work_dir}/solution.json"; then
+  sed -n '1,40p' "${work_dir}/solution.json" >&2
+  docker logs "${container_name}"
+  exit 1
+fi
 
 python3 - "${work_dir}/solution.json" <<'PY'
 import json

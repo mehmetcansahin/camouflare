@@ -180,6 +180,16 @@ def test_ci_and_nightly_cover_real_browser_container_and_soak_gates() -> None:
         "${{ matrix.arch == 'arm64' && '120000' || '30000' }}"
     ) in ci
     assert (
+        "CAMOUFLARE_SMOKE_READINESS_TIMEOUT_MS: "
+        "${{ matrix.arch == 'arm64' && '120000' || '15000' }}"
+    ) in ci
+    assert (
+        "CAMOUFLARE_SMOKE_REQUEST_TIMEOUT_MS: ${{ matrix.arch == 'arm64' && '120000' || '60000' }}"
+    ) in ci
+    assert (
+        "CAMOUFLARE_SMOKE_CURL_TIMEOUT_SECONDS: ${{ matrix.arch == 'arm64' && '180' || '90' }}"
+    ) in ci
+    assert (
         "CAMOUFLARE_SMOKE_STARTUP_TIMEOUT_SECONDS: ${{ matrix.arch == 'arm64' && '180' || '120' }}"
     ) in ci
     assert "--cov-fail-under=85" in ci
@@ -209,9 +219,22 @@ def test_release_is_immutable_approval_gated_and_multi_arch() -> None:
         "${{ matrix.arch == 'arm64' && '120000' || '30000' }}"
     ) in release
     assert (
+        "CAMOUFLARE_SMOKE_READINESS_TIMEOUT_MS: "
+        "${{ matrix.arch == 'arm64' && '120000' || '15000' }}"
+    ) in release
+    assert (
+        "CAMOUFLARE_SMOKE_REQUEST_TIMEOUT_MS: ${{ matrix.arch == 'arm64' && '120000' || '60000' }}"
+    ) in release
+    assert (
+        "CAMOUFLARE_SMOKE_CURL_TIMEOUT_SECONDS: ${{ matrix.arch == 'arm64' && '180' || '90' }}"
+    ) in release
+    assert (
         "CAMOUFLARE_SMOKE_STARTUP_TIMEOUT_SECONDS: ${{ matrix.arch == 'arm64' && '180' || '120' }}"
     ) in release
     assert 'CAMOUFLARE_SMOKE_POOL_ACQUIRE_TIMEOUT_MS: "120000"' in release
+    assert 'CAMOUFLARE_SMOKE_READINESS_TIMEOUT_MS: "120000"' in release
+    assert 'CAMOUFLARE_SMOKE_REQUEST_TIMEOUT_MS: "120000"' in release
+    assert 'CAMOUFLARE_SMOKE_CURL_TIMEOUT_SECONDS: "180"' in release
     assert 'CAMOUFLARE_SMOKE_STARTUP_TIMEOUT_SECONDS: "180"' in release
     assert "severity: HIGH,CRITICAL" in release
     assert "attest-build-provenance" in release
@@ -224,6 +247,13 @@ def test_container_smoke_forwards_bounded_startup_timeouts() -> None:
     smoke = (ROOT / "scripts/container_smoke.sh").read_text(encoding="utf-8")
 
     assert "${CAMOUFLARE_SMOKE_POOL_ACQUIRE_TIMEOUT_MS:-30000}" in smoke
+    assert "${CAMOUFLARE_SMOKE_READINESS_TIMEOUT_MS:-15000}" in smoke
+    assert "${CAMOUFLARE_SMOKE_REQUEST_TIMEOUT_MS:-60000}" in smoke
+    assert "${CAMOUFLARE_SMOKE_CURL_TIMEOUT_SECONDS:-90}" in smoke
     assert "${CAMOUFLARE_SMOKE_STARTUP_TIMEOUT_SECONDS:-120}" in smoke
     assert '--env POOL_ACQUIRE_TIMEOUT_MS="${pool_acquire_timeout_ms}"' in smoke
+    assert '--env READINESS_TIMEOUT_MS="${readiness_timeout_ms}"' in smoke
     assert 'seq 1 "${startup_timeout_seconds}"' in smoke
+    assert '\\"maxTimeout\\":${request_timeout_ms}' in smoke
+    assert '--max-time "${curl_timeout_seconds}"' in smoke
+    assert smoke.count("--fail-with-body") == 2
