@@ -175,6 +175,13 @@ def test_ci_and_nightly_cover_real_browser_container_and_soak_gates() -> None:
     assert "arch: [amd64, arm64]" in ci
     assert "CAMOUFLARE_RUN_BROWSER_TESTS" in ci
     assert "scripts/container_smoke.sh" in ci
+    assert (
+        "CAMOUFLARE_SMOKE_POOL_ACQUIRE_TIMEOUT_MS: "
+        "${{ matrix.arch == 'arm64' && '120000' || '30000' }}"
+    ) in ci
+    assert (
+        "CAMOUFLARE_SMOKE_STARTUP_TIMEOUT_SECONDS: ${{ matrix.arch == 'arm64' && '180' || '120' }}"
+    ) in ci
     assert "--cov-fail-under=85" in ci
     assert "ruff format --check" in ci
     assert "pyright==1.1.411" in ci
@@ -197,8 +204,26 @@ def test_release_is_immutable_approval_gated_and_multi_arch() -> None:
     assert "python scripts/verify_release.py" in release
     assert "environment:\n      name: release" in release
     assert "linux/amd64,linux/arm64" in release
+    assert (
+        "CAMOUFLARE_SMOKE_POOL_ACQUIRE_TIMEOUT_MS: "
+        "${{ matrix.arch == 'arm64' && '120000' || '30000' }}"
+    ) in release
+    assert (
+        "CAMOUFLARE_SMOKE_STARTUP_TIMEOUT_SECONDS: ${{ matrix.arch == 'arm64' && '180' || '120' }}"
+    ) in release
+    assert 'CAMOUFLARE_SMOKE_POOL_ACQUIRE_TIMEOUT_MS: "120000"' in release
+    assert 'CAMOUFLARE_SMOKE_STARTUP_TIMEOUT_SECONDS: "180"' in release
     assert "severity: HIGH,CRITICAL" in release
     assert "attest-build-provenance" in release
     assert "sbom" in release.lower()
     assert "gh-action-pypi-publish" not in release
     assert "pypi_complete" not in release
+
+
+def test_container_smoke_forwards_bounded_startup_timeouts() -> None:
+    smoke = (ROOT / "scripts/container_smoke.sh").read_text(encoding="utf-8")
+
+    assert "${CAMOUFLARE_SMOKE_POOL_ACQUIRE_TIMEOUT_MS:-30000}" in smoke
+    assert "${CAMOUFLARE_SMOKE_STARTUP_TIMEOUT_SECONDS:-120}" in smoke
+    assert '--env POOL_ACQUIRE_TIMEOUT_MS="${pool_acquire_timeout_ms}"' in smoke
+    assert 'seq 1 "${startup_timeout_seconds}"' in smoke
