@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 
+from camouflare.cleanup import CleanupSupervisor
 from camouflare.sessions import SessionManager
 from tests.fakes import DelayedFakeSessionContext, FakeContext
 
@@ -145,6 +146,179 @@ async def test_destroy_waits_for_in_flight_lock_holder() -> None:
 
 
 @pytest.mark.anyio
+async def test_cancelled_destroy_keeps_cleanup_tracked_and_reserves_id_and_capacity() -> None:
+    close_started = asyncio.Event()
+    finish_close = asyncio.Event()
+    close_calls = 0
+
+    async def close_session() -> None:
+        nonlocal close_calls
+        close_calls += 1
+        close_started.set()
+        await finish_close.wait()
+
+    manager = SessionManager(max_sessions=1, default_ttl_seconds=3600)
+    manager.register_existing("abc", FakeContext(), on_close=close_session)
+
+    destroy_task = asyncio.create_task(manager.destroy("abc"))
+    await close_started.wait()
+
+    assert manager.snapshot().active == 0
+    assert manager.snapshot().closing == 1
+    assert manager.is_closing("abc") is True
+    with pytest.raises(RuntimeError, match="still closing"):
+        manager.register_existing("abc", FakeContext())
+    with pytest.raises(RuntimeError, match="Maximum sessions"):
+        manager.register_existing("other", FakeContext())
+
+    destroy_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await destroy_task
+
+    # Cancelling the request that initiated destruction must not cancel or lose
+    # ownership of the physical cleanup.
+    assert manager.is_closing("abc") is True
+    finish_close.set()
+    for _ in range(10):
+        if not manager.is_closing("abc"):
+            break
+        await asyncio.sleep(0)
+
+    assert close_calls == 1
+    assert manager.snapshot().closing == 0
+    replacement = manager.register_existing("abc", FakeContext())
+    assert replacement.session_id == "abc"
+
+
+@pytest.mark.anyio
+async def test_prune_starts_all_expired_cleanup_before_waiting_for_slow_one() -> None:
+    slow_started = asyncio.Event()
+    finish_slow = asyncio.Event()
+    fast_closed = asyncio.Event()
+
+    async def close_slow() -> None:
+        slow_started.set()
+        await finish_slow.wait()
+
+    async def close_fast() -> None:
+        fast_closed.set()
+
+    manager = SessionManager(max_sessions=2, default_ttl_seconds=0)
+    manager.register_existing("slow", FakeContext(), on_close=close_slow)
+    manager.register_existing("fast", FakeContext(), on_close=close_fast)
+
+    prune_task = asyncio.create_task(manager.prune_expired())
+    await slow_started.wait()
+    await asyncio.wait_for(fast_closed.wait(), timeout=1)
+
+    assert manager.snapshot().active == 0
+    assert manager.is_closing("slow") is True
+    assert not prune_task.done()
+
+    # The reaper/request may be cancelled while one close hangs. The manager-owned
+    # close continues and remains visible until the resource actually closes.
+    prune_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await prune_task
+    assert manager.is_closing("slow") is True
+
+    finish_slow.set()
+    for _ in range(10):
+        if not manager.is_closing("slow"):
+            break
+        await asyncio.sleep(0)
+    assert manager.snapshot().closing == 0
+
+
+@pytest.mark.anyio
+async def test_shutdown_drains_existing_cleanup_and_respects_session_lock() -> None:
+    finish_first = asyncio.Event()
+    first_started = asyncio.Event()
+    contexts_closed: list[str] = []
+
+    async def close_first() -> None:
+        first_started.set()
+        await finish_first.wait()
+        contexts_closed.append("first")
+
+    async def close_second() -> None:
+        contexts_closed.append("second")
+
+    manager = SessionManager(max_sessions=2, default_ttl_seconds=60)
+    manager.register_existing("first", FakeContext(), on_close=close_first)
+    second = manager.register_existing("second", FakeContext(), on_close=close_second)
+
+    destroy_task = asyncio.create_task(manager.destroy("first"))
+    await first_started.wait()
+    destroy_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await destroy_task
+
+    await second.lock.acquire()
+    close_task = asyncio.create_task(manager.close())
+    await asyncio.sleep(0)
+    assert manager.snapshot().active == 0
+    assert manager.snapshot().closing == 2
+    assert contexts_closed == []
+
+    finish_first.set()
+    second.lock.release()
+    await close_task
+
+    assert set(contexts_closed) == {"first", "second"}
+    assert manager.snapshot().closing == 0
+    with pytest.raises(RuntimeError, match="manager is closed"):
+        manager.register_existing("third", FakeContext())
+
+
+@pytest.mark.anyio
+async def test_session_id_stays_reserved_until_timed_out_physical_cleanup_finishes() -> None:
+    close_started = asyncio.Event()
+    finish_cancelled_close = asyncio.Event()
+
+    async def stubborn_close() -> None:
+        close_started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            await finish_cancelled_close.wait()
+
+    cleanup = CleanupSupervisor(timeout_seconds=0.01)
+    manager = SessionManager(
+        max_sessions=1,
+        default_ttl_seconds=60,
+        cleanup_timeout_seconds=0.01,
+        cleanup_supervisor=cleanup,
+    )
+    manager.register_existing("abc", FakeContext(), on_close=stubborn_close)
+
+    destroy_task = asyncio.create_task(manager.destroy("abc"))
+    await close_started.wait()
+    await asyncio.sleep(0.02)
+
+    assert close_started.is_set()
+    assert destroy_task.done() is False
+    assert manager.snapshot().closing == 1
+    assert cleanup.snapshot().in_flight == 1
+
+    with pytest.raises(RuntimeError, match="still closing"):
+        manager.register_existing("abc", FakeContext())
+    with pytest.raises(RuntimeError, match="Maximum sessions"):
+        manager.register_existing("other", FakeContext())
+
+    finish_cancelled_close.set()
+    assert await destroy_task is True
+    for _ in range(10):
+        if cleanup.snapshot().in_flight == 0:
+            break
+        await asyncio.sleep(0)
+    assert cleanup.snapshot().in_flight == 0
+    assert manager.snapshot().closing == 0
+    replacement = manager.register_existing("abc", FakeContext())
+    assert replacement.session_id == "abc"
+
+
+@pytest.mark.anyio
 async def test_shutdown_closes_remaining_sessions_after_one_close_failure() -> None:
     events: list[str] = []
 
@@ -179,6 +353,7 @@ def test_session_snapshot_tracks_active_and_checked_out_sessions() -> None:
 
     assert manager.snapshot().active == 1
     assert manager.snapshot().in_use == 0
+    assert manager.snapshot().closing == 0
     assert manager.snapshot().max_sessions == 3
 
     manager.mark_in_use(session)

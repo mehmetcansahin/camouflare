@@ -7,6 +7,7 @@ from typing import Any, cast
 from uuid import uuid4
 
 from camouflare.captcha import CaptchaProvider
+from camouflare.cleanup import CleanupSupervisor
 from camouflare.config import Settings, normalize_proxy
 from camouflare.metrics import record_session_event
 from camouflare.models import V1Request, V1Response
@@ -36,6 +37,7 @@ class CommandService:
     pool: BrowserPool
     sessions: SessionManager
     captcha_provider: CaptchaProvider
+    cleanup: CleanupSupervisor | None = None
 
     async def dispatch(self, request: V1Request, *, start_timestamp: int) -> V1Response:
         return await dispatch_v1(
@@ -44,6 +46,7 @@ class CommandService:
             sessions=self.sessions,
             settings=self.settings,
             captcha_provider=self.captcha_provider,
+            cleanup=self.cleanup,
             start_timestamp=start_timestamp,
         )
 
@@ -56,6 +59,7 @@ async def dispatch_v1(
     settings: Settings,
     captcha_provider: CaptchaProvider,
     start_timestamp: int,
+    cleanup: CleanupSupervisor | None = None,
 ) -> V1Response:
     if not request.cmd:
         raise RuntimeError("Request parameter 'cmd' is mandatory.")
@@ -65,7 +69,13 @@ async def dispatch_v1(
         await sessions.prune_expired(exclude=request.session)
 
     if request.cmd == "sessions.create":
-        return await sessions_create(request, pool=pool, sessions=sessions, settings=settings)
+        return await sessions_create(
+            request,
+            pool=pool,
+            sessions=sessions,
+            settings=settings,
+            cleanup=cleanup,
+        )
     if request.cmd == "sessions.list":
         return V1Response(status="ok", sessions=sessions.list_ids(), version=settings.version)
     if request.cmd == "sessions.destroy":
@@ -84,6 +94,7 @@ async def dispatch_v1(
             sessions=sessions,
             settings=settings,
             captcha_provider=captcha_provider,
+            cleanup=cleanup,
             start_timestamp=start_timestamp,
         )
     raise RuntimeError(f"Request parameter 'cmd' = '{request.cmd}' is invalid.")
@@ -95,6 +106,7 @@ async def sessions_create(
     pool: BrowserPool,
     sessions: SessionManager,
     settings: Settings,
+    cleanup: CleanupSupervisor | None = None,
 ) -> V1Response:
     session_id = request.session
     existing = sessions.get(session_id) if session_id else None
@@ -113,7 +125,7 @@ async def sessions_create(
             **context_options(proxy_lease.browser_proxy, request)
         )
     except PersistentCapacityError:
-        await proxy_lease.close()
+        await _close_proxy_best_effort(proxy_lease, cleanup=cleanup, settings=settings)
         if session_id is not None:
             for _ in range(3):
                 winner = sessions.get(session_id)
@@ -127,15 +139,17 @@ async def sessions_create(
                 await asyncio.sleep(0)
         record_session_event("rejected")
         raise
-    except Exception:
-        await proxy_lease.close()
+    except BaseException:
+        await _close_proxy_best_effort(proxy_lease, cleanup=cleanup, settings=settings)
         raise
 
     async def close_session_resources() -> None:
-        try:
-            await persistent.close()
-        finally:
-            await proxy_lease.close()
+        await _close_persistent_resources(
+            persistent,
+            proxy_lease,
+            cleanup=cleanup,
+            settings=settings,
+        )
 
     try:
         session, created = sessions.register_or_get(
@@ -145,7 +159,7 @@ async def sessions_create(
             on_close=close_session_resources,
             ttl_seconds=ttl_seconds,
         )
-    except Exception:
+    except BaseException:
         await close_session_resources()
         raise
     if not created:
@@ -166,6 +180,7 @@ async def execute_request(
     settings: Settings,
     captcha_provider: CaptchaProvider,
     start_timestamp: int,
+    cleanup: CleanupSupervisor | None = None,
 ) -> V1Response:
     if request.cmd == "request.get" and not request.url:
         raise RuntimeError("Request parameter 'url' is mandatory in 'request.get' command.")
@@ -180,6 +195,7 @@ async def execute_request(
             pool=pool,
             sessions=sessions,
             settings=settings,
+            cleanup=cleanup,
         )
         sessions.mark_in_use(session)
         try:
@@ -197,9 +213,15 @@ async def execute_request(
                         limits=settings.resource_limits,
                         allow_direct_http_fallback=session.proxy is None,
                         allow_direct_http_first=False,
+                        cleanup_supervisor=cleanup,
+                        cleanup_timeout_seconds=settings.cleanup_timeout_seconds,
                     )
                 finally:
-                    await close_page(page)
+                    await close_page(
+                        page,
+                        cleanup_supervisor=cleanup,
+                        timeout_seconds=settings.cleanup_timeout_seconds,
+                    )
         finally:
             sessions.mark_released(session)
     else:
@@ -221,9 +243,15 @@ async def execute_request(
                             limits=settings.resource_limits,
                             allow_direct_http_fallback=proxy is None,
                             allow_direct_http_first=proxy is None,
+                            cleanup_supervisor=cleanup,
+                            cleanup_timeout_seconds=settings.cleanup_timeout_seconds,
                         )
                     finally:
-                        await close_page(page)
+                        await close_page(
+                            page,
+                            cleanup_supervisor=cleanup,
+                            timeout_seconds=settings.cleanup_timeout_seconds,
+                        )
             except Exception:
                 if response is None:
                     raise
@@ -231,7 +259,11 @@ async def execute_request(
                     "Ignoring browser cleanup error after a completed solve.", exc_info=True
                 )
         finally:
-            await proxy_lease.close()
+            await _close_proxy_best_effort(
+                proxy_lease,
+                cleanup=cleanup,
+                settings=settings,
+            )
 
     assert response is not None
     response.version = settings.version
@@ -245,6 +277,7 @@ async def session_for_request(
     pool: BrowserPool,
     sessions: SessionManager,
     settings: Settings,
+    cleanup: CleanupSupervisor | None = None,
 ) -> Session:
     assert request.session is not None
     ttl_seconds = resolve_ttl_seconds(request, settings)
@@ -266,15 +299,17 @@ async def session_for_request(
         persistent = await pool.create_persistent_context(
             **context_options(proxy_lease.browser_proxy, request)
         )
-    except Exception:
-        await proxy_lease.close()
+    except BaseException:
+        await _close_proxy_best_effort(proxy_lease, cleanup=cleanup, settings=settings)
         raise
 
     async def close_session_resources() -> None:
-        try:
-            await persistent.close()
-        finally:
-            await proxy_lease.close()
+        await _close_persistent_resources(
+            persistent,
+            proxy_lease,
+            cleanup=cleanup,
+            settings=settings,
+        )
 
     try:
         session, created = sessions.register_or_get(
@@ -284,7 +319,7 @@ async def session_for_request(
             on_close=close_session_resources,
             ttl_seconds=ttl_seconds,
         )
-    except Exception:
+    except BaseException:
         await close_session_resources()
         raise
     if not created:
@@ -325,14 +360,67 @@ def resolve_ttl_seconds(request: V1Request, settings: Settings) -> int:
     return settings.session_ttl_seconds
 
 
-async def close_page(page: PageLike) -> None:
+async def close_page(
+    page: PageLike,
+    *,
+    cleanup_supervisor: CleanupSupervisor | None = None,
+    timeout_seconds: float = 10,
+) -> None:
+    supervisor = cleanup_supervisor or CleanupSupervisor(timeout_seconds=timeout_seconds)
     try:
-        await page.close()
-    except Exception as exc:
-        if is_best_effort_browser_error(exc):
+        await supervisor.run(page.close(), kind="page", timeout_seconds=timeout_seconds)
+    except BaseException as exc:
+        if isinstance(exc, asyncio.CancelledError):
+            raise
+        if isinstance(exc, Exception) and is_best_effort_browser_error(exc):
             logger.debug("Ignoring best-effort page close error: %s", exc)
+        elif isinstance(exc, TimeoutError):
+            logger.warning("Page cleanup exceeded %.3f seconds.", timeout_seconds)
         else:
             logger.warning("Ignoring page close error after a completed solve.", exc_info=True)
+
+
+async def _close_proxy_best_effort(
+    proxy_lease: Any,
+    *,
+    cleanup: CleanupSupervisor | None,
+    settings: Settings,
+) -> None:
+    supervisor = cleanup or CleanupSupervisor(timeout_seconds=settings.cleanup_timeout_seconds)
+    try:
+        await supervisor.run(
+            proxy_lease.close(),
+            kind="proxy",
+            timeout_seconds=settings.cleanup_timeout_seconds,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.warning("Ignoring proxy cleanup error.", exc_info=True)
+
+
+async def _close_persistent_resources(
+    persistent: Any,
+    proxy_lease: Any,
+    *,
+    cleanup: CleanupSupervisor | None,
+    settings: Settings,
+) -> None:
+    supervisor = cleanup or CleanupSupervisor(timeout_seconds=settings.cleanup_timeout_seconds)
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + settings.cleanup_timeout_seconds
+    try:
+        await supervisor.run(
+            persistent.close(),
+            kind="context",
+            timeout_seconds=max(0.001, deadline - loop.time()),
+        )
+    finally:
+        await supervisor.run(
+            proxy_lease.close(),
+            kind="proxy",
+            timeout_seconds=max(0.001, deadline - loop.time()),
+        )
 
 
 def generated_session_id() -> str:

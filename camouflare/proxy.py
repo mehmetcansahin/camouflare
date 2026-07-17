@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import logging
 from contextlib import suppress
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -41,10 +44,20 @@ class LocalSocksBridge:
             local_host=local_host,
             local_port=0,
         )
-        server = await asyncio.start_server(bridge._accept_client, local_host, 0)
-        bridge.server = server
-        bridge.local_port = int(server.sockets[0].getsockname()[1])
-        return bridge
+        server: asyncio.AbstractServer | None = None
+        try:
+            server = await asyncio.start_server(bridge._accept_client, local_host, 0)
+            bridge.server = server
+            bridge.local_port = int(server.sockets[0].getsockname()[1])
+            return bridge
+        except BaseException:
+            # Once start_server has returned, this method owns the listening
+            # socket even if cancellation lands while finalising the bridge.
+            if server is not None:
+                server.close()
+                with suppress(Exception):
+                    await server.wait_closed()
+            raise
 
     @property
     def browser_proxy(self) -> dict[str, str]:
@@ -74,7 +87,20 @@ class LocalSocksBridge:
         self._client_writers.add(client_writer)
         task = asyncio.create_task(self._handle_client(client_reader, client_writer))
         self._handler_tasks.add(task)
-        task.add_done_callback(self._handler_tasks.discard)
+        task.add_done_callback(self._handler_done)
+
+    def _handler_done(self, task: asyncio.Task[None]) -> None:
+        self._handler_tasks.discard(task)
+        try:
+            error = task.exception()
+        except asyncio.CancelledError:
+            return
+        if error is not None:
+            logger.error(
+                "SOCKS bridge client handler failed: %s",
+                error,
+                exc_info=(type(error), error, error.__traceback__),
+            )
 
     def _close_tracked_clients(self) -> None:
         for writer in list(self._client_writers):
@@ -160,7 +186,7 @@ class LocalSocksBridge:
             await _read_socks_address(reader, reply_atyp)
             await reader.readexactly(2)
             return reader, writer
-        except Exception:
+        except BaseException:
             writer.close()
             with suppress(BrokenPipeError, ConnectionError, OSError):
                 await writer.wait_closed()

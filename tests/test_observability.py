@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 import io
 import json
@@ -182,14 +183,21 @@ def test_metrics_hooks_bound_labels_and_publish_snapshots() -> None:
         transient_contexts=3,
         persistent_contexts=4,
         waiting_requests=5,
+        retiring_browser_slots=1,
+        usable_context_slots=7,
+        idle_recyclable_slots=2,
     )
-    metrics.set_session_snapshot(active=6, in_use=2)
+    metrics.set_session_snapshot(active=6, in_use=2, closing=1)
 
     assert metrics.metric_value(metrics.BROWSER_STATE, state="ready") == 2
     assert metrics.metric_value(metrics.BROWSER_STATE, state="starting") == 1
+    assert metrics.metric_value(metrics.BROWSER_STATE, state="retiring") == 1
     assert metrics.metric_value(metrics.CONTEXT_STATE, kind="transient") == 3
     assert metrics.metric_value(metrics.SESSION_STATE, state="active") == 6
+    assert metrics.metric_value(metrics.SESSION_STATE, state="closing") == 1
     assert metrics.metric_value(metrics.POOL_WAITING_REQUESTS) == 5
+    assert metrics.metric_value(metrics.POOL_USABLE_CONTEXT_SLOTS) == 7
+    assert metrics.metric_value(metrics.POOL_IDLE_RECYCLABLE_SLOTS) == 2
 
     before = _sample_value(
         metrics.POOL_ACQUIRE_COUNTER,
@@ -278,6 +286,157 @@ def test_metric_lifecycle_hooks_are_balanced_and_bounded() -> None:
 
     body = bytes(metrics.metrics_response().body)
     assert b"camouflare_in_flight_requests" in body
+
+
+def test_resilience_metrics_are_bounded_and_exported() -> None:
+    metrics.set_cleanup_snapshot(by_kind={"page": 2, "dynamic-kind": 3})
+    assert metrics.metric_value(metrics.CLEANUP_IN_FLIGHT, kind="page") == 2
+    assert metrics.metric_value(metrics.CLEANUP_IN_FLIGHT, kind="other") == 3
+
+    cleanup_before = _sample_value(
+        metrics.CLEANUP_COUNTER,
+        "camouflare_cleanup_total",
+        kind="other",
+        result="other",
+    )
+    metrics.record_cleanup(
+        kind="dynamic-kind",
+        result="dynamic-result",
+        duration_seconds=-1,
+    )
+    assert (
+        _sample_value(
+            metrics.CLEANUP_COUNTER,
+            "camouflare_cleanup_total",
+            kind="other",
+            result="other",
+        )
+        == cleanup_before + 1
+    )
+
+    readiness_before = _sample_value(
+        metrics.READINESS_COUNTER,
+        "camouflare_readiness_total",
+        result="other",
+    )
+    metrics.observe_readiness(result="dynamic-result", duration_seconds=-1)
+    assert (
+        _sample_value(
+            metrics.READINESS_COUNTER,
+            "camouflare_readiness_total",
+            result="other",
+        )
+        == readiness_before + 1
+    )
+
+    acquire_before = _sample_value(
+        metrics.POOL_ACQUIRE_TIMEOUT_COUNTER,
+        "camouflare_pool_acquire_timeout_total",
+        reason="other",
+    )
+    metrics.record_pool_acquire_timeout("dynamic-reason")
+    assert (
+        _sample_value(
+            metrics.POOL_ACQUIRE_TIMEOUT_COUNTER,
+            "camouflare_pool_acquire_timeout_total",
+            reason="other",
+        )
+        == acquire_before + 1
+    )
+
+    asyncio_before = _sample_value(
+        metrics.ASYNCIO_UNHANDLED_COUNTER,
+        "camouflare_asyncio_unhandled_total",
+        kind="other",
+    )
+    metrics.record_asyncio_unhandled("dynamic-kind")
+    assert (
+        _sample_value(
+            metrics.ASYNCIO_UNHANDLED_COUNTER,
+            "camouflare_asyncio_unhandled_total",
+            kind="other",
+        )
+        == asyncio_before + 1
+    )
+
+    body = bytes(metrics.metrics_response().body)
+    assert b"camouflare_pool_usable_context_slots" in body
+    assert b"camouflare_pool_idle_recyclable_slots" in body
+    assert b"camouflare_cleanup_total" in body
+    assert b"camouflare_readiness_total" in body
+    assert b"camouflare_pool_acquire_timeout_total" in body
+    assert b"camouflare_asyncio_unhandled_total" in body
+
+
+@pytest.mark.anyio
+async def test_asyncio_exception_handler_counts_unhandled_future_without_dynamic_labels() -> None:
+    loop = asyncio.get_running_loop()
+    original_handler = loop.get_exception_handler()
+    chained_contexts: list[dict[str, object]] = []
+    loop.set_exception_handler(lambda _loop, context: chained_contexts.append(context))
+    before = _sample_value(
+        metrics.ASYNCIO_UNHANDLED_COUNTER,
+        "camouflare_asyncio_unhandled_total",
+        kind="future",
+    )
+    future = loop.create_future()
+
+    try:
+        restore = metrics.install_asyncio_exception_metrics()
+        handler = loop.get_exception_handler()
+        assert handler is not None
+        context = {"message": "Future exception was never retrieved", "future": future}
+        handler(loop, context)
+    finally:
+        if "restore" in locals():
+            restore()
+        future.cancel()
+        loop.set_exception_handler(original_handler)
+
+    assert (
+        _sample_value(
+            metrics.ASYNCIO_UNHANDLED_COUNTER,
+            "camouflare_asyncio_unhandled_total",
+            kind="future",
+        )
+        == before + 1
+    )
+    assert chained_contexts == [context]
+
+
+@pytest.mark.anyio
+async def test_asyncio_exception_metrics_reinstalls_after_handler_replacement() -> None:
+    loop = asyncio.get_running_loop()
+    original = loop.get_exception_handler()
+    first_restore = metrics.install_asyncio_exception_metrics()
+    replacement_contexts: list[dict[str, object]] = []
+
+    def replacement(_loop: asyncio.AbstractEventLoop, context: dict[str, object]) -> None:
+        replacement_contexts.append(context)
+
+    loop.set_exception_handler(replacement)
+
+    try:
+        second_restore = metrics.install_asyncio_exception_metrics()
+        installed = loop.get_exception_handler()
+        assert installed is not None and installed is not replacement
+        context = {"message": "replacement-chain"}
+        installed(loop, context)
+        second_restore()
+        assert loop.get_exception_handler() is replacement
+    finally:
+        first_restore()
+        loop.set_exception_handler(original)
+
+    assert replacement_contexts == [context]
+
+
+def test_asyncio_exception_kind_recognizes_standard_async_generator_context() -> None:
+    assert metrics._asyncio_unhandled_kind({"asyncgen": object()}) == "async_generator"
+    assert (
+        metrics._asyncio_unhandled_kind({"message": "error closing asynchronous generator"})
+        == "async_generator"
+    )
 
 
 def test_metric_module_reload_reuses_registered_collectors() -> None:

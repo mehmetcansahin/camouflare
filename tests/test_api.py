@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
 
@@ -17,6 +19,8 @@ from camouflare.app import (
     _session_reaper,
     create_app,
 )
+from camouflare.cleanup import CleanupSupervisor
+from camouflare.commands import _close_proxy_best_effort
 from camouflare.config import Settings
 from camouflare.limits import ResourceLimitError
 from camouflare.metrics import REQUEST_COUNTER
@@ -190,6 +194,7 @@ async def test_api_token_protects_non_health_endpoints() -> None:
             json={"cmd": "request.get", "url": "https://example.com"},
         )
         ready_response = await client.get("/ready")
+        diagnostics_response = await client.get("/diagnostics")
         documentation_response = await client.get("/documentation")
         health_response = await client.get("/health")
 
@@ -197,11 +202,12 @@ async def test_api_token_protects_non_health_endpoints() -> None:
     assert v1_response.json() == {"detail": "Unauthorized"}
     assert ready_response.status_code == 401
     assert ready_response.json() == {"detail": "Unauthorized"}
+    assert diagnostics_response.status_code == 401
+    assert diagnostics_response.json() == {"detail": "Unauthorized"}
     assert documentation_response.status_code == 401
     assert documentation_response.json() == {"detail": "Unauthorized"}
     assert health_response.status_code == 200
-    assert health_response.json()["status"] == "ok"
-    assert health_response.json()["pool"]["active_contexts"] == 0
+    assert health_response.json() == {"status": "ok"}
 
 
 @pytest.mark.anyio
@@ -246,6 +252,235 @@ async def test_api_token_accepts_x_api_token_header() -> None:
 
     assert response.status_code == 200
     assert "<title>Camouflare API Documentation</title>" in response.text
+
+
+@pytest.mark.anyio
+async def test_diagnostics_is_token_protected_passive_and_reports_capacity() -> None:
+    factory = FakeBrowserFactory()
+    app = create_app(
+        settings=Settings(
+            camouflare_api_token="secret-token",
+            pool_max_browsers=1,
+            pool_max_contexts_per_browser=2,
+        ),
+        browser_factory=factory,
+        lifespan_enabled=False,
+    )
+    await app.state.pool.start()
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.get(
+                "/diagnostics",
+                headers={"X-API-Token": "secret-token"},
+            )
+    finally:
+        await app.state.pool.close()
+        await app.state.cleanup.close()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["capacity_state"] == "available"
+    assert body["pool"] == {
+        "ready_browser_slots": 1,
+        "retiring_browser_slots": 0,
+        "creating_slots": 0,
+        "closing_slots": 0,
+        "active_contexts": 0,
+        "transient_contexts": 0,
+        "persistent_contexts": 0,
+        "waiting_requests": 0,
+        "usable_context_slots": 2,
+        "idle_recyclable_slots": 0,
+        "max_browsers": 1,
+        "max_contexts_per_browser": 2,
+        "max_slots": 2,
+    }
+    assert body["sessions"] == {
+        "active": 0,
+        "in_use": 0,
+        "closing": 0,
+        "max_sessions": 32,
+    }
+    assert body["cleanup"] == {
+        "in_flight": 0,
+        "oldest_age_seconds": None,
+        "by_kind": {},
+    }
+    assert set(body["runtime"]) == {"playwright_version", "playwright_cancel_patch"}
+    assert "secret-token" not in response.text
+    assert factory.created[0].contexts == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("updates", "expected_state"),
+    [
+        ({"ready_browser_slots": 1, "usable_context_slots": 1}, "available"),
+        ({"creating_slots": 1}, "recovering"),
+        ({"active_contexts": 1, "transient_contexts": 1}, "saturated"),
+        (
+            {
+                "max_browsers": 0,
+                "max_contexts_per_browser": 0,
+                "max_slots": 0,
+            },
+            "unavailable",
+        ),
+        ({}, "unavailable"),
+    ],
+)
+async def test_diagnostics_classifies_capacity_without_leasing_browser(
+    monkeypatch: pytest.MonkeyPatch,
+    updates: dict[str, int],
+    expected_state: str,
+) -> None:
+    app = create_app(browser_factory=FakeBrowserFactory(), lifespan_enabled=False)
+    snapshot = {
+        "browser_slots": 0,
+        "ready_browser_slots": 0,
+        "retiring_browser_slots": 0,
+        "creating_slots": 0,
+        "closing_slots": 0,
+        "active_contexts": 0,
+        "transient_contexts": 0,
+        "persistent_contexts": 0,
+        "waiting_requests": 0,
+        "usable_context_slots": 0,
+        "idle_recyclable_slots": 0,
+        "max_browsers": 2,
+        "max_contexts_per_browser": 1,
+        "max_slots": 2,
+    }
+    snapshot.update(updates)
+    monkeypatch.setattr(app.state.pool, "snapshot", lambda: snapshot)
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.get("/diagnostics")
+    finally:
+        await app.state.pool.close()
+        await app.state.cleanup.close()
+
+    assert response.status_code == 200
+    assert response.json()["capacity_state"] == expected_state
+
+
+@pytest.mark.anyio
+async def test_diagnostics_falls_back_to_http_200_when_snapshot_reader_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = create_app(browser_factory=FakeBrowserFactory(), lifespan_enabled=False)
+
+    def fail_snapshot() -> object:
+        raise RuntimeError("corrupt capacity state")
+
+    monkeypatch.setattr(app.state.pool, "snapshot", fail_snapshot)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/diagnostics")
+
+    assert response.status_code == 200
+    assert response.json()["capacity_state"] == "unavailable"
+    assert response.json()["pool"]["max_slots"] > 0
+
+
+@pytest.mark.anyio
+async def test_diagnostics_sanitizes_non_finite_cleanup_age(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = create_app(browser_factory=FakeBrowserFactory(), lifespan_enabled=False)
+    monkeypatch.setattr(
+        app.state.cleanup,
+        "snapshot",
+        lambda: {
+            "in_flight": 1,
+            "oldest_age_seconds": float("inf"),
+            "by_kind": {"context": 1},
+        },
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/diagnostics")
+
+    assert response.status_code == 200
+    assert response.json()["cleanup"]["oldest_age_seconds"] is None
+
+
+@pytest.mark.anyio
+async def test_diagnostics_sanitizes_non_finite_integer_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = create_app(browser_factory=FakeBrowserFactory(), lifespan_enabled=False)
+    monkeypatch.setattr(
+        app.state.pool,
+        "snapshot",
+        lambda: {
+            "active_contexts": float("inf"),
+            "usable_context_slots": float("-inf"),
+            "max_browsers": float("inf"),
+            "max_contexts_per_browser": float("inf"),
+            "max_slots": float("inf"),
+        },
+    )
+    monkeypatch.setattr(
+        app.state.cleanup,
+        "snapshot",
+        lambda: {
+            "in_flight": float("inf"),
+            "oldest_age_seconds": None,
+            "by_kind": {"context": float("inf")},
+        },
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/diagnostics")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["capacity_state"] == "unavailable"
+    assert payload["pool"]["active_contexts"] == 0
+    assert payload["pool"]["max_slots"] > 0
+    assert payload["cleanup"]["in_flight"] == 0
+    assert payload["cleanup"]["by_kind"]["context"] == 0
+
+
+@pytest.mark.anyio
+async def test_diagnostics_never_exposes_session_or_proxy_secrets() -> None:
+    app = create_app(browser_factory=FakeBrowserFactory(), lifespan_enabled=False)
+    app.state.sessions.register_existing(
+        "private-session-id",
+        FakeContext(),
+        proxy={
+            "server": "http://proxy.internal:8080",
+            "username": "proxy-user",
+            "password": "proxy-password",
+        },
+    )
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.get("/diagnostics")
+    finally:
+        await app.state.sessions.close()
+
+    assert response.status_code == 200
+    for secret in (
+        "private-session-id",
+        "proxy.internal",
+        "proxy-user",
+        "proxy-password",
+    ):
+        assert secret not in response.text
 
 
 @pytest.mark.anyio
@@ -489,6 +724,65 @@ async def test_max_timeout_cancels_dedicated_dispatch_task(
 
 
 @pytest.mark.anyio
+async def test_max_timeout_does_not_wait_for_stuck_cancellation_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release_cleanup = asyncio.Event()
+    cleanup_finished = asyncio.Event()
+
+    async def stubborn_dispatch(
+        _service: object,
+        *_args: object,
+        **_kwargs: object,
+    ) -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await release_cleanup.wait()
+        finally:
+            cleanup_finished.set()
+
+    app = create_app(
+        settings=Settings(cleanup_timeout_seconds=1),
+        browser_factory=FakeBrowserFactory(),
+        lifespan_enabled=False,
+    )
+    monkeypatch.setattr(type(app.state.command_service), "dispatch", stubborn_dispatch)
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            started = time.monotonic()
+            response = await client.post(
+                "/v1",
+                json={
+                    "cmd": "request.get",
+                    "url": "https://example.com",
+                    "maxTimeout": 20,
+                },
+            )
+            elapsed = time.monotonic() - started
+            diagnostics = await client.get("/diagnostics")
+
+        assert response.status_code == 500
+        assert "maxTimeout" in response.json()["message"]
+        assert elapsed < 0.5
+        assert diagnostics.status_code == 200
+        assert diagnostics.json()["capacity_state"] == "recovering"
+        assert diagnostics.json()["cleanup"]["by_kind"]["request"] == 1
+    finally:
+        release_cleanup.set()
+        await asyncio.wait_for(cleanup_finished.wait(), timeout=0.5)
+        await asyncio.sleep(0)
+        await app.state.pool.close()
+        await app.state.cleanup.close()
+
+    assert app.state.cleanup.snapshot().in_flight == 0
+
+
+@pytest.mark.anyio
 async def test_invalid_command_returns_flaresolverr_error_envelope() -> None:
     app = create_app(browser_factory=FakeBrowserFactory(), lifespan_enabled=False)
     await app.state.pool.start()
@@ -518,24 +812,12 @@ async def test_health_reports_liveness_without_creating_request_browser() -> Non
         response = await client.get("/health")
 
     assert response.status_code == 200
-    assert response.json() == {
-        "status": "ok",
-        "pool": {
-            "browser_slots": 0,
-            "creating_slots": 0,
-            "closing_slots": 0,
-            "active_contexts": 0,
-            "transient_contexts": 0,
-            "persistent_contexts": 0,
-            "waiting_requests": 0,
-            "max_slots": 2,
-        },
-    }
+    assert response.json() == {"status": "ok"}
     assert factory.created == []
 
 
 @pytest.mark.anyio
-async def test_health_reports_current_browser_pool_snapshot_without_leasing_context() -> None:
+async def test_health_does_not_expose_current_browser_pool_state() -> None:
     factory = FakeBrowserFactory()
     settings = Settings(pool_max_browsers=1, pool_max_contexts_per_browser=2)
     app = create_app(settings=settings, browser_factory=factory, lifespan_enabled=False)
@@ -553,16 +835,7 @@ async def test_health_reports_current_browser_pool_snapshot_without_leasing_cont
     await app.state.pool.close()
 
     assert response.status_code == 200
-    assert response.json()["pool"] == {
-        "browser_slots": 1,
-        "creating_slots": 0,
-        "closing_slots": 0,
-        "active_contexts": 1,
-        "transient_contexts": 1,
-        "persistent_contexts": 0,
-        "waiting_requests": 0,
-        "max_slots": 2,
-    }
+    assert response.json() == {"status": "ok"}
     assert len(factory.created) == 1
     assert len(factory.created[0].contexts) == 1
 
@@ -588,6 +861,36 @@ async def test_ready_reports_browser_pool_readiness() -> None:
 
 
 @pytest.mark.anyio
+async def test_metrics_scrape_refreshes_idle_max_age_capacity_gauges() -> None:
+    app = create_app(
+        settings=Settings(
+            prometheus_enabled=True,
+            browser_max_age_minutes=1,
+            pool_min_browsers=1,
+            pool_max_browsers=1,
+        ),
+        browser_factory=FakeBrowserFactory(),
+        lifespan_enabled=False,
+    )
+    await app.state.pool.start()
+    app.state.pool._slots[0].created_at -= 61
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.get("/metrics")
+    finally:
+        await app.state.pool.close()
+        await app.state.cleanup.close()
+
+    assert response.status_code == 200
+    assert 'camouflare_browsers{state="ready"} 0.0' in response.text
+    assert "camouflare_pool_idle_recyclable_slots 1.0" in response.text
+
+
+@pytest.mark.anyio
 async def test_health_stays_ok_when_browser_pool_is_unavailable() -> None:
     async def failing_factory():
         raise RuntimeError("browser unavailable")
@@ -605,6 +908,23 @@ async def test_health_stays_ok_when_browser_pool_is_unavailable() -> None:
 
 
 @pytest.mark.anyio
+async def test_health_stays_ok_when_pool_snapshot_reader_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = create_app(browser_factory=FakeBrowserFactory(), lifespan_enabled=False)
+
+    def fail_snapshot() -> object:
+        raise RuntimeError("corrupt capacity state")
+
+    monkeypatch.setattr(app.state.pool, "snapshot", fail_snapshot)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
+@pytest.mark.anyio
 async def test_ready_returns_503_when_browser_pool_is_unavailable() -> None:
     async def failing_factory():
         raise RuntimeError("browser unavailable")
@@ -619,6 +939,65 @@ async def test_ready_returns_503_when_browser_pool_is_unavailable() -> None:
 
     assert response.status_code == 503
     assert response.json()["status"] == "error"
+
+
+@pytest.mark.anyio
+async def test_ready_hard_deadline_does_not_wait_for_stuck_probe_cleanup() -> None:
+    release_cleanup = asyncio.Event()
+    probe_finished = asyncio.Event()
+
+    class StubbornPage(FakePage):
+        async def evaluate(self, script: str) -> str:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await release_cleanup.wait()
+            finally:
+                probe_finished.set()
+            return "FakeBrowser/1.0"
+
+    class StubbornContext(FakeContext):
+        async def new_page(self) -> StubbornPage:
+            page = StubbornPage(self)
+            self.pages.append(page)
+            return page
+
+    class StubbornPool:
+        def __init__(self) -> None:
+            self.context = StubbornContext()
+
+        @asynccontextmanager
+        async def lease_context(self, **_options: Any):
+            yield SimpleNamespace(context=self.context)
+
+    app = create_app(
+        settings=Settings(readiness_timeout_ms=20, cleanup_timeout_seconds=1),
+        browser_factory=FakeBrowserFactory(),
+        lifespan_enabled=False,
+    )
+    app.state.pool = StubbornPool()
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            started = time.monotonic()
+            response = await client.get("/ready")
+            elapsed = time.monotonic() - started
+
+        assert response.status_code == 503
+        assert response.json()["status"] == "error"
+        assert set(response.json()) == {"status", "message"}
+        assert elapsed < 0.5
+        assert app.state.cleanup.snapshot().by_kind["readiness"] == 1
+    finally:
+        release_cleanup.set()
+        await asyncio.wait_for(probe_finished.wait(), timeout=0.5)
+        await asyncio.sleep(0)
+        await app.state.cleanup.close()
+
+    assert app.state.cleanup.snapshot().in_flight == 0
 
 
 def test_context_options_disable_default_viewport_for_camoufox() -> None:
@@ -647,6 +1026,72 @@ async def test_close_page_swallows_unexpected_close_error() -> None:
             raise RuntimeError("unexpected close failure")
 
     await _close_page(BrokenPage())
+
+
+@pytest.mark.anyio
+async def test_hanging_page_close_is_bounded_and_remains_tracked() -> None:
+    close_started = asyncio.Event()
+    finish_close = asyncio.Event()
+
+    class HangingPage:
+        async def close(self) -> None:
+            close_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await finish_close.wait()
+
+    cleanup = CleanupSupervisor(timeout_seconds=0.01)
+    started = time.monotonic()
+    await _close_page(
+        HangingPage(),
+        cleanup_supervisor=cleanup,
+        timeout_seconds=0.01,
+    )
+
+    assert close_started.is_set()
+    assert time.monotonic() - started < 0.2
+    assert cleanup.snapshot().by_kind == {"page": 1}
+
+    finish_close.set()
+    for _ in range(20):
+        if cleanup.snapshot().in_flight == 0:
+            break
+        await asyncio.sleep(0)
+    assert cleanup.snapshot().in_flight == 0
+    await cleanup.close()
+
+
+@pytest.mark.anyio
+async def test_hanging_proxy_close_is_bounded_and_remains_tracked() -> None:
+    finish_close = asyncio.Event()
+
+    class HangingProxyLease:
+        async def close(self) -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await finish_close.wait()
+
+    cleanup = CleanupSupervisor(timeout_seconds=0.01)
+    settings = Settings(cleanup_timeout_seconds=0.01)
+    started = time.monotonic()
+    await _close_proxy_best_effort(
+        HangingProxyLease(),
+        cleanup=cleanup,
+        settings=settings,
+    )
+
+    assert time.monotonic() - started < 0.2
+    assert cleanup.snapshot().by_kind == {"proxy": 1}
+
+    finish_close.set()
+    for _ in range(20):
+        if cleanup.snapshot().in_flight == 0:
+            break
+        await asyncio.sleep(0)
+    assert cleanup.snapshot().in_flight == 0
+    await cleanup.close()
 
 
 @pytest.mark.anyio

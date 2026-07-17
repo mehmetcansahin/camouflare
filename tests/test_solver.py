@@ -1796,6 +1796,40 @@ async def test_provider_prepare_runs_before_navigation_and_clears_challenge() ->
     assert events[-1] == "prepare_exit"
 
 
+@pytest.mark.anyio
+async def test_provider_cleanup_timeout_does_not_block_completed_solve() -> None:
+    cleanup_started = asyncio.Event()
+    never_finishes = asyncio.Event()
+
+    class HangingCleanupProvider:
+        @asynccontextmanager
+        async def prepare(self, *, page: Any):  # type: ignore[no-untyped-def]
+            try:
+                yield
+            finally:
+                cleanup_started.set()
+                await never_finishes.wait()
+
+        async def solve(self, **_: object) -> str | None:
+            return None
+
+    context = FakeContext()
+    page = await context.new_page()
+    result = await asyncio.wait_for(
+        solve_request(
+            V1Request(cmd="request.get", url="https://example.com", maxTimeout=60000),
+            context=context,
+            page=page,
+            captcha_provider=HangingCleanupProvider(),
+            cleanup_timeout_seconds=0.01,
+        ),
+        timeout=0.5,
+    )
+
+    assert cleanup_started.is_set()
+    assert result.status == "ok"
+
+
 class _NoneProvider:
     async def solve(self, **_: object) -> str | None:
         return None

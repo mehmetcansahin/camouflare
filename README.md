@@ -19,7 +19,7 @@ site's access controls.
 ## Installation
 
 Camouflare is installed from source or run from the immutable
-`ghcr.io/mehmetcansahin/camouflare:1.1.0` image; it is not published to PyPI.
+`ghcr.io/mehmetcansahin/camouflare:1.2.0` image; it is not published to PyPI.
 For a source installation, fetch the Camoufox browser runtime after installing the package:
 
 ```bash
@@ -41,9 +41,11 @@ For a local container build, follow the [Docker](#docker) instructions below.
 - `GET /` returns service metadata.
 - `GET /documentation` serves expanded API documentation with commands,
   examples, response shapes, session/proxy notes, and configuration details.
-- `GET /health` returns process liveness and a current browser-pool capacity snapshot
-  without leasing a browser.
+- `GET /health` returns process liveness only and does not read browser state.
 - `GET /ready` checks that the browser pool can create a page and evaluate JS.
+- `GET /diagnostics` returns a passive, token-protected pool/session/cleanup snapshot
+  without leasing browser capacity. A successful snapshot returns HTTP 200 even when
+  its `capacity_state` is `saturated`, `recovering`, or `unavailable`.
 - `GET /metrics` returns Prometheus metrics when `PROMETHEUS_ENABLED=true`.
 - `POST /v1` supports:
   - `sessions.create`
@@ -117,6 +119,8 @@ requires `CAMOUFLARE_API_TOKEN`. Send either `Authorization: Bearer <token>` or
 | `MAX_TIMEOUT_MS` | `300000` | Upper bound accepted for `maxTimeout`. |
 | `MAX_SESSION_TTL_MINUTES` | `1440` | Upper bound accepted for session TTL. |
 | `SESSION_REAPER_INTERVAL_SECONDS` | `30` | Background expired-session cleanup interval. |
+| `CLEANUP_TIMEOUT_SECONDS` | `10` | Shared hard deadline for a request or session cancellation unwind. Nested page, context, browser, captcha, and proxy cleanup uses the same absolute budget; logical capacity is released even if physical close ignores cancellation. |
+| `READINESS_TIMEOUT_MS` | `15000` | Total hard deadline for the active `/ready` browser probe, including capacity acquisition and cleanup. |
 | `SHUTDOWN_TIMEOUT_SECONDS` | `30` | Shared shutdown deadline for sessions and browsers. |
 | `PROMETHEUS_ENABLED` | `false` | Enable `/metrics`. |
 | `CHALLENGE_SOLVER` | `none` | Challenge solver. `none` disables active solving and returns the loaded page as-is. `click` opts in to active Cloudflare interstitial/Turnstile handling via playwright-captcha's ClickSolver (loads a Camoufox add-on at launch). |
@@ -182,7 +186,7 @@ docker run --rm \
 
 For Compose, set `CAMOUFLARE_API_TOKEN` before running `docker compose pull` and
 `docker compose up -d`. The example `compose.yaml` intentionally fails to start when this
-variable is unset and defaults to the immutable `1.1.0` image. Its retained `build: .`
+variable is unset and defaults to the immutable `1.2.0` image. Its retained `build: .`
 entry supports explicit local builds with `docker compose up --build`.
 
 The Dockerfile pins Ubuntu 24.04, uses `dumb-init`, runs as a non-root user,

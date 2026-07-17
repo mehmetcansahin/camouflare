@@ -10,25 +10,41 @@ def test_settings_reads_env_at_instantiation(monkeypatch: pytest.MonkeyPatch) ->
     # Env set after import must be reflected, matching headless's default_factory.
     monkeypatch.setenv("POOL_MAX_BROWSERS", "4")
     monkeypatch.setenv("MAX_SESSIONS", "7")
+    monkeypatch.setenv("CLEANUP_TIMEOUT_SECONDS", "12")
+    monkeypatch.setenv("READINESS_TIMEOUT_MS", "2500")
     monkeypatch.setenv("CAMOUFLARE_API_TOKEN", "secret-token")
 
     settings = Settings()
 
     assert settings.pool_max_browsers == 4
     assert settings.max_sessions == 7
+    assert settings.cleanup_timeout_seconds == 12
+    assert settings.readiness_timeout_ms == 2500
+    assert settings.readiness_timeout_seconds == 2.5
     assert settings.camouflare_api_token == "secret-token"
 
 
 def test_version_uses_the_single_package_source(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("VERSION", "9.9.9")
 
-    assert Settings().version == __version__ == "1.1.0"
+    assert Settings().version == __version__ == "1.2.0"
 
 
 def test_settings_ignores_non_integer_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PORT", "not-a-number")
 
     assert Settings().port == 8191
+
+
+def test_cleanup_and_readiness_deadline_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CLEANUP_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.delenv("READINESS_TIMEOUT_MS", raising=False)
+
+    settings = Settings()
+
+    assert settings.cleanup_timeout_seconds == 10
+    assert settings.readiness_timeout_ms == 15_000
+    assert settings.readiness_timeout_seconds == 15
 
 
 def test_challenge_solver_defaults_to_none(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -98,6 +114,8 @@ def test_settings_require_api_token_for_non_loopback_host() -> None:
         ({"max_session_ttl_minutes": 0}, "MAX_SESSION_TTL_MINUTES"),
         ({"session_reaper_interval_seconds": 0}, "SESSION_REAPER_INTERVAL_SECONDS"),
         ({"shutdown_timeout_seconds": 0}, "SHUTDOWN_TIMEOUT_SECONDS"),
+        ({"cleanup_timeout_seconds": 0}, "CLEANUP_TIMEOUT_SECONDS"),
+        ({"readiness_timeout_ms": 0}, "READINESS_TIMEOUT_MS"),
     ],
 )
 def test_settings_reject_invalid_numeric_configuration(

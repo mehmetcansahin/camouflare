@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from contextlib import suppress
 from typing import Any
 
 import pytest
 
+import camouflare.proxy as proxy_module
 from camouflare.proxy import (
     LocalSocksBridge,
     _encode_socks_address,
@@ -204,3 +206,85 @@ def test_upstream_endpoint_requires_host_and_port() -> None:
     assert _upstream_endpoint({"server": "socks5://10.0.0.1:1080"}) == ("10.0.0.1", 1080)
     with pytest.raises(RuntimeError, match="host and port"):
         _upstream_endpoint({"server": "socks5://10.0.0.1"})
+
+
+@pytest.mark.anyio
+async def test_connect_upstream_closes_writer_when_acquisition_is_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Writer:
+        def __init__(self) -> None:
+            self.closed = False
+            self.waited = False
+
+        def close(self) -> None:
+            self.closed = True
+
+        async def wait_closed(self) -> None:
+            self.waited = True
+
+    writer = Writer()
+
+    async def open_connection(_host: str, _port: int) -> tuple[asyncio.StreamReader, Writer]:
+        return asyncio.StreamReader(), writer
+
+    async def cancel_authentication(*_args: Any) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(asyncio, "open_connection", open_connection)
+    monkeypatch.setattr(proxy_module, "_authenticate_upstream", cancel_authentication)
+
+    bridge = LocalSocksBridge(
+        server=None,  # type: ignore[arg-type]
+        upstream_proxy={
+            "server": "socks5://127.0.0.1:1080",
+            "username": "user",
+            "password": "secret",
+        },
+        local_host="127.0.0.1",
+        local_port=0,
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await bridge._connect_upstream(3, "example.com", 443)
+
+    assert writer.closed is True
+    assert writer.waited is True
+
+
+@pytest.mark.anyio
+async def test_handler_done_callback_retrieves_and_logs_exception(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def fail() -> None:
+        raise RuntimeError("handler exploded")
+
+    class Server:
+        def close(self) -> None:
+            pass
+
+        async def wait_closed(self) -> None:
+            pass
+
+    bridge = LocalSocksBridge(
+        server=Server(),  # type: ignore[arg-type]
+        upstream_proxy={
+            "server": "socks5://127.0.0.1:1",
+            "username": "user",
+            "password": "secret",
+        },
+        local_host="127.0.0.1",
+        local_port=0,
+    )
+    try:
+        task = asyncio.create_task(fail())
+        bridge._handler_tasks.add(task)
+        task.add_done_callback(bridge._handler_done)
+        with caplog.at_level(logging.ERROR, logger="camouflare.proxy"):
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+
+        assert task not in bridge._handler_tasks
+        assert "SOCKS bridge client handler failed" in caplog.text
+        assert "handler exploded" in caplog.text
+    finally:
+        await bridge.close()

@@ -3,19 +3,25 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import secrets
 import time
-from collections.abc import Callable
-from contextlib import AbstractAsyncContextManager
-from typing import Any
+from collections.abc import Callable, Mapping
+from contextlib import AbstractAsyncContextManager, suppress
+from importlib.metadata import PackageNotFoundError, version
+from typing import Any, Literal
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import ValidationError
 
-from camouflare.browser import make_camoufox_browser_factory
+from camouflare.browser import (
+    make_camoufox_browser_factory,
+    playwright_cancel_patch_status,
+)
 from camouflare.captcha import CaptchaProvider, ClickSolverProvider, NoCaptchaProvider
+from camouflare.cleanup import CleanupSupervisor
 from camouflare.commands import (
     KNOWN_COMMANDS,
     CommandService,
@@ -39,17 +45,22 @@ from camouflare.limits import ResourceLimitError, ensure_json_size, json_size
 from camouflare.metrics import (
     REQUEST_COUNTER,
     REQUEST_DURATION,
+    install_asyncio_exception_metrics,
     metrics_response,
     observe_payload_size,
+    observe_readiness,
     record_timeout,
     request_finished,
     request_started,
 )
 from camouflare.models import (
+    DiagnosticsCleanupStatus,
+    DiagnosticsPoolStatus,
+    DiagnosticsResponse,
+    DiagnosticsRuntimeStatus,
+    DiagnosticsSessionStatus,
     HealthResponse,
     IndexResponse,
-    PoolHealthResponse,
-    PoolStatus,
     V1Request,
     V1Response,
 )
@@ -87,7 +98,11 @@ def create_app(
     lifespan_enabled: bool = True,
 ) -> FastAPI:
     settings = settings or Settings()
-    factory = browser_factory or make_camoufox_browser_factory(settings)
+    cleanup = CleanupSupervisor(timeout_seconds=settings.cleanup_timeout_seconds)
+    factory = browser_factory or make_camoufox_browser_factory(
+        settings,
+        cleanup_supervisor=cleanup,
+    )
     if captcha_provider is not None:
         provider = captcha_provider
     elif browser_factory is None and settings.challenge_solver == "click":
@@ -104,16 +119,21 @@ def create_app(
         browser_max_age_seconds=settings.browser_max_age_seconds,
         acquire_timeout_seconds=settings.pool_acquire_timeout_seconds,
         reserved_transient_contexts=settings.pool_reserved_transient_contexts,
+        cleanup_timeout_seconds=settings.cleanup_timeout_seconds,
+        cleanup_supervisor=cleanup,
     )
     sessions = SessionManager(
         max_sessions=settings.max_sessions,
         default_ttl_seconds=settings.session_ttl_seconds,
+        cleanup_timeout_seconds=settings.cleanup_timeout_seconds,
+        cleanup_supervisor=cleanup,
     )
     command_service = CommandService(
         settings=settings,
         pool=pool,
         sessions=sessions,
         captcha_provider=provider,
+        cleanup=cleanup,
     )
 
     if lifespan is None and lifespan_enabled:
@@ -140,9 +160,11 @@ def create_app(
     app.state.captcha_provider = provider
     app.state.command_service = command_service
     app.state.resource_limits = settings.resource_limits
+    app.state.cleanup = cleanup
 
     @app.middleware("http")
     async def request_context(request: Request, call_next: Any) -> Any:
+        install_asyncio_exception_metrics()
         request_id = resolve_request_id(request.headers.get("x-request-id"))
         token = bind_request_id(request_id)
         request_started()
@@ -198,17 +220,26 @@ def create_app(
 
     @app.get(
         "/health",
-        response_model=PoolHealthResponse,
+        response_model=HealthResponse,
         tags=["Service"],
         summary="Check service liveness",
+        description="Returns ok when the API process is alive without reading browser state.",
+    )
+    async def health() -> dict[str, str]:
+        return HealthResponse().model_dump()
+
+    @app.get(
+        "/diagnostics",
+        response_model=DiagnosticsResponse,
+        tags=["Service"],
+        summary="Read passive runtime diagnostics",
         description=(
-            "Returns ok and the current browser-pool snapshot when the API process "
-            "is alive, without leasing a browser."
+            "Returns browser-pool, session, cleanup, and runtime state without "
+            "leasing browser capacity. This endpoint uses the configured API token."
         ),
     )
-    async def health() -> Any:
-        pool = PoolStatus.model_validate(app.state.pool.snapshot())
-        return PoolHealthResponse(pool=pool).model_dump()
+    async def diagnostics() -> dict[str, Any]:
+        return _diagnostics_response(app, settings).model_dump()
 
     @app.get(
         "/ready",
@@ -231,18 +262,39 @@ def create_app(
         },
     )
     async def ready() -> Any:
+        started = time.monotonic()
+        probe_task = asyncio.create_task(
+            _readiness_probe(app),
+            name="camouflare-readiness-probe",
+        )
         try:
-            async with app.state.pool.lease_context(**context_options(None)) as lease:
-                page = await lease.context.new_page()
-                try:
-                    await page.evaluate("navigator.userAgent")
-                finally:
-                    await close_page(page)
-        except Exception as exc:
+            await _await_with_hard_deadline(
+                probe_task,
+                timeout_seconds=settings.readiness_timeout_seconds,
+                cleanup=app.state.cleanup,
+                cleanup_kind="readiness",
+            )
+        except PoolAcquireTimeout as exc:
+            observe_readiness(result="unavailable", duration_seconds=time.monotonic() - started)
             return JSONResponse(
                 {"status": "error", "message": str(exc)},
                 status_code=503,
             )
+        except TimeoutError as exc:
+            record_timeout("readiness")
+            observe_readiness(result="timeout", duration_seconds=time.monotonic() - started)
+            message = str(exc) or "Readiness check exceeded its configured timeout."
+            return JSONResponse(
+                {"status": "error", "message": message},
+                status_code=503,
+            )
+        except Exception as exc:
+            observe_readiness(result="unavailable", duration_seconds=time.monotonic() - started)
+            return JSONResponse(
+                {"status": "error", "message": str(exc)},
+                status_code=503,
+            )
+        observe_readiness(result="success", duration_seconds=time.monotonic() - started)
         return HealthResponse().model_dump()
 
     @app.get(
@@ -276,6 +328,10 @@ def create_app(
     async def metrics() -> Any:
         if not settings.prometheus_enabled:
             return JSONResponse({"detail": "Prometheus metrics are disabled."}, status_code=404)
+        # Age-based recycle state changes while idle, without a pool mutation.
+        # Refresh its computed gauges at scrape time while keeping metrics best-effort.
+        with suppress(Exception):
+            app.state.pool.snapshot()
         return metrics_response()
 
     @app.post(
@@ -330,9 +386,11 @@ def create_app(
                 ),
                 name=f"camouflare-command-{command}",
             )
-            response = await asyncio.wait_for(
+            response = await _await_with_hard_deadline(
                 dispatch_task,
-                timeout=v1_request.max_timeout / 1000,
+                timeout_seconds=v1_request.max_timeout / 1000,
+                cleanup=app.state.cleanup,
+                cleanup_kind="request",
             )
             result = response.status
             status_code = 200 if response.status == "ok" else 500
@@ -401,6 +459,203 @@ def create_app(
     return app
 
 
+async def _await_with_hard_deadline(
+    task: asyncio.Task[Any],
+    *,
+    timeout_seconds: float,
+    cleanup: CleanupSupervisor,
+    cleanup_kind: str,
+) -> Any:
+    """Wait for a task without making response latency depend on cancellation unwind."""
+
+    try:
+        done, _ = await asyncio.wait({task}, timeout=timeout_seconds)
+    except BaseException:
+        task.cancel()
+        cleanup.track(task, kind=cleanup_kind)
+        raise
+    if task in done:
+        return task.result()
+    task.cancel()
+    cleanup.track(task, kind=cleanup_kind)
+    raise TimeoutError(f"Operation exceeded its {timeout_seconds:g}-second deadline.")
+
+
+async def _readiness_probe(app: FastAPI) -> None:
+    async with app.state.pool.lease_context(**context_options(None)) as lease:
+        page = await lease.context.new_page()
+        try:
+            await page.evaluate("navigator.userAgent")
+        finally:
+            await close_page(
+                page,
+                cleanup_supervisor=app.state.cleanup,
+                timeout_seconds=app.state.settings.cleanup_timeout_seconds,
+            )
+
+
+def _diagnostics_response(app: FastAPI, settings: Settings) -> DiagnosticsResponse:
+    try:
+        pool_snapshot = app.state.pool.snapshot()
+    except Exception:
+        logger.warning("Unable to read browser-pool diagnostics snapshot.", exc_info=True)
+        pool_snapshot = {}
+    try:
+        session_snapshot = app.state.sessions.snapshot()
+    except Exception:
+        logger.warning("Unable to read session diagnostics snapshot.", exc_info=True)
+        session_snapshot = {}
+    try:
+        cleanup_snapshot = app.state.cleanup.snapshot()
+    except Exception:
+        logger.warning("Unable to read cleanup diagnostics snapshot.", exc_info=True)
+        cleanup_snapshot = {}
+
+    max_browsers = _snapshot_positive_int(
+        pool_snapshot,
+        "max_browsers",
+        settings.pool_max_browsers,
+    )
+    max_contexts_per_browser = _snapshot_positive_int(
+        pool_snapshot,
+        "max_contexts_per_browser",
+        settings.pool_max_contexts_per_browser,
+    )
+    max_slots = _snapshot_positive_int(
+        pool_snapshot,
+        "max_slots",
+        max_browsers * max_contexts_per_browser,
+    )
+    ready_browser_slots = _snapshot_int(
+        pool_snapshot,
+        "ready_browser_slots",
+        _snapshot_int(pool_snapshot, "browser_slots", 0),
+    )
+    active_contexts = _snapshot_int(pool_snapshot, "active_contexts", 0)
+    usable_context_slots = _snapshot_int(
+        pool_snapshot,
+        "usable_context_slots",
+        max(0, ready_browser_slots * max_contexts_per_browser - active_contexts),
+    )
+    pool = DiagnosticsPoolStatus(
+        ready_browser_slots=ready_browser_slots,
+        retiring_browser_slots=_snapshot_int(pool_snapshot, "retiring_browser_slots", 0),
+        creating_slots=_snapshot_int(pool_snapshot, "creating_slots", 0),
+        closing_slots=_snapshot_int(pool_snapshot, "closing_slots", 0),
+        active_contexts=active_contexts,
+        transient_contexts=_snapshot_int(pool_snapshot, "transient_contexts", 0),
+        persistent_contexts=_snapshot_int(pool_snapshot, "persistent_contexts", 0),
+        waiting_requests=_snapshot_int(pool_snapshot, "waiting_requests", 0),
+        usable_context_slots=usable_context_slots,
+        idle_recyclable_slots=_snapshot_int(pool_snapshot, "idle_recyclable_slots", 0),
+        max_browsers=max_browsers,
+        max_contexts_per_browser=max_contexts_per_browser,
+        max_slots=max_slots,
+    )
+    sessions = DiagnosticsSessionStatus(
+        active=_snapshot_int(session_snapshot, "active", 0),
+        in_use=_snapshot_int(session_snapshot, "in_use", 0),
+        closing=_snapshot_int(session_snapshot, "closing", 0),
+        max_sessions=_snapshot_positive_int(
+            session_snapshot,
+            "max_sessions",
+            settings.max_sessions,
+        ),
+    )
+    cleanup_by_kind = _snapshot_mapping(cleanup_snapshot, "by_kind")
+    cleanup = DiagnosticsCleanupStatus(
+        in_flight=_snapshot_int(cleanup_snapshot, "in_flight", 0),
+        oldest_age_seconds=_snapshot_optional_non_negative_float(
+            cleanup_snapshot,
+            "oldest_age_seconds",
+        ),
+        by_kind={str(kind): _non_negative_int(count) for kind, count in cleanup_by_kind.items()},
+    )
+    runtime = DiagnosticsRuntimeStatus(
+        playwright_version=_playwright_version(),
+        playwright_cancel_patch=playwright_cancel_patch_status(),
+    )
+    return DiagnosticsResponse(
+        capacity_state=_capacity_state(pool, cleanup),
+        pool=pool,
+        sessions=sessions,
+        cleanup=cleanup,
+        runtime=runtime,
+    )
+
+
+def _snapshot_int(snapshot: object, name: str, default: int) -> int:
+    if isinstance(snapshot, Mapping):
+        value = snapshot.get(name, default)
+    else:
+        value = getattr(snapshot, name, default)
+    return _parsed_non_negative_int(value, default)
+
+
+def _snapshot_positive_int(snapshot: object, name: str, default: int) -> int:
+    if isinstance(snapshot, Mapping):
+        value = snapshot.get(name, default)
+    else:
+        value = getattr(snapshot, name, default)
+    parsed = _parsed_non_negative_int(value, default)
+    return parsed if parsed > 0 else max(1, default)
+
+
+def _snapshot_mapping(snapshot: object, name: str) -> Mapping[object, object]:
+    value = snapshot.get(name, {}) if isinstance(snapshot, Mapping) else getattr(snapshot, name, {})
+    return value if isinstance(value, Mapping) else {}
+
+
+def _snapshot_optional_non_negative_float(snapshot: object, name: str) -> float | None:
+    value = snapshot.get(name) if isinstance(snapshot, Mapping) else getattr(snapshot, name, None)
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, parsed) if math.isfinite(parsed) else None
+
+
+def _non_negative_int(value: object) -> int:
+    return _parsed_non_negative_int(value, 0)
+
+
+def _parsed_non_negative_int(value: object, default: int) -> int:
+    if not isinstance(value, str | bytes | bytearray | int | float):
+        return max(0, default)
+    try:
+        return max(0, int(value))
+    except (OverflowError, TypeError, ValueError):
+        return max(0, default)
+
+
+def _capacity_state(
+    pool: DiagnosticsPoolStatus,
+    cleanup: DiagnosticsCleanupStatus,
+) -> Literal["available", "saturated", "recovering", "unavailable"]:
+    if pool.usable_context_slots > 0:
+        return "available"
+    if (
+        pool.retiring_browser_slots > 0
+        or pool.creating_slots > 0
+        or pool.closing_slots > 0
+        or pool.idle_recyclable_slots > 0
+        or cleanup.in_flight > 0
+    ):
+        return "recovering"
+    if pool.active_contexts > 0 or pool.waiting_requests > 0:
+        return "saturated"
+    return "unavailable"
+
+
+def _playwright_version() -> str:
+    try:
+        return version("playwright")
+    except PackageNotFoundError:
+        return "unknown"
+
+
 async def _dispatch_v1(
     v1_request: V1Request,
     *,
@@ -416,6 +671,7 @@ async def _dispatch_v1(
         sessions=app.state.sessions,
         settings=app.state.settings,
         captcha_provider=app.state.captcha_provider,
+        cleanup=getattr(app.state, "cleanup", None),
         start_timestamp=start_timestamp,
     )
 

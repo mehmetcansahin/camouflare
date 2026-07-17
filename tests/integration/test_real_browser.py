@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -9,6 +10,7 @@ import time
 from html import unescape
 
 import pytest
+from fastapi import FastAPI
 from httpx import AsyncClient, Response
 
 from tests.integration.support import LocalHttpServer
@@ -212,6 +214,7 @@ async def test_persistent_sessions_keep_cookies_isolated(
 
 async def test_command_timeout_cancels_requested_wait(
     browser_client: AsyncClient,
+    browser_app: FastAPI,
     local_http_server: LocalHttpServer,
 ) -> None:
     started = time.monotonic()
@@ -231,3 +234,65 @@ async def test_command_timeout_cancels_requested_wait(
     assert body["status"] == "error"
     assert "timeout" in body["message"].lower()
     assert elapsed < 5
+
+    # The hard response deadline intentionally returns before cancellation
+    # unwind. Wait for that independently owned cleanup before using the same
+    # single-browser fixture for a separate protocol-cancellation probe.
+    cleanup_deadline = time.monotonic() + 5
+    while browser_app.state.cleanup.snapshot().in_flight > 0:
+        assert time.monotonic() < cleanup_deadline
+        await asyncio.sleep(0.01)
+    assert browser_app.state.pool.snapshot().active_contexts == 0
+
+    # Cancel a real Playwright protocol navigation while the fixture deliberately
+    # withholds its response. This exercises the guarded _inner_send workaround,
+    # rather than the direct-HTTP-first or post-navigation wait paths.
+    pool = browser_app.state.pool
+    async with pool.lease_context(no_viewport=True) as lease:
+        page = await asyncio.wait_for(lease.context.new_page(), timeout=10)
+        try:
+            navigation = asyncio.create_task(
+                page.goto(
+                    f"{local_http_server.base_url}/slow?seconds=2",
+                    wait_until="domcontentloaded",
+                    timeout=10_000,
+                )
+            )
+            done, _ = await asyncio.wait({navigation}, timeout=0.1)
+            assert not done
+            navigation.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await navigation
+        finally:
+            await page.close()
+
+    diagnostics = await browser_client.get("/diagnostics")
+    assert diagnostics.status_code == 200
+    assert diagnostics.json()["runtime"]["playwright_cancel_patch"] == "applied"
+
+    # Exercise recovery immediately after the cancelled navigation. The short
+    # test-only max age makes the current idle slot stale; /ready must retire it,
+    # launch a replacement, and release its probe context.
+    original_max_age = pool._browser_max_age_seconds
+    pool._browser_max_age_seconds = 0.05
+    try:
+        await asyncio.sleep(0.06)
+        ready = await browser_client.get("/ready")
+    finally:
+        pool._browser_max_age_seconds = original_max_age
+
+    assert ready.status_code == 200, ready.json()
+    recovered = _solution(
+        await _post_command(
+            browser_client,
+            {
+                "cmd": "request.get",
+                "url": f"{local_http_server.base_url}/get",
+                "maxTimeout": 15_000,
+            },
+        )
+    )
+    assert recovered["status"] == 200
+    snapshot = pool.snapshot()
+    assert snapshot.active_contexts == 0
+    assert snapshot.usable_context_slots > 0
