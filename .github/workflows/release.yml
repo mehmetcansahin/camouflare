@@ -250,6 +250,9 @@ jobs:
           cache-from: type=gha,scope=release-image-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=release-image-${{ matrix.arch }}
       - name: Run container smoke before publication
+        env:
+          CAMOUFLARE_SMOKE_POOL_ACQUIRE_TIMEOUT_MS: ${{ matrix.arch == 'arm64' && '120000' || '30000' }}
+          CAMOUFLARE_SMOKE_STARTUP_TIMEOUT_SECONDS: ${{ matrix.arch == 'arm64' && '180' || '120' }}
         run: bash scripts/container_smoke.sh camouflare:release-gate-${{ matrix.arch }}
       - name: Scan release candidate image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
@@ -401,6 +404,9 @@ jobs:
           bash scripts/container_smoke.sh
           "${IMAGE_NAME}@${{ steps.manifests.outputs.amd64_digest }}"
       - name: Smoke exact linux/arm64 candidate
+        env:
+          CAMOUFLARE_SMOKE_POOL_ACQUIRE_TIMEOUT_MS: "120000"
+          CAMOUFLARE_SMOKE_STARTUP_TIMEOUT_SECONDS: "180"
         run: >-
           bash scripts/container_smoke.sh
           "${IMAGE_NAME}@${{ steps.manifests.outputs.arm64_digest }}"

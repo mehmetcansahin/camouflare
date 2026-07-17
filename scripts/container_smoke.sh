@@ -4,6 +4,18 @@ set -Eeuo pipefail
 image="${1:-camouflare:ci}"
 container_name="camouflare-smoke-${GITHUB_RUN_ID:-local}-${RANDOM}"
 api_token="camouflare-ci-smoke-token"
+pool_acquire_timeout_ms="${CAMOUFLARE_SMOKE_POOL_ACQUIRE_TIMEOUT_MS:-30000}"
+startup_timeout_seconds="${CAMOUFLARE_SMOKE_STARTUP_TIMEOUT_SECONDS:-120}"
+
+if [[ ! "${pool_acquire_timeout_ms}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "CAMOUFLARE_SMOKE_POOL_ACQUIRE_TIMEOUT_MS must be a positive integer." >&2
+  exit 2
+fi
+if [[ ! "${startup_timeout_seconds}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "CAMOUFLARE_SMOKE_STARTUP_TIMEOUT_SECONDS must be a positive integer." >&2
+  exit 2
+fi
+
 work_dir="$(mktemp -d)"
 
 cleanup() {
@@ -33,10 +45,11 @@ docker run --detach --name "${container_name}" \
   --env HOST=0.0.0.0 \
   --env CAMOUFLARE_API_TOKEN="${api_token}" \
   --env HEADLESS=virtual \
+  --env POOL_ACQUIRE_TIMEOUT_MS="${pool_acquire_timeout_ms}" \
   "${image}" >/dev/null
 
 ready=0
-for _ in $(seq 1 120); do
+for _ in $(seq 1 "${startup_timeout_seconds}"); do
   if curl --silent --fail --max-time 2 http://127.0.0.1:18191/health >/dev/null; then
     ready=1
     break
@@ -50,7 +63,7 @@ for _ in $(seq 1 120); do
 done
 if [[ "${ready}" != 1 ]]; then
   docker logs "${container_name}"
-  echo "Camouflare did not become healthy in 120 seconds." >&2
+  echo "Camouflare did not become healthy in ${startup_timeout_seconds} seconds." >&2
   exit 1
 fi
 
