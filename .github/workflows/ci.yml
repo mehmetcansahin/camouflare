@@ -221,6 +221,9 @@ jobs:
       - name: Run health, readiness, and local-target smoke
         env:
           CAMOUFLARE_SMOKE_POOL_ACQUIRE_TIMEOUT_MS: ${{ matrix.arch == 'arm64' && '120000' || '30000' }}
+          CAMOUFLARE_SMOKE_READINESS_TIMEOUT_MS: ${{ matrix.arch == 'arm64' && '120000' || '15000' }}
+          CAMOUFLARE_SMOKE_REQUEST_TIMEOUT_MS: ${{ matrix.arch == 'arm64' && '120000' || '60000' }}
+          CAMOUFLARE_SMOKE_CURL_TIMEOUT_SECONDS: ${{ matrix.arch == 'arm64' && '180' || '90' }}
           CAMOUFLARE_SMOKE_STARTUP_TIMEOUT_SECONDS: ${{ matrix.arch == 'arm64' && '180' || '120' }}
         run: bash scripts/container_smoke.sh camouflare:ci-${{ matrix.arch }}
       - name: Render active security exceptions

@@ -252,6 +252,9 @@ jobs:
       - name: Run container smoke before publication
         env:
           CAMOUFLARE_SMOKE_POOL_ACQUIRE_TIMEOUT_MS: ${{ matrix.arch == 'arm64' && '120000' || '30000' }}
+          CAMOUFLARE_SMOKE_READINESS_TIMEOUT_MS: ${{ matrix.arch == 'arm64' && '120000' || '15000' }}
+          CAMOUFLARE_SMOKE_REQUEST_TIMEOUT_MS: ${{ matrix.arch == 'arm64' && '120000' || '60000' }}
+          CAMOUFLARE_SMOKE_CURL_TIMEOUT_SECONDS: ${{ matrix.arch == 'arm64' && '180' || '90' }}
           CAMOUFLARE_SMOKE_STARTUP_TIMEOUT_SECONDS: ${{ matrix.arch == 'arm64' && '180' || '120' }}
         run: bash scripts/container_smoke.sh camouflare:release-gate-${{ matrix.arch }}
       - name: Scan release candidate image
@@ -406,6 +409,9 @@ jobs:
       - name: Smoke exact linux/arm64 candidate
         env:
           CAMOUFLARE_SMOKE_POOL_ACQUIRE_TIMEOUT_MS: "120000"
+          CAMOUFLARE_SMOKE_READINESS_TIMEOUT_MS: "120000"
+          CAMOUFLARE_SMOKE_REQUEST_TIMEOUT_MS: "120000"
+          CAMOUFLARE_SMOKE_CURL_TIMEOUT_SECONDS: "180"
           CAMOUFLARE_SMOKE_STARTUP_TIMEOUT_SECONDS: "180"
         run: >-
           bash scripts/container_smoke.sh
