@@ -96,64 +96,187 @@ class SoakConfig:
         )
 
 
-def _process_tree(root_pid: int | None = None) -> tuple[dict[int, tuple[int, int]], set[int]]:
-    root_pid = root_pid or os.getpid()
+def _process_parents() -> dict[int, int]:
+    """Return a live PID-to-parent snapshot without counting the sampler itself."""
+
+    proc_root = Path("/proc")
+    if proc_root.is_dir():
+        parents: dict[int, int] = {}
+        for entry in proc_root.iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                stat = (entry / "stat").read_text(encoding="utf-8")
+                fields = stat[stat.rfind(")") + 2 :].split()
+                parents[int(entry.name)] = int(fields[1])
+            except (FileNotFoundError, PermissionError, IndexError, ValueError):
+                continue
+        return parents
+
     result = subprocess.run(
-        ["ps", "-axo", "pid=,ppid=,rss="],
+        ["ps", "-axo", "pid=,ppid="],
         check=True,
         capture_output=True,
         text=True,
     )
-    processes: dict[int, tuple[int, int]] = {}
+    parents = {}
     for line in result.stdout.splitlines():
         fields = line.split()
-        if len(fields) != 3:
+        if len(fields) != 2:
             continue
-        pid, parent_pid, rss_kib = (int(field) for field in fields)
-        processes[pid] = (parent_pid, rss_kib)
+        pid, parent_pid = (int(field) for field in fields)
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            # ``ps`` reports itself as a child of pytest, but it has exited before
+            # subprocess.run returns. Exclude every process no longer alive now.
+            continue
+        except PermissionError:
+            pass
+        parents[pid] = parent_pid
+    return parents
 
+
+def _live_descendant_pids(root_pid: int | None = None) -> frozenset[int]:
+    root_pid = root_pid or os.getpid()
+    parents = _process_parents()
     descendants = {root_pid}
     changed = True
     while changed:
         changed = False
-        for pid, (parent_pid, _) in processes.items():
+        for pid, parent_pid in parents.items():
             if parent_pid in descendants and pid not in descendants:
                 descendants.add(pid)
                 changed = True
-    return processes, descendants
+    return frozenset(descendants)
 
 
-def _process_tree_rss_bytes(root_pid: int | None = None) -> int:
-    """Return resident memory for pytest and all current browser descendants."""
+def _describe_processes(processes: frozenset[int]) -> list[str]:
+    if not processes:
+        return []
+    result = subprocess.run(
+        [
+            "ps",
+            "-o",
+            "pid=,ppid=,state=,command=",
+            "-p",
+            ",".join(str(pid) for pid in sorted(processes)),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
-    processes, descendants = _process_tree(root_pid)
-    return sum(processes.get(pid, (0, 0))[1] for pid in descendants) * 1024
+
+def _process_command(pid: int) -> str:
+    command_path = Path("/proc") / str(pid) / "cmdline"
+    if command_path.is_file():
+        try:
+            return command_path.read_bytes().replace(b"\0", b" ").decode(errors="replace").strip()
+        except (FileNotFoundError, PermissionError):
+            return ""
+    result = subprocess.run(
+        ["ps", "-o", "command=", "-p", str(pid)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
 
 
-def _process_tree_open_fds(root_pid: int | None = None) -> int | None:
-    """Count open descriptors for the test process tree where the OS exposes them."""
+def _unexpected_drained_processes(
+    processes: frozenset[int],
+    *,
+    root_pid: int,
+) -> frozenset[int]:
+    resource_tracker_seen = False
+    unexpected: set[int] = set()
+    for pid in processes:
+        if pid == root_pid:
+            continue
+        command = _process_command(pid)
+        if (
+            not resource_tracker_seen
+            and "from multiprocessing.resource_tracker import main" in command
+        ):
+            resource_tracker_seen = True
+            continue
+        unexpected.add(pid)
+    return frozenset(unexpected)
 
-    _, descendants = _process_tree(root_pid)
-    proc_root = Path("/proc")
-    if proc_root.is_dir():
-        total = 0
-        for pid in descendants:
-            try:
-                total += sum(1 for _ in (proc_root / str(pid) / "fd").iterdir())
-            except (FileNotFoundError, PermissionError):
-                continue
-        return total
+
+def _process_rss_bytes(pid: int) -> int:
+    status_path = Path("/proc") / str(pid) / "status"
+    if status_path.is_file():
+        for line in status_path.read_text(encoding="utf-8").splitlines():
+            if line.startswith("VmRSS:"):
+                return int(line.split()[1]) * 1024
+        raise RuntimeError(f"{status_path} does not expose VmRSS")
+
+    result = subprocess.run(
+        ["ps", "-o", "rss=", "-p", str(pid)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return int(result.stdout.strip()) * 1024
+
+
+def _processes_rss_bytes(processes: frozenset[int]) -> int:
+    return sum(_process_rss_bytes(pid) for pid in processes)
+
+
+def _process_open_fd_signature(pid: int) -> frozenset[str] | None:
+    """Return stable identities for numeric descriptors owned by one process."""
+
+    fd_root = Path("/proc") / str(pid) / "fd"
+    if fd_root.is_dir():
+        signature: set[str] = set()
+        try:
+            with os.scandir(fd_root) as entries:
+                for entry in entries:
+                    if not entry.name.isdigit():
+                        continue
+                    try:
+                        target = os.readlink(entry.path)
+                    except FileNotFoundError:
+                        continue
+                    # Scanning /proc/<pid>/fd briefly opens that directory in the
+                    # target process. It is a measurement artifact, not an app FD.
+                    if target == str(fd_root):
+                        continue
+                    signature.add(f"{entry.name}:{target}")
+        except (FileNotFoundError, PermissionError):
+            return None
+        return frozenset(signature)
 
     try:
         result = subprocess.run(
-            ["lsof", "-nP", "-a", "-p", ",".join(str(pid) for pid in descendants), "-F", "f"],
+            ["lsof", "-nP", "-a", "-p", str(pid), "-F", "f"],
             check=True,
             capture_output=True,
             text=True,
         )
     except (FileNotFoundError, subprocess.CalledProcessError):
         return None
-    return sum(1 for line in result.stdout.splitlines() if line.startswith("f"))
+    # lsof also reports cwd/txt/memory mappings as pseudo descriptors. Only numeric
+    # entries correspond to descriptors and remain stable across sampler processes.
+    return frozenset(
+        line[1:]
+        for line in result.stdout.splitlines()
+        if line.startswith("f") and line[1:].isdigit()
+    )
+
+
+def _processes_open_fd_signature(processes: frozenset[int]) -> frozenset[str] | None:
+    signature: set[str] = set()
+    for pid in processes:
+        process_signature = _process_open_fd_signature(pid)
+        if process_signature is None:
+            return None
+        signature.update(f"{pid}:{descriptor}" for descriptor in process_signature)
+    return frozenset(signature)
 
 
 async def _active_context_count(pool: Any) -> int:
@@ -294,6 +417,96 @@ async def _settle_runtime(
         state = _runtime_settle_state(app)
 
 
+@dataclass(frozen=True)
+class _DrainedResourceSnapshot:
+    runtime: _RuntimeSettleState
+    rss_bytes: int
+    fd_signature: frozenset[str] | None
+    processes: frozenset[int]
+    task_count: int
+
+    @property
+    def open_fds(self) -> int | None:
+        if self.fd_signature is None:
+            return None
+        return len(self.fd_signature)
+
+
+async def _settle_drained_resources(
+    app: Any,
+    *,
+    timeout_seconds: float,
+    phase: str,
+    expected_processes: frozenset[int] | None = None,
+) -> _DrainedResourceSnapshot:
+    """Require a quiescent runtime, no browser children, and stable process FDs."""
+
+    await _settle_runtime(
+        app,
+        timeout_seconds=timeout_seconds,
+        phase=phase,
+    )
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_seconds
+    root_pid = os.getpid()
+    previous_signature: frozenset[str] | None = None
+    previous_processes: frozenset[int] | None = None
+    have_previous_signature = False
+    stable_observations = 0
+    runtime = _runtime_settle_state(app)
+    processes = _live_descendant_pids(root_pid)
+    fd_signature = _processes_open_fd_signature(processes)
+
+    while True:
+        unexpected_processes = _unexpected_drained_processes(processes, root_pid=root_pid)
+        process_tree_matches = (
+            processes == expected_processes
+            if expected_processes is not None
+            else not unexpected_processes
+        )
+        if runtime.settled and process_tree_matches:
+            if (
+                have_previous_signature
+                and processes == previous_processes
+                and fd_signature == previous_signature
+            ):
+                stable_observations += 1
+            else:
+                stable_observations = 1
+            previous_signature = fd_signature
+            previous_processes = processes
+            have_previous_signature = True
+            if stable_observations >= 3:
+                return _DrainedResourceSnapshot(
+                    runtime=runtime,
+                    rss_bytes=_processes_rss_bytes(processes),
+                    fd_signature=fd_signature,
+                    processes=processes,
+                    task_count=len(asyncio.all_tasks()),
+                )
+        else:
+            stable_observations = 0
+            previous_signature = None
+            previous_processes = None
+            have_previous_signature = False
+
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            fd_count = None if fd_signature is None else len(fd_signature)
+            pytest.fail(
+                f"drained resources did not stabilize during {phase} within "
+                f"{timeout_seconds:.3f}s: processes={sorted(processes)!r}, "
+                f"unexpected={sorted(unexpected_processes)!r}, "
+                f"process_details={_describe_processes(processes)!r}, "
+                f"root_fds={fd_count}, runtime={runtime.describe()}"
+            )
+        await asyncio.sleep(min(0.25, remaining))
+        runtime = _runtime_settle_state(app)
+        processes = _live_descendant_pids(root_pid)
+        fd_signature = _processes_open_fd_signature(processes)
+
+
 def _assert_success(response: Response) -> None:
     body = response.json()
     assert response.status_code == 200, body
@@ -341,12 +554,12 @@ async def _exercise_persistent_session(
     assert destroyed.status_code == 200, destroyed.json()
 
 
-async def _seed_transient_baseline_browser(
+async def _drain_browser_for_resource_baseline(
     app: Any,
     client: AsyncClient,
     payload: dict[str, Any],
 ) -> None:
-    """Replace the warmed browser and seed its successor with one timed-phase request."""
+    """Retire the warmed browser without creating replacement capacity."""
 
     pool = app.state.pool
     assert len(pool._slots) == 1
@@ -362,13 +575,19 @@ async def _seed_transient_baseline_browser(
         pool._browser_max_uses = original_max_uses
 
     assert previous_slot not in pool._slots
-    _assert_success(await client.post("/v1", json=payload))
-    assert len(pool._slots) == 1
-    assert pool._slots[0] is not previous_slot
+    assert not pool._slots
 
 
 async def test_real_browser_memory_and_contexts_stay_bounded() -> None:
     config = SoakConfig.from_env()
+    assert config.requests % config.browser_max_uses == 0, (
+        "the soak request count must be an exact multiple of browser_max_uses so "
+        "the measured process tree ends fully drained"
+    )
+    expected_measurement_launches = config.requests // config.browser_max_uses
+    assert expected_measurement_launches > 0, (
+        "the soak profile must include at least one measured browser recycle"
+    )
     loop = asyncio.get_running_loop()
     previous_exception_handler = loop.get_exception_handler()
     initial_tasks = set(asyncio.all_tasks())
@@ -435,8 +654,8 @@ async def test_real_browser_memory_and_contexts_stay_bounded() -> None:
                 _assert_success(await client.post("/v1", json=payload))
 
             # A warmup count may land exactly on a max-use boundary and leave the
-            # demand-driven pool empty. Seed one normal lease so both resource
-            # baselines include an equally provisioned idle browser.
+            # demand-driven pool empty. Seed one normal lease for the persistent
+            # first-use warmup, then drain it before sampling resources.
             _assert_ready(await client.get("/ready"))
 
             # Persistent contexts lazily initialize browser and Playwright
@@ -448,22 +667,25 @@ async def test_real_browser_memory_and_contexts_stay_bounded() -> None:
                 payload,
                 "soak-pre-lifecycle-baseline",
             )
-            await _seed_transient_baseline_browser(app, client, payload)
+            await _drain_browser_for_resource_baseline(app, client, payload)
 
             gc.collect()
-            pre_lifecycle_state = await _settle_runtime(
+            pre_lifecycle_resources = await _settle_drained_resources(
                 app,
                 timeout_seconds=config.settle_seconds,
                 phase="pre-lifecycle baseline",
             )
+            pre_lifecycle_state = pre_lifecycle_resources.runtime
             pre_lifecycle_pool = pre_lifecycle_state.pool
-            pre_lifecycle_fds = _process_tree_open_fds()
-            _, pre_lifecycle_processes = _process_tree()
-            pre_lifecycle_task_count = len(asyncio.all_tasks())
+            pre_lifecycle_fds = pre_lifecycle_resources.open_fds
+            pre_lifecycle_processes = pre_lifecycle_resources.processes
+            pre_lifecycle_task_count = pre_lifecycle_resources.task_count
+            assert pre_lifecycle_pool.browser_slots == 0
             assert pre_lifecycle_pool.active_contexts == 0
 
             # Two idle max-age cycles surround an aged persistent session cycle,
             # and readiness competes with normal traffic in each.
+            _assert_ready(await client.get("/ready"))
             lifecycle_launches = browser_launches
             pool = app.state.pool
             original_max_age = pool._browser_max_age_seconds
@@ -539,31 +761,35 @@ async def test_real_browser_memory_and_contexts_stay_bounded() -> None:
             # request. In that case the final replacement legitimately retires on
             # release and leaves the demand-driven pool empty. Reseed only after
             # verifying the lifecycle launch count and restoring the normal max-age,
-            # so resource baselines compare equally provisioned idle pools instead of
-            # browser-present versus browser-empty.
+            # warm the same persistent path, then fully drain both sides before
+            # comparing process resources.
             _assert_ready(await client.get("/ready"))
             await _exercise_persistent_session(
                 client,
                 payload,
                 "soak-post-lifecycle-baseline",
             )
-            await _seed_transient_baseline_browser(app, client, payload)
+            await _drain_browser_for_resource_baseline(app, client, payload)
 
             gc.collect()
-            post_lifecycle_state = await _settle_runtime(
+            post_lifecycle_resources = await _settle_drained_resources(
                 app,
                 timeout_seconds=config.settle_seconds,
                 phase="post-lifecycle baseline",
+                expected_processes=pre_lifecycle_processes,
             )
+            post_lifecycle_state = post_lifecycle_resources.runtime
             post_lifecycle_pool = post_lifecycle_state.pool
-            post_lifecycle_fds = _process_tree_open_fds()
-            _, post_lifecycle_processes = _process_tree()
-            post_lifecycle_task_count = len(asyncio.all_tasks())
+            post_lifecycle_fds = post_lifecycle_resources.open_fds
+            post_lifecycle_processes = post_lifecycle_resources.processes
+            post_lifecycle_task_count = post_lifecycle_resources.task_count
             assert post_lifecycle_pool.browser_slots == pre_lifecycle_pool.browser_slots
+            assert post_lifecycle_pool.browser_slots == 0
             assert post_lifecycle_pool.active_contexts == pre_lifecycle_pool.active_contexts
-            assert len(post_lifecycle_processes) <= len(pre_lifecycle_processes), (
-                "lifecycle process count did not return to baseline "
-                f"({len(pre_lifecycle_processes)} -> {len(post_lifecycle_processes)})"
+            assert post_lifecycle_processes == pre_lifecycle_processes, (
+                "lifecycle process tree did not return to the drained baseline "
+                f"({sorted(pre_lifecycle_processes)!r} -> "
+                f"{sorted(post_lifecycle_processes)!r})"
             )
             assert post_lifecycle_task_count <= pre_lifecycle_task_count, (
                 "lifecycle task count did not return to baseline "
@@ -573,23 +799,23 @@ async def test_real_browser_memory_and_contexts_stay_bounded() -> None:
             assert app.state.sessions.snapshot().closing == 0
             assert app.state.cleanup.snapshot().in_flight == 0
             if pre_lifecycle_fds is not None and post_lifecycle_fds is not None:
+                pre_lifecycle_signature = pre_lifecycle_resources.fd_signature or frozenset()
+                post_lifecycle_signature = post_lifecycle_resources.fd_signature or frozenset()
+                added_lifecycle_fds = sorted(post_lifecycle_signature - pre_lifecycle_signature)
                 assert post_lifecycle_fds <= pre_lifecycle_fds, (
                     "lifecycle process-tree open FDs did not return to baseline "
-                    f"({pre_lifecycle_fds} -> {post_lifecycle_fds})"
+                    f"({pre_lifecycle_fds} -> {post_lifecycle_fds}); "
+                    f"added={added_lifecycle_fds!r}"
                 )
 
-            baseline_rss = _process_tree_rss_bytes()
+            baseline_rss = post_lifecycle_resources.rss_bytes
             baseline_fds = post_lifecycle_fds
             baseline_pool = post_lifecycle_pool
             baseline_browser_launches = browser_launches
-            expected_measurement_launches = config.requests // config.browser_max_uses
             baseline_processes = post_lifecycle_processes
             baseline_task_count = post_lifecycle_task_count
             assert baseline_rss > 0
             assert baseline_pool.active_contexts == 0
-            assert expected_measurement_launches > 0, (
-                "the soak profile must include at least one measured browser recycle"
-            )
 
             started = time.monotonic()
             for completed in range(1, config.requests + 1):
@@ -601,32 +827,36 @@ async def test_real_browser_memory_and_contexts_stay_bounded() -> None:
 
             elapsed = time.monotonic() - started
             gc.collect()
-            final_state = await _settle_runtime(
+            final_resources = await _settle_drained_resources(
                 app,
                 timeout_seconds=config.settle_seconds,
                 phase="final measurement",
+                expected_processes=baseline_processes,
             )
-            final_rss = _process_tree_rss_bytes()
-            final_fds = _process_tree_open_fds()
+            final_state = final_resources.runtime
+            final_rss = final_resources.rss_bytes
+            final_fds = final_resources.open_fds
             final_pool = final_state.pool
-            _, final_processes = _process_tree()
-            final_task_count = len(asyncio.all_tasks())
+            final_processes = final_resources.processes
+            final_task_count = final_resources.task_count
             growth_percent = max(0.0, (final_rss - baseline_rss) / baseline_rss * 100)
+            actual_measurement_launches = browser_launches - baseline_browser_launches
 
             assert elapsed >= config.duration_seconds
             assert server.request_count >= config.warmup_requests + config.requests
-            assert browser_launches >= baseline_browser_launches + expected_measurement_launches, (
+            assert actual_measurement_launches == expected_measurement_launches, (
                 "the soak measurement did not exercise the expected browser recycles "
                 f"(expected_launches={expected_measurement_launches}, "
-                f"actual_launches={browser_launches - baseline_browser_launches}, "
+                f"actual_launches={actual_measurement_launches}, "
                 f"browser_max_uses={config.browser_max_uses})"
             )
             assert await _active_context_count(app.state.pool) == 0
             assert final_pool.browser_slots == baseline_pool.browser_slots
+            assert final_pool.browser_slots == 0
             assert final_pool.active_contexts == baseline_pool.active_contexts
-            assert len(final_processes) <= len(baseline_processes), (
-                "process count did not return to baseline "
-                f"({len(baseline_processes)} -> {len(final_processes)})"
+            assert final_processes == baseline_processes, (
+                "process tree did not return to the drained baseline "
+                f"({sorted(baseline_processes)!r} -> {sorted(final_processes)!r})"
             )
             assert final_task_count <= baseline_task_count, (
                 "asyncio task count did not return to baseline "
@@ -636,9 +866,12 @@ async def test_real_browser_memory_and_contexts_stay_bounded() -> None:
             assert app.state.sessions.snapshot().closing == 0
             assert app.state.cleanup.snapshot().in_flight == 0
             if baseline_fds is not None and final_fds is not None:
+                baseline_signature = post_lifecycle_resources.fd_signature or frozenset()
+                final_signature = final_resources.fd_signature or frozenset()
+                added_fds = sorted(final_signature - baseline_signature)
                 assert final_fds <= baseline_fds, (
                     f"process-tree open FDs did not return to baseline "
-                    f"({baseline_fds} -> {final_fds})"
+                    f"({baseline_fds} -> {final_fds}); added={added_fds!r}"
                 )
             assert growth_percent <= config.max_rss_growth_percent, (
                 f"process-tree RSS grew {growth_percent:.2f}% "
