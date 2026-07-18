@@ -308,6 +308,65 @@ def _assert_ready(response: Response) -> None:
     assert body["status"] == "ok", body
 
 
+async def _exercise_persistent_session(
+    client: AsyncClient,
+    payload: dict[str, Any],
+    session_id: str,
+) -> None:
+    created = await client.post(
+        "/v1",
+        json={
+            "cmd": "sessions.create",
+            "session": session_id,
+            "maxTimeout": payload["maxTimeout"],
+        },
+    )
+    assert created.status_code == 200, created.json()
+
+    _assert_success(
+        await client.post(
+            "/v1",
+            json={**payload, "session": session_id},
+        )
+    )
+
+    destroyed = await client.post(
+        "/v1",
+        json={
+            "cmd": "sessions.destroy",
+            "session": session_id,
+            "maxTimeout": payload["maxTimeout"],
+        },
+    )
+    assert destroyed.status_code == 200, destroyed.json()
+
+
+async def _seed_transient_baseline_browser(
+    app: Any,
+    client: AsyncClient,
+    payload: dict[str, Any],
+) -> None:
+    """Replace the warmed browser and seed its successor with one timed-phase request."""
+
+    pool = app.state.pool
+    assert len(pool._slots) == 1
+    previous_slot = pool._slots[0]
+    assert previous_slot.state == "ready"
+    assert previous_slot.active_contexts == 0
+
+    original_max_uses = pool._browser_max_uses
+    pool._browser_max_uses = previous_slot.uses + 1
+    try:
+        _assert_success(await client.post("/v1", json=payload))
+    finally:
+        pool._browser_max_uses = original_max_uses
+
+    assert previous_slot not in pool._slots
+    _assert_success(await client.post("/v1", json=payload))
+    assert len(pool._slots) == 1
+    assert pool._slots[0] is not previous_slot
+
+
 async def test_real_browser_memory_and_contexts_stay_bounded() -> None:
     config = SoakConfig.from_env()
     loop = asyncio.get_running_loop()
@@ -379,6 +438,17 @@ async def test_real_browser_memory_and_contexts_stay_bounded() -> None:
             # demand-driven pool empty. Seed one normal lease so both resource
             # baselines include an equally provisioned idle browser.
             _assert_ready(await client.get("/ready"))
+
+            # Persistent contexts lazily initialize browser and Playwright
+            # descriptors that transient warmup does not exercise. Run the same
+            # persistent path on both sides of the lifecycle gate so the strict FD
+            # comparison measures accumulation instead of first-use initialization.
+            await _exercise_persistent_session(
+                client,
+                payload,
+                "soak-pre-lifecycle-baseline",
+            )
+            await _seed_transient_baseline_browser(app, client, payload)
 
             gc.collect()
             pre_lifecycle_state = await _settle_runtime(
@@ -472,6 +542,12 @@ async def test_real_browser_memory_and_contexts_stay_bounded() -> None:
             # so resource baselines compare equally provisioned idle pools instead of
             # browser-present versus browser-empty.
             _assert_ready(await client.get("/ready"))
+            await _exercise_persistent_session(
+                client,
+                payload,
+                "soak-post-lifecycle-baseline",
+            )
+            await _seed_transient_baseline_browser(app, client, payload)
 
             gc.collect()
             post_lifecycle_state = await _settle_runtime(
@@ -506,10 +582,14 @@ async def test_real_browser_memory_and_contexts_stay_bounded() -> None:
             baseline_fds = post_lifecycle_fds
             baseline_pool = post_lifecycle_pool
             baseline_browser_launches = browser_launches
+            expected_measurement_launches = config.requests // config.browser_max_uses
             baseline_processes = post_lifecycle_processes
             baseline_task_count = post_lifecycle_task_count
             assert baseline_rss > 0
             assert baseline_pool.active_contexts == 0
+            assert expected_measurement_launches > 0, (
+                "the soak profile must include at least one measured browser recycle"
+            )
 
             started = time.monotonic()
             for completed in range(1, config.requests + 1):
@@ -535,9 +615,11 @@ async def test_real_browser_memory_and_contexts_stay_bounded() -> None:
 
             assert elapsed >= config.duration_seconds
             assert server.request_count >= config.warmup_requests + config.requests
-            assert browser_launches > baseline_browser_launches, (
-                "the soak measurement did not exercise browser recycling "
-                f"(browser_max_uses={config.browser_max_uses})"
+            assert browser_launches >= baseline_browser_launches + expected_measurement_launches, (
+                "the soak measurement did not exercise the expected browser recycles "
+                f"(expected_launches={expected_measurement_launches}, "
+                f"actual_launches={browser_launches - baseline_browser_launches}, "
+                f"browser_max_uses={config.browser_max_uses})"
             )
             assert await _active_context_count(app.state.pool) == 0
             assert final_pool.browser_slots == baseline_pool.browser_slots
