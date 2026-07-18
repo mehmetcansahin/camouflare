@@ -24,6 +24,8 @@ All notable changes to Camouflare are documented here. The project follows
 - `/ready` remains browser-backed but now has an independent 15-second total deadline;
   `/health` is now a minimal HTTP 200 process-liveness response, with browser capacity
   available from `/diagnostics` instead.
+- The nightly real-browser soak now uses a five-minute, 100-request profile while
+  preserving five measured browser recycle cycles.
 
 ### Fixed
 

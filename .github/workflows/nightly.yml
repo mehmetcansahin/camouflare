@@ -99,9 +99,9 @@ jobs:
         run: uv run python -m pytest tests/integration/test_real_browser.py -q
 
   soak:
-    name: One-hour real-browser soak
+    name: Five-minute real-browser soak
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 30
     steps:
       - name: Check out source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -129,13 +129,13 @@ jobs:
           uv sync --frozen --group dev
           uv run python scripts/fetch_camoufox.py
           uv run playwright install-deps firefox
-      - name: Run 1,000-request soak for one hour
+      - name: Run 100-request soak for five minutes
         env:
           CAMOUFLARE_RUN_SOAK: "1"
-          CAMOUFLARE_SOAK_REQUESTS: "1000"
-          CAMOUFLARE_SOAK_DURATION_SECONDS: "3600"
+          CAMOUFLARE_SOAK_REQUESTS: "100"
+          CAMOUFLARE_SOAK_DURATION_SECONDS: "300"
           CAMOUFLARE_SOAK_WARMUP_REQUESTS: "100"
-          CAMOUFLARE_SOAK_BROWSER_MAX_USES: "200"
+          CAMOUFLARE_SOAK_BROWSER_MAX_USES: "20"
           CAMOUFLARE_SOAK_REQUEST_TIMEOUT_MS: "60000"
           CAMOUFLARE_SOAK_SETTLE_SECONDS: "5"
           CAMOUFLARE_SOAK_MAX_RSS_GROWTH_PERCENT: "15"

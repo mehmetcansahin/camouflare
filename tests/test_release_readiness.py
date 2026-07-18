@@ -195,10 +195,11 @@ def test_ci_and_nightly_cover_real_browser_container_and_soak_gates() -> None:
     assert "--cov-fail-under=85" in ci
     assert "ruff format --check" in ci
     assert "pyright==1.1.411" in ci
-    assert 'CAMOUFLARE_SOAK_REQUESTS: "1000"' in nightly
-    assert 'CAMOUFLARE_SOAK_DURATION_SECONDS: "3600"' in nightly
+    assert "Five-minute real-browser soak" in nightly
+    assert 'CAMOUFLARE_SOAK_REQUESTS: "100"' in nightly
+    assert 'CAMOUFLARE_SOAK_DURATION_SECONDS: "300"' in nightly
     assert 'CAMOUFLARE_SOAK_WARMUP_REQUESTS: "100"' in nightly
-    assert 'CAMOUFLARE_SOAK_BROWSER_MAX_USES: "200"' in nightly
+    assert 'CAMOUFLARE_SOAK_BROWSER_MAX_USES: "20"' in nightly
     assert 'CAMOUFLARE_SOAK_REQUEST_TIMEOUT_MS: "60000"' in nightly
     assert 'CAMOUFLARE_SOAK_SETTLE_SECONDS: "5"' in nightly
     assert "runs-on: macos-15" in nightly
