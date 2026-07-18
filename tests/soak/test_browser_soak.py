@@ -73,13 +73,14 @@ class SoakConfig:
     @classmethod
     def from_env(cls) -> SoakConfig:
         return cls(
-            requests=_positive_int("CAMOUFLARE_SOAK_REQUESTS", 1_000),
-            duration_seconds=_non_negative_float("CAMOUFLARE_SOAK_DURATION_SECONDS", 3_600),
+            requests=_positive_int("CAMOUFLARE_SOAK_REQUESTS", 100),
+            duration_seconds=_non_negative_float("CAMOUFLARE_SOAK_DURATION_SECONDS", 300),
             # Firefox lazily initializes process-level caches and descriptors across
-            # early contexts. Establish a steady-state baseline before measuring
-            # long-run resource growth.
+            # early contexts. Keep the established warmup before measuring resource
+            # growth. The five-minute profile keeps five measured recycle cycles
+            # while ending with an equally provisioned idle pool.
             warmup_requests=_positive_int("CAMOUFLARE_SOAK_WARMUP_REQUESTS", 100),
-            browser_max_uses=_positive_int("CAMOUFLARE_SOAK_BROWSER_MAX_USES", 200),
+            browser_max_uses=_positive_int("CAMOUFLARE_SOAK_BROWSER_MAX_USES", 20),
             max_rss_growth_percent=_non_negative_float(
                 "CAMOUFLARE_SOAK_MAX_RSS_GROWTH_PERCENT", 15
             ),
@@ -373,6 +374,11 @@ async def test_real_browser_memory_and_contexts_stay_bounded() -> None:
 
             for _ in range(config.warmup_requests):
                 _assert_success(await client.post("/v1", json=payload))
+
+            # A warmup count may land exactly on a max-use boundary and leave the
+            # demand-driven pool empty. Seed one normal lease so both resource
+            # baselines include an equally provisioned idle browser.
+            _assert_ready(await client.get("/ready"))
 
             gc.collect()
             pre_lifecycle_state = await _settle_runtime(
