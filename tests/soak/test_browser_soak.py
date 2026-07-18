@@ -459,6 +459,14 @@ async def test_real_browser_memory_and_contexts_stay_bounded() -> None:
                 "the aged persistent-session browser"
             )
 
+            # The synthetic lifecycle max-age can be shorter than one real-browser
+            # request. In that case the final replacement legitimately retires on
+            # release and leaves the demand-driven pool empty. Reseed only after
+            # verifying the lifecycle launch count and restoring the normal max-age,
+            # so resource baselines compare equally provisioned idle pools instead of
+            # browser-present versus browser-empty.
+            _assert_ready(await client.get("/ready"))
+
             gc.collect()
             post_lifecycle_state = await _settle_runtime(
                 app,
