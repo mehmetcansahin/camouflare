@@ -7,6 +7,7 @@ from typing import Any, Literal
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
 from camouflare._version import __version__
+from camouflare.errors import V1ErrorCode
 from camouflare.limits import (
     MAX_COOKIE_BYTES,
     MAX_COOKIES,
@@ -255,6 +256,25 @@ class V1Response(BaseModel):
         default=None,
         description="Sorted session ids for sessions.list.",
     )
+    error_code: V1ErrorCode | None = Field(
+        default=None,
+        description="Stable machine-readable error category.",
+        serialization_alias="errorCode",
+    )
+    retryable: bool | None = Field(
+        default=None,
+        description="Whether retrying the command may succeed.",
+    )
+    request_outcome_unknown: bool | None = Field(
+        default=None,
+        description="Whether a failed request may have reached the target.",
+        serialization_alias="requestOutcomeUnknown",
+    )
+    fallback_used: bool | None = Field(
+        default=None,
+        description="Whether browser navigation fell back to direct HTTP.",
+        serialization_alias="fallbackUsed",
+    )
     start_timestamp: int = Field(
         default_factory=lambda: int(time.time() * 1000),
         description="Unix timestamp in milliseconds when the command started.",
@@ -268,11 +288,27 @@ class V1Response(BaseModel):
     version: str = Field(default=__version__, description="Camouflare response version.")
 
     @classmethod
-    def error(cls, message: str, *, version: str, start_timestamp: int | None = None) -> V1Response:
+    def error(
+        cls,
+        message: str,
+        *,
+        version: str,
+        start_timestamp: int | None = None,
+        error_code: V1ErrorCode | None = None,
+        retryable: bool | None = None,
+        request_outcome_unknown: bool | None = None,
+        fallback_used: bool | None = None,
+        solution: Solution | None = None,
+    ) -> V1Response:
         now = int(time.time() * 1000)
         return cls(
             status="error",
             message=message,
+            error_code=error_code,
+            retryable=retryable,
+            request_outcome_unknown=request_outcome_unknown,
+            fallback_used=fallback_used,
+            solution=solution,
             start_timestamp=start_timestamp or now,
             end_timestamp=now,
             version=version,

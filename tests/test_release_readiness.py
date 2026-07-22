@@ -32,11 +32,11 @@ def test_readme_documents_guarded_default_solver() -> None:
     assert "Use Camouflare only on systems you own" in readme
     assert "does not accept requests to bypass a specific third-party" in readme
     assert "is not published to PyPI" in readme
-    assert "ghcr.io/mehmetcansahin/camouflare:1.2.0" in readme
-    assert "ghcr.io/mehmetcansahin/camouflare:1.2.0" in compose
+    assert "ghcr.io/mehmetcansahin/camouflare:1.3.0" in readme
+    assert "ghcr.io/mehmetcansahin/camouflare:1.3.0" in compose
     assert "git clone https://github.com/mehmetcansahin/camouflare.git" in readme
     assert "python -m pip install ." in readme
-    assert 'python -m pip install "camouflare==1.2.0"' not in readme
+    assert 'python -m pip install "camouflare==1.3.0"' not in readme
     assert "docker compose up --build" in readme
     assert "CAMOUFOX_GEOIP" not in readme
     assert "CAMOUFOX_GEOIP" not in compose
@@ -57,6 +57,23 @@ def test_documentation_html_matches_guarded_default_solver() -> None:
     assert "enabled explicitly with <code>CHALLENGE_SOLVER=click</code>" in DOCUMENTATION_HTML
     assert "out of scope for this project" in DOCUMENTATION_HTML
     assert "CAMOUFOX_GEOIP" not in DOCUMENTATION_HTML
+
+
+def test_documentation_html_describes_v1_error_metadata() -> None:
+    for field in ("errorCode", "retryable", "requestOutcomeUnknown", "fallbackUsed"):
+        assert f"<code>{field}</code>" in DOCUMENTATION_HTML
+    for error_code in (
+        "INVALID_REQUEST",
+        "SESSION_NOT_FOUND",
+        "RESOURCE_LIMIT_EXCEEDED",
+        "POOL_UNAVAILABLE",
+        "REQUEST_TIMEOUT",
+        "NAVIGATION_TIMEOUT",
+        "BROWSER_TRANSPORT_CLOSED",
+        "CHALLENGE_FAILED",
+        "INTERNAL_ERROR",
+    ):
+        assert f"<code>{error_code}</code>" in DOCUMENTATION_HTML
 
 
 def test_open_source_metadata_files_are_present() -> None:
@@ -111,7 +128,7 @@ def test_release_version_has_one_authoritative_source() -> None:
     assert metadata["tool"]["setuptools"]["dynamic"]["version"] == {
         "attr": "camouflare._version.__version__"
     }
-    assert installed_version("camouflare") == __version__ == "1.2.0"
+    assert installed_version("camouflare") == __version__ == "1.3.0"
 
 
 def test_ci_runs_supported_python_matrix_and_builds_package() -> None:

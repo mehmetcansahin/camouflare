@@ -23,12 +23,14 @@ from urllib.request import (
 )
 
 from camouflare.challenge import content_has_challenge_markers
+from camouflare.errors import CamouflareError, V1ErrorCode
 from camouflare.limits import (
     ResourceLimitError,
     ResourceLimits,
     ensure_bytes_size,
     ensure_text_size,
 )
+from camouflare.metrics import record_browser_transport_error
 from camouflare.models import V1Request
 from camouflare.protocols import BrowserContextLike, PageLike, ResponseLike, RouteLike
 from camouflare.solution import is_best_effort_browser_error, response_charset
@@ -68,6 +70,7 @@ class RawResponse:
         self.status = status
         self.headers = headers
         self._body = body
+        self.fallback_used = False
 
     async def text(self) -> str:
         return self._body
@@ -134,16 +137,12 @@ async def navigate_get(
     except Exception as exc:
         if is_timeout_error(exc):
             logger.info(
-                "Navigation timed out before domcontentloaded; retrying with commit.",
+                "Navigation timed out before domcontentloaded; waiting for commit.",
                 extra={"target": safe_log_url(url), "error": type(exc).__name__},
             )
             try:
-                return await page.goto(
-                    url,
-                    timeout=timer.remaining_ms,
-                    wait_until="commit",
-                    referer=referer,
-                )
+                await page.wait_for_load_state("commit", timeout=timer.remaining_ms)
+                return None
             except Exception as commit_exc:
                 if (
                     allow_direct_http_fallback
@@ -165,24 +164,86 @@ async def navigate_get(
                     )
                     if direct_response is not None:
                         return direct_response
-                if allow_direct_http_fallback and is_best_effort_browser_error(commit_exc):
-                    logger.info(
-                        "Browser transport closed during GET navigation; "
-                        "falling back to direct HTTP.",
-                        extra={
-                            "target": safe_log_url(url),
-                            "error": type(commit_exc).__name__,
-                        },
-                    )
-                    return await fetch_direct(url, request, timer)
+                if is_best_effort_browser_error(commit_exc):
+                    if allow_direct_http_fallback:
+                        logger.info(
+                            "Browser transport closed during GET navigation; "
+                            "falling back to direct HTTP.",
+                            extra={
+                                "target": safe_log_url(url),
+                                "error": type(commit_exc).__name__,
+                            },
+                        )
+                        return await _fallback_after_browser_transport(
+                            url,
+                            request,
+                            timer,
+                            browser_error=commit_exc,
+                            fetch_direct=fetch_direct,
+                        )
+                    _emit_browser_transport_error(commit_exc, fallback_used=False)
                 raise
-        if allow_direct_http_fallback and is_best_effort_browser_error(exc):
-            logger.info(
-                "Browser transport closed during GET navigation; falling back to direct HTTP.",
-                extra={"target": safe_log_url(url), "error": type(exc).__name__},
-            )
-            return await fetch_direct(url, request, timer)
+        if is_best_effort_browser_error(exc):
+            if allow_direct_http_fallback:
+                logger.info(
+                    "Browser transport closed during GET navigation; falling back to direct HTTP.",
+                    extra={"target": safe_log_url(url), "error": type(exc).__name__},
+                )
+                return await _fallback_after_browser_transport(
+                    url,
+                    request,
+                    timer,
+                    browser_error=exc,
+                    fetch_direct=fetch_direct,
+                )
+            _emit_browser_transport_error(exc, fallback_used=False)
         raise
+
+
+def _emit_browser_transport_error(exc: Exception, *, fallback_used: bool) -> None:
+    record_browser_transport_error("navigation")
+    logger.warning(
+        "Browser transport error.",
+        extra={
+            "phase": "navigation",
+            "error_type": type(exc).__name__,
+            "browser_state": None,
+            "slot_uses": None,
+            "slot_active_contexts": None,
+            "retire_reason": None,
+            "fallback_used": fallback_used,
+        },
+    )
+
+
+def _mark_direct_http_fallback(response: Any) -> Any:
+    response.fallback_used = True
+    return response
+
+
+async def _fallback_after_browser_transport(
+    url: str,
+    request: V1Request,
+    timer: TimeoutTimer,
+    *,
+    browser_error: Exception,
+    fetch_direct: DirectHttpGet,
+) -> NavigationResponse:
+    try:
+        response = await fetch_direct(url, request, timer)
+    except ResourceLimitError:
+        _emit_browser_transport_error(browser_error, fallback_used=False)
+        raise
+    except Exception as fallback_error:
+        logger.info(
+            "Direct HTTP fallback after browser transport failure failed; "
+            "preserving browser transport error.",
+            extra={"target": safe_log_url(url), "error": type(fallback_error).__name__},
+        )
+        _emit_browser_transport_error(browser_error, fallback_used=False)
+        raise browser_error from fallback_error
+    _emit_browser_transport_error(browser_error, fallback_used=True)
+    return _mark_direct_http_fallback(response)
 
 
 async def try_direct_http_get_first(
@@ -243,7 +304,7 @@ async def try_direct_http_get_after_navigation_timeout(
             extra={"target": safe_log_url(url), "status": response.status},
         )
         return None
-    return response
+    return _mark_direct_http_fallback(response)
 
 
 def should_try_direct_get_first(request: V1Request) -> bool:
@@ -320,20 +381,10 @@ async def submit_post(
 
     response = await post_with_context_request(context, request, timer, limits)
     if response is not None:
-        body = await response.text()
-        if not content_has_challenge_markers(body):
-            return response
-        if not can_submit_hidden_form(request):
-            logger.info(
-                "Context request POST returned challenge HTML, but the raw request body "
-                "cannot be represented as an HTML form; preserving the original response.",
-                extra={"target": safe_log_url(clean_url(request.url)), "status": response.status},
-            )
-            return response
-        logger.info(
-            "Context request POST returned challenge HTML; falling back to browser form submit.",
-            extra={"target": safe_log_url(clean_url(request.url)), "status": response.status},
-        )
+        # A POST response is terminal even when it contains challenge HTML. Replaying
+        # the business request through a second browser path could duplicate effects.
+        # Consumers receive the first response and decide whether another attempt is safe.
+        return response
 
     if not can_submit_hidden_form(request):
         raise RuntimeError(
@@ -530,11 +581,17 @@ def _direct_http_get_sync(
 
 def clean_url(url: str | None) -> str:
     if not url:
-        raise RuntimeError("Request parameter 'url' is mandatory.")
+        raise CamouflareError(
+            "Request parameter 'url' is mandatory.",
+            error_code=V1ErrorCode.INVALID_REQUEST,
+        )
     cleaned = url.replace('"', "").strip()
     scheme = urlsplit(cleaned).scheme.lower()
     if scheme not in ALLOWED_URL_SCHEMES:
-        raise RuntimeError("Request parameter 'url' must use the http or https scheme.")
+        raise CamouflareError(
+            "Request parameter 'url' must use the http or https scheme.",
+            error_code=V1ErrorCode.INVALID_REQUEST,
+        )
     return cleaned
 
 

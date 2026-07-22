@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import importlib
+
 import pytest
 
 import camouflare.config as config_module
@@ -174,6 +176,52 @@ def test_v1_response_serializes_flaresolverr_camel_case_fields() -> None:
     assert response.model_dump(by_alias=True)["endTimestamp"] == 20
     assert response.model_dump(by_alias=True)["solution"]["userAgent"] == "FakeBrowser/1.0"
     assert response.model_dump(by_alias=True)["solution"]["turnstile_token"] == "token"
+
+
+def test_v1_response_serializes_optional_error_resilience_metadata() -> None:
+    response = V1Response(
+        status="error",
+        message="Browser transport closed.",
+        error_code="BROWSER_TRANSPORT_CLOSED",  # type: ignore[arg-type]
+        retryable=True,
+        request_outcome_unknown=False,
+        fallback_used=True,
+        version="test",
+    )
+
+    payload = response.model_dump(by_alias=True, exclude_none=True)
+
+    assert payload["errorCode"] == "BROWSER_TRANSPORT_CLOSED"
+    assert payload["retryable"] is True
+    assert payload["requestOutcomeUnknown"] is False
+    assert payload["fallbackUsed"] is True
+
+
+def test_v1_response_omits_unused_error_resilience_metadata() -> None:
+    payload = V1Response(status="ok", version="test").model_dump(
+        by_alias=True,
+        exclude_none=True,
+    )
+
+    assert "errorCode" not in payload
+    assert "retryable" not in payload
+    assert "requestOutcomeUnknown" not in payload
+    assert "fallbackUsed" not in payload
+
+
+def test_camouflare_error_carries_machine_readable_metadata() -> None:
+    error_module = importlib.import_module("camouflare.errors")
+    error = error_module.CamouflareError(
+        "Browser transport closed.",
+        error_code=error_module.V1ErrorCode.BROWSER_TRANSPORT_CLOSED,
+        retryable=True,
+    )
+
+    assert str(error) == "Browser transport closed."
+    assert error.error_code is error_module.V1ErrorCode.BROWSER_TRANSPORT_CLOSED
+    assert error.retryable is True
+    assert error.request_outcome_unknown is False
+    assert error.solution is None
 
 
 def test_diagnostics_response_validates_bounded_operational_snapshot() -> None:

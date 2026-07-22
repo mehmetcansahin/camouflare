@@ -54,10 +54,10 @@ def test_camoufox_release_metadata_file_must_be_an_array(
 def test_release_verifier_accepts_exact_tag_and_rejects_mismatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(sys, "argv", ["verify_release.py", "v1.2.0"])
+    monkeypatch.setattr(sys, "argv", ["verify_release.py", "v1.3.0"])
     assert verify_release.main() == 0
 
-    monkeypatch.setattr(sys, "argv", ["verify_release.py", "v1.2.1"])
+    monkeypatch.setattr(sys, "argv", ["verify_release.py", "v1.3.1"])
     assert verify_release.main() == 1
 
 

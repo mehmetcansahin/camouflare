@@ -7,6 +7,60 @@ Active Cloudflare interstitial and Turnstile handling is disabled by default. Se
 `CHALLENGE_SOLVER=click` to opt in to clicking challenges through
 [playwright-captcha](https://pypi.org/project/playwright-captcha/)'s ClickSolver.
 
+## Why Camouflare?
+
+[FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) established the
+widely used `/v1` integration contract, and
+[Byparr](https://github.com/ThePhaseless/Byparr) provides a smaller FastAPI-based
+alternative. Camouflare was developed to fill a different operational gap: keep
+existing FlareSolverr clients while treating browser capacity as a bounded,
+long-running resource. The goal is predictable local operation, isolated request
+state, explicit backpressure, and enough diagnostics to understand why a request
+or browser is unhealthy.
+
+This is an architectural comparison, not a challenge-success benchmark. The table
+reflects the documented behavior of
+[FlareSolverr 3.5.0](https://github.com/FlareSolverr/FlareSolverr/tree/v3.5.0) and
+[Byparr 2.1.0](https://github.com/ThePhaseless/Byparr/tree/v2.1.0); upstream projects
+may change after those releases.
+
+| Area | FlareSolverr 3.5.0 | Byparr 2.1.0 | Camouflare 1.x |
+| --- | --- | --- | --- |
+| Browser stack | Selenium, undetected-chromedriver, and Chrome | FastAPI with Camoufox through Playwright | FastAPI with Camoufox through Playwright |
+| Stateless request lifecycle | Starts a new browser for each request | Opens a request-scoped browser and context | Leases a fresh, isolated context from a bounded pool of warm browser processes |
+| Persistent sessions | Keeps a browser instance with explicit destruction and optional TTL rotation | Does not implement the FlareSolverr session commands | Keeps a locked persistent context, rotates it by TTL, and reaps expired sessions |
+| `/v1` surface | Reference implementation for GET, POST, and session commands | GET-focused compatibility subset | GET, POST, and session commands with cookies, headers, screenshots, waits, and environment or per-request proxies |
+| Active challenge handling | Core request behavior | Click handling is integrated into the request path | Disabled by default and enabled explicitly with `CHALLENGE_SOLVER=click` |
+
+The design addresses several problems that show up in a long-running local service:
+
+- **Browser startup cost and resource spikes.** Warm processes avoid paying the full
+  browser-launch cost for every stateless request. Pool size and per-browser context
+  limits prevent unrestricted browser fan-out; saturated requests wait for a bounded
+  interval and then receive an explicit 503 error envelope.
+- **State leakage versus useful persistence.** Stateless calls receive new browser
+  contexts, so cookies and storage do not cross requests. Named sessions deliberately
+  retain state, serialize access with a lock, and respect configurable capacity
+  reserved for stateless work and readiness probes.
+- **Stale and stuck resources.** Browsers are recycled by age and use count, sessions
+  expire by TTL, and request, cleanup, reaping, readiness, and shutdown paths have hard
+  deadlines. Cleanup remains tracked after caller cancellation so logical capacity is
+  not silently pinned by an abandoned request.
+- **Incomplete request semantics.** Camouflare handles FlareSolverr-style POST requests
+  inside the browser, preserves raw JSON or form bodies and their content type, applies
+  target headers before navigation, and supports user-agent, referer, cookie, proxy,
+  wait, media-blocking, and screenshot options.
+- **Opaque failures and unsafe defaults.** Separate liveness, readiness, diagnostics,
+  and Prometheus endpoints distinguish a live API from a healthy or saturated browser
+  pool. Request correlation, bounded payloads, a loopback default, and mandatory token
+  authentication for non-loopback binds make unattended operation easier to inspect
+  and safer to expose within a controlled network.
+
+Camouflare is an alternative operating model, not a claim of complete feature parity
+or a guaranteed bypass. Some deprecated FlareSolverr fields are intentional
+compatibility no-ops, and challenge outcomes still depend on the target, network
+reputation, proxy, and browser fingerprint.
+
 Camouflare 1.x targets a single-user, single-worker local service. Linux and
 macOS source installs are supported; release container builds target Linux
 `amd64` and `arm64`. Windows and shared multi-tenant deployments are out of scope.
@@ -19,7 +73,7 @@ site's access controls.
 ## Installation
 
 Camouflare is installed from source or run from the immutable
-`ghcr.io/mehmetcansahin/camouflare:1.2.0` image; it is not published to PyPI.
+`ghcr.io/mehmetcansahin/camouflare:1.3.0` image; it is not published to PyPI.
 For a source installation, fetch the Camoufox browser runtime after installing the package:
 
 ```bash
@@ -186,7 +240,7 @@ docker run --rm \
 
 For Compose, set `CAMOUFLARE_API_TOKEN` before running `docker compose pull` and
 `docker compose up -d`. The example `compose.yaml` intentionally fails to start when this
-variable is unset and defaults to the immutable `1.2.0` image. Its retained `build: .`
+variable is unset and defaults to the immutable `1.3.0` image. Its retained `build: .`
 entry supports explicit local builds with `docker compose up --build`.
 
 The Dockerfile pins Ubuntu 24.04, uses `dumb-init`, runs as a non-root user,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -20,11 +21,12 @@ from camouflare.app import (
     create_app,
 )
 from camouflare.cleanup import CleanupSupervisor
-from camouflare.commands import _close_proxy_best_effort
+from camouflare.commands import _close_proxy_best_effort, execute_request
 from camouflare.config import Settings
+from camouflare.errors import CamouflareError, V1ErrorCode
 from camouflare.limits import ResourceLimitError
 from camouflare.metrics import REQUEST_COUNTER
-from camouflare.models import V1Request
+from camouflare.models import Solution, V1Request, V1Response
 from camouflare.sessions import SessionManager
 from tests.fakes import FakeBrowser, FakeBrowserFactory, FakeContext, FakePage
 
@@ -634,6 +636,8 @@ async def test_v1_returns_503_when_pool_is_saturated() -> None:
 
     assert response.status_code == 503
     assert response.json()["status"] == "error"
+    assert response.json()["errorCode"] == "POOL_UNAVAILABLE"
+    assert response.json()["retryable"] is True
 
 
 @pytest.mark.anyio
@@ -672,6 +676,7 @@ async def test_max_timeout_bounds_pool_wait() -> None:
     assert response.status_code == 500
     assert response.json()["status"] == "error"
     assert "maxTimeout" in response.json()["message"]
+    assert response.json()["errorCode"] == "REQUEST_TIMEOUT"
     assert app.state.pool.snapshot().active_contexts == 0
     assert app.state.pool.snapshot().waiting_requests == 0
 
@@ -798,6 +803,378 @@ async def test_invalid_command_returns_flaresolverr_error_envelope() -> None:
     assert response.status_code == 500
     assert response.json()["status"] == "error"
     assert "invalid" in response.json()["message"]
+    assert response.json()["errorCode"] == "INVALID_REQUEST"
+    assert response.json()["retryable"] is False
+
+
+@pytest.mark.anyio
+async def test_destroying_missing_session_has_stable_not_found_code() -> None:
+    app = create_app(browser_factory=FakeBrowserFactory(), lifespan_enabled=False)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/v1",
+            json={"cmd": "sessions.destroy", "session": "missing"},
+        )
+
+    assert response.status_code == 500
+    assert response.json()["errorCode"] == "SESSION_NOT_FOUND"
+    assert response.json()["retryable"] is False
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("error_code", "expected_status"),
+    [
+        (V1ErrorCode.INVALID_REQUEST, 500),
+        (V1ErrorCode.SESSION_NOT_FOUND, 500),
+        (V1ErrorCode.RESOURCE_LIMIT_EXCEEDED, 500),
+        (V1ErrorCode.POOL_UNAVAILABLE, 503),
+        (V1ErrorCode.REQUEST_TIMEOUT, 500),
+        (V1ErrorCode.NAVIGATION_TIMEOUT, 500),
+        (V1ErrorCode.BROWSER_TRANSPORT_CLOSED, 500),
+        (V1ErrorCode.CHALLENGE_FAILED, 500),
+        (V1ErrorCode.INTERNAL_ERROR, 500),
+    ],
+)
+async def test_v1_maps_every_bounded_domain_error_to_compatible_status(
+    monkeypatch: pytest.MonkeyPatch,
+    error_code: V1ErrorCode,
+    expected_status: int,
+) -> None:
+    async def fail_dispatch(_service: object, *_args: object, **_kwargs: object) -> None:
+        raise CamouflareError(
+            "Expected failure.",
+            error_code=error_code,
+            retryable=error_code is V1ErrorCode.POOL_UNAVAILABLE,
+        )
+
+    app = create_app(browser_factory=FakeBrowserFactory(), lifespan_enabled=False)
+    monkeypatch.setattr(type(app.state.command_service), "dispatch", fail_dispatch)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post("/v1", json={"cmd": "sessions.list"})
+
+    body = response.json()
+    assert response.status_code == expected_status
+    assert body["status"] == "error"
+    assert body["errorCode"] == error_code.value
+    assert body["retryable"] is (error_code is V1ErrorCode.POOL_UNAVAILABLE)
+
+
+@pytest.mark.anyio
+async def test_execute_request_turns_solver_failure_into_typed_domain_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    partial_solution = Solution(
+        url="https://example.com/partial",
+        status=0,
+        cookies=[],
+    )
+
+    async def fail_solve(*_args: object, **_kwargs: object) -> V1Response:
+        return V1Response(
+            status="error",
+            message="Navigation timed out.",
+            error_code=V1ErrorCode.NAVIGATION_TIMEOUT,
+            retryable=True,
+            request_outcome_unknown=False,
+            solution=partial_solution,
+        )
+
+    monkeypatch.setattr("camouflare.commands.solve_request", fail_solve)
+    app = create_app(browser_factory=FakeBrowserFactory(), lifespan_enabled=False)
+    await app.state.pool.start()
+
+    with pytest.raises(CamouflareError) as raised:
+        await execute_request(
+            V1Request(cmd="request.get", url="https://example.com"),
+            pool=app.state.pool,
+            sessions=app.state.sessions,
+            settings=app.state.settings,
+            captcha_provider=app.state.captcha_provider,
+            start_timestamp=1,
+            cleanup=app.state.cleanup,
+        )
+
+    await app.state.pool.close()
+    assert raised.value.error_code is V1ErrorCode.NAVIGATION_TIMEOUT
+    assert raised.value.retryable is True
+    assert raised.value.solution is partial_solution
+
+
+@pytest.mark.anyio
+async def test_v1_emits_one_safe_structured_completion_event(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    app = create_app(browser_factory=FakeBrowserFactory(), lifespan_enabled=False)
+    await app.state.pool.start()
+
+    with caplog.at_level(logging.INFO, logger="camouflare.app"):
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.post(
+                "/v1",
+                json={
+                    "cmd": "request.get",
+                    "url": "https://user:pass@example.com/path?secret=1",
+                },
+            )
+
+    await app.state.pool.close()
+    completion = [record for record in caplog.records if record.message == "V1 request completed."]
+    assert len(completion) == 1
+    record = completion[0]
+    assert record.command == "request.get"  # type: ignore[attr-defined]
+    assert record.result == "ok"  # type: ignore[attr-defined]
+    assert record.http_status == response.status_code  # type: ignore[attr-defined]
+    assert record.error_code is None  # type: ignore[attr-defined]
+    assert record.retryable is None  # type: ignore[attr-defined]
+    assert record.request_outcome_unknown is None  # type: ignore[attr-defined]
+    assert isinstance(record.duration_ms, int)  # type: ignore[attr-defined]
+    assert record.target_host == "example.com"  # type: ignore[attr-defined]
+    assert record.fallback_used is False  # type: ignore[attr-defined]
+    assert "secret=1" not in record.getMessage()
+    assert "user:pass" not in record.getMessage()
+
+
+@pytest.mark.anyio
+async def test_v1_expected_error_has_completion_without_traceback(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    app = create_app(browser_factory=FakeBrowserFactory(), lifespan_enabled=False)
+
+    with caplog.at_level(logging.INFO, logger="camouflare.app"):
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.post("/v1", json={"cmd": "nope"})
+
+    completion = next(
+        record for record in caplog.records if record.message == "V1 request completed."
+    )
+    assert response.json()["errorCode"] == "INVALID_REQUEST"
+    assert completion.error_code == "INVALID_REQUEST"  # type: ignore[attr-defined]
+    assert completion.exc_info is None
+    assert not any(record.exc_info for record in caplog.records)
+
+
+@pytest.mark.anyio
+async def test_v1_unexpected_error_logs_traceback_and_internal_code(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def fail_dispatch(_service: object, *_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("unexpected command failure")
+
+    app = create_app(browser_factory=FakeBrowserFactory(), lifespan_enabled=False)
+    monkeypatch.setattr(type(app.state.command_service), "dispatch", fail_dispatch)
+
+    with caplog.at_level(logging.INFO, logger="camouflare.app"):
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.post("/v1", json={"cmd": "sessions.list"})
+
+    body = response.json()
+    assert body["errorCode"] == "INTERNAL_ERROR"
+    unexpected = next(
+        record for record in caplog.records if record.message == "Unexpected /v1 command error."
+    )
+    assert unexpected.exc_info is not None
+    completion = next(
+        record for record in caplog.records if record.message == "V1 request completed."
+    )
+    assert completion.error_code == "INTERNAL_ERROR"  # type: ignore[attr-defined]
+
+
+@pytest.mark.anyio
+async def test_v1_exposes_browser_to_direct_get_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class TransportFailureContext(FakeContext):
+        async def new_page(self) -> FakePage:
+            page = FakePage(self)
+            page.goto_failures["domcontentloaded"] = RuntimeError(
+                "Page.goto: Connection closed while reading from the driver"
+            )
+            self.pages.append(page)
+            return page
+
+    class TransportFailureBrowser(FakeBrowser):
+        async def new_context(self, **options: Any) -> FakeContext:
+            context = TransportFailureContext(self, options)
+            self.contexts.append(context)
+            self.context_options.append(options)
+            return context
+
+    class TransportFailureFactory(FakeBrowserFactory):
+        async def __call__(self) -> FakeBrowser:
+            browser = TransportFailureBrowser()
+            self.created.append(browser)
+            return browser
+
+    async def direct_get(url: str, *_args: object) -> object:
+        response = SimpleNamespace(
+            status=200,
+            headers={"content-type": "text/html"},
+            raw_body=True,
+            url=url,
+            fallback_used=False,
+        )
+
+        async def text() -> str:
+            return "<html><title>Direct</title><body>fallback</body></html>"
+
+        response.text = text
+        return response
+
+    monkeypatch.setattr("camouflare.solver._direct_http_get", direct_get)
+    app = create_app(browser_factory=TransportFailureFactory(), lifespan_enabled=False)
+    await app.state.pool.start()
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/v1",
+            json={"cmd": "request.get", "url": "https://example.com/fallback"},
+        )
+
+    await app.state.pool.close()
+    body = response.json()
+    assert response.status_code == 200
+    assert body["status"] == "ok"
+    assert body["fallbackUsed"] is True
+
+
+@pytest.mark.anyio
+async def test_v1_preserves_browser_to_direct_fallback_on_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class TransportFailureContext(FakeContext):
+        async def new_page(self) -> FakePage:
+            page = FakePage(self)
+            page.goto_failures["domcontentloaded"] = RuntimeError(
+                "Page.goto: Connection closed while reading from the driver"
+            )
+            self.pages.append(page)
+            return page
+
+    class TransportFailureBrowser(FakeBrowser):
+        async def new_context(self, **options: Any) -> FakeContext:
+            context = TransportFailureContext(self, options)
+            self.contexts.append(context)
+            self.context_options.append(options)
+            return context
+
+    class TransportFailureFactory(FakeBrowserFactory):
+        async def __call__(self) -> FakeBrowser:
+            browser = TransportFailureBrowser()
+            self.created.append(browser)
+            return browser
+
+    async def direct_get(url: str, *_args: object) -> object:
+        response = SimpleNamespace(
+            status=403,
+            headers={"content-type": "text/html"},
+            raw_body=True,
+            url=url,
+            fallback_used=False,
+        )
+
+        async def text() -> str:
+            return "<html><title>Just a moment...</title></html>"
+
+        response.text = text
+        return response
+
+    monkeypatch.setattr("camouflare.solver._direct_http_get", direct_get)
+    app = create_app(browser_factory=TransportFailureFactory(), lifespan_enabled=False)
+    await app.state.pool.start()
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/v1",
+            json={"cmd": "request.get", "url": "https://example.com/fallback"},
+        )
+
+    await app.state.pool.close()
+    body = response.json()
+    assert response.status_code == 500
+    assert body["status"] == "error"
+    assert body["errorCode"] == "CHALLENGE_FAILED"
+    assert body["fallbackUsed"] is True
+
+
+@pytest.mark.anyio
+async def test_v1_post_transport_failure_is_not_retried_or_sent_direct(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class TransportFailureContext(FakeContext):
+        async def new_page(self) -> FakePage:
+            page = FakePage(self)
+            page.goto_failures["domcontentloaded"] = RuntimeError(
+                "Page.goto: Connection closed while reading from the driver"
+            )
+            self.pages.append(page)
+            return page
+
+    class TransportFailureBrowser(FakeBrowser):
+        async def new_context(self, **options: Any) -> FakeContext:
+            context = TransportFailureContext(self, options)
+            self.contexts.append(context)
+            self.context_options.append(options)
+            return context
+
+    class TransportFailureFactory(FakeBrowserFactory):
+        async def __call__(self) -> FakeBrowser:
+            browser = TransportFailureBrowser()
+            self.created.append(browser)
+            return browser
+
+    async def forbidden_direct_get(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("POST must not use direct HTTP")
+
+    monkeypatch.setattr("camouflare.solver._direct_http_get", forbidden_direct_get)
+    factory = TransportFailureFactory()
+    app = create_app(browser_factory=factory, lifespan_enabled=False)
+    await app.state.pool.start()
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/v1",
+            json={
+                "cmd": "request.post",
+                "url": "https://example.com/orders",
+                "postData": "item=1",
+            },
+        )
+
+    await app.state.pool.close()
+    body = response.json()
+    assert response.status_code == 500
+    assert body["errorCode"] == "BROWSER_TRANSPORT_CLOSED"
+    assert body["retryable"] is False
+    assert body["requestOutcomeUnknown"] is True
+    assert len(factory.created[0].contexts[0].pages[0].goto_calls) == 1
 
 
 @pytest.mark.anyio
@@ -1390,6 +1767,7 @@ async def test_request_post_requires_url() -> None:
 
     assert response.status_code == 500
     assert "url" in response.json()["message"].lower()
+    assert response.json()["errorCode"] == "INVALID_REQUEST"
 
 
 @pytest.mark.anyio
@@ -1488,7 +1866,8 @@ async def test_no_session_context_close_failure_still_returns_solution() -> None
             self.created.append(browser)
             return browser
 
-    app = create_app(browser_factory=FailCloseFactory(), lifespan_enabled=False)
+    factory = FailCloseFactory()
+    app = create_app(browser_factory=factory, lifespan_enabled=False)
     await app.state.pool.start()
 
     async with AsyncClient(
@@ -1498,6 +1877,9 @@ async def test_no_session_context_close_failure_still_returns_solution() -> None
         response = await client.post(
             "/v1", json={"cmd": "request.get", "url": "https://example.com"}
         )
+        replacement_response = await client.post(
+            "/v1", json={"cmd": "request.get", "url": "https://example.com/next"}
+        )
 
     await app.state.pool.close()
 
@@ -1505,6 +1887,9 @@ async def test_no_session_context_close_failure_still_returns_solution() -> None
     assert response.status_code == 200
     assert body["status"] == "ok"
     assert body["solution"]["url"] == "https://example.com"
+    assert replacement_response.status_code == 200
+    assert len(factory.created) == 2
+    assert factory.created[0].closed is True
 
 
 @pytest.mark.anyio
@@ -1755,6 +2140,7 @@ async def test_v1_rejects_request_body_limit_with_flaresolverr_envelope() -> Non
     assert response.status_code == 500
     assert response.json()["status"] == "error"
     assert "Request body" in response.json()["message"]
+    assert response.json()["errorCode"] == "RESOURCE_LIMIT_EXCEEDED"
 
 
 @pytest.mark.anyio

@@ -88,6 +88,7 @@ def test_compose_uses_balanced_pool_performance_profile() -> None:
     assert 'POOL_MAX_BROWSERS: "2"' in compose
     assert 'POOL_MAX_CONTEXTS_PER_BROWSER: "2"' in compose
     assert 'POOL_ACQUIRE_TIMEOUT_MS: "10000"' in compose
+    assert 'LOG_FORMAT: "json"' in compose
     assert "cap_drop:\n      - ALL" in compose
     assert "no-new-privileges:true" in compose
     assert 'shm_size: "2gb"' in compose

@@ -5,6 +5,30 @@ All notable changes to Camouflare are documented here. The project follows
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-07-22
+
+### Added
+
+- Optional machine-readable `/v1` error metadata for stable error codes, retryability,
+  uncertain POST outcomes, and visible GET fallback use.
+- Structured request-completion and browser-transport events, plus bounded Prometheus
+  counters for `/v1` errors and browser transport failures.
+
+### Changed
+
+- Browser launches are now pool-owned so acquisition timeouts and caller cancellation do
+  not cancel shared capacity creation, while waiters can immediately reuse released slots.
+- Stateless GET transport fallback remains available and is now reported to consumers;
+  POST requests are never automatically replayed or sent through direct HTTP fallback.
+- The production Compose profile now emits JSON logs by default.
+
+### Fixed
+
+- Waiting requests could return a pool-unavailable response while reusable capacity had
+  already been released and another browser launch was still pending.
+- Browser transport and cleanup failures could obscure retry semantics or mask a valid
+  solution after the business request had completed.
+
 ## [1.2.0] - 2026-07-17
 
 ### Added
@@ -65,7 +89,8 @@ All notable changes to Camouflare are documented here. The project follows
 - High and critical dependency or container findings block releases unless covered by a
   reasoned, time-bounded exception.
 
-[Unreleased]: https://github.com/mehmetcansahin/camouflare/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/mehmetcansahin/camouflare/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/mehmetcansahin/camouflare/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/mehmetcansahin/camouflare/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/mehmetcansahin/camouflare/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/mehmetcansahin/camouflare/releases/tag/v1.0.0

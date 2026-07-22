@@ -462,7 +462,7 @@ DOCUMENTATION_HTML = """
       <pre><code>{
   "status": "ok",
   "sessions": ["account-a"],
-  "version": "1.2.0"
+  "version": "1.3.0"
 }</code></pre>
 
       <h3 id="sessions-destroy"><code>sessions.destroy</code></h3>
@@ -619,14 +619,35 @@ DOCUMENTATION_HTML = """
   },
   "startTimestamp": 1770000000000,
   "endTimestamp": 1770000001500,
-  "version": "1.2.0"
+  "version": "1.3.0"
 }</code></pre>
       <p>
         Errors use the same envelope with <code>status: "error"</code>.
         Pool saturation returns HTTP 503; malformed commands return HTTP 500.
+        Optional <code>errorCode</code> and <code>retryable</code> fields let clients
+        classify failures without parsing <code>message</code>.
+        <code>requestOutcomeUnknown</code> is true when a failed POST may have reached
+        the target. <code>fallbackUsed</code> is true only after a stateless GET actually
+        transitions from browser navigation to direct HTTP.
       </p>
+      <pre><code>{
+  "status": "error",
+  "message": "Browser transport closed.",
+  "errorCode": "BROWSER_TRANSPORT_CLOSED",
+  "retryable": false,
+  "requestOutcomeUnknown": true
+}</code></pre>
 
       <h2 id="error-reference">Error Reference</h2>
+      <p>
+        Stable <code>errorCode</code> values are
+        <code>INVALID_REQUEST</code>, <code>SESSION_NOT_FOUND</code>,
+        <code>RESOURCE_LIMIT_EXCEEDED</code>, <code>POOL_UNAVAILABLE</code>,
+        <code>REQUEST_TIMEOUT</code>, <code>NAVIGATION_TIMEOUT</code>,
+        <code>BROWSER_TRANSPORT_CLOSED</code>, <code>CHALLENGE_FAILED</code>, and
+        <code>INTERNAL_ERROR</code>. New metadata is optional so existing clients can
+        continue using <code>status</code> and <code>message</code> unchanged.
+      </p>
       <table>
         <thead>
           <tr>
@@ -639,22 +660,25 @@ DOCUMENTATION_HTML = """
           <tr>
             <td>Browser pool capacity is unavailable before timeout.</td>
             <td>HTTP 503</td>
-            <td><code>{"status":"error","message":"Error: ..."}</code></td>
+            <td><code>POOL_UNAVAILABLE</code>; retryable.</td>
           </tr>
           <tr>
             <td>Missing <code>cmd</code>, invalid command, missing required field.</td>
             <td>HTTP 500</td>
-            <td><code>{"status":"error","message":"Error: ..."}</code></td>
+            <td><code>INVALID_REQUEST</code>; not retryable without correction.</td>
           </tr>
           <tr>
             <td><code>sessions.destroy</code> targets an unknown session.</td>
             <td>HTTP 500</td>
-            <td><code>{"status":"error","message":"Error: The session doesn't exist."}</code></td>
+            <td><code>SESSION_NOT_FOUND</code>.</td>
           </tr>
           <tr>
             <td>Challenge solve or requested wait exceeds <code>maxTimeout</code>.</td>
             <td>HTTP 500</td>
-            <td>May include a partial <code>solution</code> for debugging.</td>
+            <td>
+              <code>CHALLENGE_FAILED</code> or <code>REQUEST_TIMEOUT</code>; may include
+              a partial <code>solution</code> for debugging.
+            </td>
           </tr>
         </tbody>
       </table>

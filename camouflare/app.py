@@ -10,6 +10,7 @@ from collections.abc import Callable, Mapping
 from contextlib import AbstractAsyncContextManager, suppress
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.gzip import GZipMiddleware
@@ -41,6 +42,7 @@ from camouflare.documentation import (
     V1_ENDPOINT_DESCRIPTION,
     V1_REQUEST_EXAMPLES,
 )
+from camouflare.errors import CamouflareError, V1ErrorCode
 from camouflare.limits import ResourceLimitError, ensure_json_size, json_size
 from camouflare.metrics import (
     REQUEST_COUNTER,
@@ -50,6 +52,7 @@ from camouflare.metrics import (
     observe_payload_size,
     observe_readiness,
     record_timeout,
+    record_v1_error,
     request_finished,
     request_started,
 )
@@ -369,6 +372,7 @@ def create_app(
         start_timestamp = int(time.time() * 1000)
         command = "unknown"
         result = "error"
+        target_host: str | None = None
         started = time.monotonic()
         try:
             payload = await _read_json_payload(
@@ -379,6 +383,7 @@ def create_app(
             v1_request = V1Request.model_validate(payload)
             _validate_request_runtime_limits(v1_request, settings)
             command = v1_request.cmd if v1_request.cmd in KNOWN_COMMANDS else "invalid"
+            target_host = _safe_target_host(v1_request.url)
             dispatch_task = asyncio.create_task(
                 command_service.dispatch(
                     v1_request,
@@ -399,6 +404,8 @@ def create_app(
                 _validation_error_message(exc),
                 version=settings.version,
                 start_timestamp=start_timestamp,
+                error_code=V1ErrorCode.INVALID_REQUEST,
+                retryable=False,
             )
             status_code = 500
         except ResourceLimitError as exc:
@@ -406,6 +413,8 @@ def create_app(
                 f"Error: {exc}",
                 version=settings.version,
                 start_timestamp=start_timestamp,
+                error_code=V1ErrorCode.RESOURCE_LIMIT_EXCEEDED,
+                retryable=False,
             )
             status_code = 500
         except (PoolAcquireTimeout, PersistentCapacityError) as exc:
@@ -413,21 +422,44 @@ def create_app(
                 f"Error: {exc}",
                 version=settings.version,
                 start_timestamp=start_timestamp,
+                error_code=V1ErrorCode.POOL_UNAVAILABLE,
+                retryable=True,
             )
             status_code = 503
+        except CamouflareError as exc:
+            response = V1Response.error(
+                str(exc),
+                version=settings.version,
+                start_timestamp=start_timestamp,
+                error_code=exc.error_code,
+                retryable=exc.retryable,
+                request_outcome_unknown=exc.request_outcome_unknown,
+                fallback_used=exc.fallback_used,
+                solution=exc.solution,
+            )
+            status_code = 503 if exc.error_code is V1ErrorCode.POOL_UNAVAILABLE else 500
         except TimeoutError:
             record_timeout("request")
             response = V1Response.error(
                 "Error: Request exceeded maxTimeout.",
                 version=settings.version,
                 start_timestamp=start_timestamp,
+                error_code=V1ErrorCode.REQUEST_TIMEOUT,
+                retryable=command != "request.post",
+                request_outcome_unknown=command == "request.post",
             )
             status_code = 500
         except Exception as exc:
+            logger.exception(
+                "Unexpected /v1 command error.",
+                extra={"error_code": V1ErrorCode.INTERNAL_ERROR.value},
+            )
             response = V1Response.error(
                 f"Error: {exc}",
                 version=settings.version,
                 start_timestamp=start_timestamp,
+                error_code=V1ErrorCode.INTERNAL_ERROR,
+                retryable=False,
             )
             status_code = 500
         response.version = settings.version
@@ -445,6 +477,8 @@ def create_app(
                 f"Error: {exc}",
                 version=settings.version,
                 start_timestamp=start_timestamp,
+                error_code=V1ErrorCode.RESOURCE_LIMIT_EXCEEDED,
+                retryable=False,
             )
             response.end_timestamp = int(time.time() * 1000)
             payload = response.model_dump(by_alias=True, exclude_none=True)
@@ -454,9 +488,48 @@ def create_app(
         observe_payload_size("solution", json_size(payload))
         REQUEST_COUNTER.labels(command=command, result=result).inc()
         REQUEST_DURATION.labels(command=command).observe(time.monotonic() - started)
+        serialized_error_code = (
+            response.error_code.value if response.error_code is not None else None
+        )
+        if response.status == "error":
+            record_v1_error(
+                command,
+                serialized_error_code or V1ErrorCode.INTERNAL_ERROR.value,
+            )
+        logger.info(
+            "V1 request completed.",
+            extra={
+                "command": command,
+                "result": response.status,
+                "http_status": status_code,
+                "error_code": serialized_error_code,
+                "retryable": response.retryable,
+                "request_outcome_unknown": response.request_outcome_unknown,
+                "duration_ms": round((time.monotonic() - started) * 1000),
+                "target_host": target_host,
+                "fallback_used": bool(response.fallback_used),
+            },
+        )
         return JSONResponse(payload, status_code=status_code)
 
     return app
+
+
+def _safe_target_host(url: str | None) -> str | None:
+    if not url:
+        return None
+    try:
+        host = urlsplit(url).hostname
+    except ValueError:
+        return None
+    if not host:
+        return None
+    normalized = host.lower().rstrip(".")[:253]
+    if not normalized or any(
+        character.isspace() or ord(character) < 0x20 for character in normalized
+    ):
+        return None
+    return normalized
 
 
 async def _await_with_hard_deadline(
