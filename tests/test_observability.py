@@ -128,6 +128,10 @@ def test_text_and_json_formatters_include_context_and_redact() -> None:
     )
     record.url = "https://user:pass@example.com/a?key=value"
     record.password = "top-secret"
+    record.command = "request.get"
+    record.error_code = "BROWSER_TRANSPORT_CLOSED"
+    record.target_host = "example.com"
+    record.fallback_used = True
 
     with request_id_context("request-42"):
         text_output = TextLogFormatter().format(record)
@@ -140,6 +144,10 @@ def test_text_and_json_formatters_include_context_and_redact() -> None:
     assert json_output["fields"] == {
         "url": "https://example.com/a",
         "password": REDACTED,
+        "command": "request.get",
+        "error_code": "BROWSER_TRANSPORT_CLOSED",
+        "target_host": "example.com",
+        "fallback_used": True,
     }
     assert "top-secret" not in json_output["message"]
 
@@ -366,6 +374,56 @@ def test_resilience_metrics_are_bounded_and_exported() -> None:
     assert b"camouflare_readiness_total" in body
     assert b"camouflare_pool_acquire_timeout_total" in body
     assert b"camouflare_asyncio_unhandled_total" in body
+
+
+def test_error_resilience_metrics_bound_commands_codes_and_phases() -> None:
+    v1_before = _sample_value(
+        metrics.V1_ERROR_COUNTER,
+        "camouflare_v1_error_total",
+        command="unknown",
+        error_code="INTERNAL_ERROR",
+    )
+    metrics.record_v1_error("attacker-command", "attacker-code")
+    assert (
+        _sample_value(
+            metrics.V1_ERROR_COUNTER,
+            "camouflare_v1_error_total",
+            command="unknown",
+            error_code="INTERNAL_ERROR",
+        )
+        == v1_before + 1
+    )
+
+    phase_before = _sample_value(
+        metrics.BROWSER_TRANSPORT_ERROR_COUNTER,
+        "camouflare_browser_transport_error_total",
+        phase="other",
+    )
+    metrics.record_browser_transport_error("attacker-phase")
+    assert (
+        _sample_value(
+            metrics.BROWSER_TRANSPORT_ERROR_COUNTER,
+            "camouflare_browser_transport_error_total",
+            phase="other",
+        )
+        == phase_before + 1
+    )
+
+    label_values = {
+        tuple(sample.labels.values())
+        for collector in (
+            metrics.V1_ERROR_COUNTER,
+            metrics.BROWSER_TRANSPORT_ERROR_COUNTER,
+        )
+        for family in collector.collect()
+        for sample in family.samples
+    }
+    assert ("attacker-command", "attacker-code") not in label_values
+    assert ("attacker-phase",) not in label_values
+
+    body = bytes(metrics.metrics_response().body)
+    assert b"camouflare_v1_error_total" in body
+    assert b"camouflare_browser_transport_error_total" in body
 
 
 @pytest.mark.anyio

@@ -32,8 +32,9 @@ from camouflare.challenge import (
     wait_requested as _wait_requested,
 )
 from camouflare.cleanup import CleanupSupervisor
+from camouflare.errors import CamouflareError, V1ErrorCode
 from camouflare.limits import ResourceLimitError, ResourceLimits
-from camouflare.metrics import record_challenge, record_timeout
+from camouflare.metrics import record_browser_transport_error, record_challenge, record_timeout
 from camouflare.models import V1Request, V1Response
 from camouflare.navigation import active_resource_limits
 from camouflare.protocols import (
@@ -211,10 +212,16 @@ async def _run_solve(
         if request.cookies:
             await context.add_cookies(request.cookies)
     except Exception as exc:
+        logger.exception(
+            "Unexpected request setup error.",
+            extra={"error_code": V1ErrorCode.INTERNAL_ERROR.value},
+        )
         content = await _safe_page_content(page, limits)
         return V1Response(
             status="error",
             message=f"Request setup failed: {exc}",
+            error_code=V1ErrorCode.INTERNAL_ERROR,
+            retryable=False,
             solution=await _collect_solution(
                 request,
                 context=context,
@@ -241,12 +248,41 @@ async def _run_solve(
     except ResourceLimitError:
         raise
     except Exception as exc:
-        if _is_timeout_error(exc):
+        timed_out = _is_timeout_error(exc)
+        transport_closed = _is_best_effort_browser_error(exc)
+        domain_error = exc if isinstance(exc, CamouflareError) else None
+        if timed_out:
             record_timeout("navigation")
+        if transport_closed and request.cmd == "request.post":
+            _emit_browser_transport_error(exc, phase="navigation")
+        if domain_error is None and not timed_out and not transport_closed:
+            logger.exception(
+                "Unexpected navigation error.",
+                extra={"error_code": V1ErrorCode.INTERNAL_ERROR.value},
+            )
         content = await _safe_page_content(page, limits)
         return V1Response(
             status="error",
             message=_navigation_error_message(exc, page=page, page_response=response),
+            error_code=(
+                domain_error.error_code
+                if domain_error is not None
+                else V1ErrorCode.BROWSER_TRANSPORT_CLOSED
+                if transport_closed
+                else V1ErrorCode.NAVIGATION_TIMEOUT
+                if timed_out
+                else V1ErrorCode.INTERNAL_ERROR
+            ),
+            retryable=(
+                domain_error.retryable
+                if domain_error is not None
+                else request.cmd == "request.get" and (transport_closed or timed_out)
+            ),
+            request_outcome_unknown=(
+                domain_error.request_outcome_unknown
+                if domain_error is not None
+                else request.cmd == "request.post" and (transport_closed or timed_out)
+            ),
             solution=await _collect_solution(
                 request,
                 context=context,
@@ -258,6 +294,7 @@ async def _run_solve(
             ),
         )
 
+    fallback_used = True if getattr(response, "fallback_used", False) else None
     await _wait_networkidle_best_effort(page, timer)
     detected = await _challenge_detected(page, limits)
     record_challenge("detected" if detected else "not_detected")
@@ -277,6 +314,9 @@ async def _run_solve(
             return V1Response(
                 status="error",
                 message=str(exc),
+                error_code=V1ErrorCode.CHALLENGE_FAILED,
+                retryable=False,
+                fallback_used=fallback_used,
                 solution=await _collect_solution(
                     request,
                     context=context,
@@ -298,6 +338,10 @@ async def _run_solve(
             return V1Response(
                 status="error",
                 message=str(exc),
+                error_code=V1ErrorCode.REQUEST_TIMEOUT,
+                retryable=request.cmd == "request.get",
+                request_outcome_unknown=False,
+                fallback_used=fallback_used,
                 solution=await _collect_solution(
                     request,
                     context=context,
@@ -320,6 +364,9 @@ async def _run_solve(
         return V1Response(
             status="error",
             message="Challenge remained after solving attempt.",
+            error_code=V1ErrorCode.CHALLENGE_FAILED,
+            retryable=False,
+            fallback_used=fallback_used,
             solution=await _collect_solution(
                 request,
                 context=context,
@@ -336,6 +383,7 @@ async def _run_solve(
     return V1Response(
         status="ok",
         message="Challenge solved!" if detected else "Challenge not detected!",
+        fallback_used=fallback_used,
         solution=await _collect_solution(
             request,
             context=context,
@@ -345,6 +393,22 @@ async def _run_solve(
             turnstile_token=turnstile_token,
             limits=limits,
         ),
+    )
+
+
+def _emit_browser_transport_error(exc: Exception, *, phase: str) -> None:
+    record_browser_transport_error(phase)
+    logger.warning(
+        "Browser transport error.",
+        extra={
+            "phase": phase,
+            "error_type": type(exc).__name__,
+            "browser_state": None,
+            "slot_uses": None,
+            "slot_active_contexts": None,
+            "retire_reason": None,
+            "fallback_used": False,
+        },
     )
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 
 import pytest
@@ -141,6 +142,109 @@ async def test_concurrent_browser_creation_does_not_exceed_pool_max() -> None:
 
 
 @pytest.mark.anyio
+async def test_waiter_uses_released_slot_while_shared_launch_is_pending() -> None:
+    second_launch_started = asyncio.Event()
+    finish_second_launch = asyncio.Event()
+    factory = FakeBrowserFactory()
+    calls = 0
+
+    async def delayed_second_factory() -> FakeBrowser:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            second_launch_started.set()
+            await finish_second_launch.wait()
+        return await factory()
+
+    pool = BrowserPool(
+        browser_factory=delayed_second_factory,
+        min_browsers=1,
+        max_browsers=2,
+        max_contexts_per_browser=1,
+        acquire_timeout_seconds=0.5,
+    )
+    await pool.start()
+    held_manager = pool.lease_context()
+    held = await held_manager.__aenter__()
+
+    async def acquire() -> tuple[object, object]:
+        manager = pool.lease_context()
+        lease = await manager.__aenter__()
+        return manager, lease
+
+    waiter = asyncio.create_task(acquire())
+    await second_launch_started.wait()
+    await held_manager.__aexit__(None, None, None)
+    done, _ = await asyncio.wait({waiter}, timeout=0.05)
+
+    try:
+        assert waiter in done
+        waiting_manager, acquired = waiter.result()
+        assert acquired.browser is held.browser  # type: ignore[attr-defined]
+        await waiting_manager.__aexit__(None, None, None)  # type: ignore[attr-defined]
+    finally:
+        finish_second_launch.set()
+        if not waiter.done():
+            waiting_manager, _ = await waiter
+            await waiting_manager.__aexit__(None, None, None)  # type: ignore[attr-defined]
+        await pool.close()
+
+
+@pytest.mark.anyio
+async def test_failed_shared_launch_does_not_poison_later_acquire() -> None:
+    second_launch_started = asyncio.Event()
+    fail_second_launch = asyncio.Event()
+    healthy_factory = FakeBrowserFactory()
+    calls = 0
+
+    async def fail_second_factory() -> FakeBrowser:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            second_launch_started.set()
+            await fail_second_launch.wait()
+            raise RuntimeError("shared launch failed")
+        return await healthy_factory()
+
+    pool = BrowserPool(
+        browser_factory=fail_second_factory,
+        min_browsers=1,
+        max_browsers=2,
+        max_contexts_per_browser=1,
+        acquire_timeout_seconds=0.5,
+    )
+    await pool.start()
+    held_manager = pool.lease_context()
+    held = await held_manager.__aenter__()
+
+    async def acquire() -> tuple[object, object]:
+        manager = pool.lease_context()
+        lease = await manager.__aenter__()
+        return manager, lease
+
+    waiter = asyncio.create_task(acquire())
+    await second_launch_started.wait()
+    await held_manager.__aexit__(None, None, None)
+    waiting_manager, acquired = await waiter
+    assert acquired.browser is held.browser  # type: ignore[attr-defined]
+
+    try:
+        fail_second_launch.set()
+        for _ in range(20):
+            if pool.snapshot().creating_slots == 0:
+                break
+            await asyncio.sleep(0)
+        assert pool.snapshot().creating_slots == 0
+
+        async with pool.lease_context() as recovered:
+            assert recovered.browser is not held.browser
+        assert calls == 3
+    finally:
+        await waiting_manager.__aexit__(None, None, None)  # type: ignore[attr-defined]
+        await pool.close()
+
+
+@pytest.mark.anyio
 async def test_persistent_context_creation_failure_releases_pool_capacity() -> None:
     factory = FakeBrowserFactory()
     pool = BrowserPool(
@@ -163,7 +267,9 @@ async def test_persistent_context_creation_failure_releases_pool_capacity() -> N
 
 
 @pytest.mark.anyio
-async def test_new_context_browser_closed_error_discards_slot() -> None:
+async def test_new_context_browser_closed_error_discards_slot(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     class ClosedBrowser:
         def __init__(self) -> None:
             self.closed = False
@@ -191,9 +297,18 @@ async def test_new_context_browser_closed_error_discards_slot() -> None:
     )
     await pool.start()
 
-    with pytest.raises(RuntimeError, match="Browser has been closed"):
+    with (
+        caplog.at_level(logging.WARNING, logger="camouflare.pool"),
+        pytest.raises(RuntimeError, match="Browser has been closed"),
+    ):
         async with pool.lease_context():
             pass
+
+    event = next(
+        record for record in caplog.records if record.message == "Browser transport error."
+    )
+    assert event.phase == "context_create"  # type: ignore[attr-defined]
+    assert event.fallback_used is False  # type: ignore[attr-defined]
 
     async with pool.lease_context() as lease:
         assert lease.context is not None
@@ -205,7 +320,9 @@ async def test_new_context_browser_closed_error_discards_slot() -> None:
 
 
 @pytest.mark.anyio
-async def test_context_close_browser_closed_error_discards_slot_without_poisoning_pool() -> None:
+async def test_context_close_browser_closed_error_discards_slot_without_poisoning_pool(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     class ClosingDeadContext(FakeContext):
         async def close(self) -> None:
             self.closed = True
@@ -241,8 +358,20 @@ async def test_context_close_browser_closed_error_discards_slot_without_poisonin
     )
     await pool.start()
 
-    async with pool.lease_context() as lease:
-        assert lease.context is not None
+    with caplog.at_level(logging.WARNING, logger="camouflare.pool"):
+        async with pool.lease_context() as lease:
+            assert lease.context is not None
+
+    event = next(
+        record for record in caplog.records if record.message == "Browser transport error."
+    )
+    assert event.phase == "cleanup"  # type: ignore[attr-defined]
+    assert event.error_type == "BrowserTransportClosed"  # type: ignore[attr-defined]
+    assert event.browser_state == "retiring"  # type: ignore[attr-defined]
+    assert event.slot_uses == 1  # type: ignore[attr-defined]
+    assert event.slot_active_contexts == 0  # type: ignore[attr-defined]
+    assert event.retire_reason == "disconnected"  # type: ignore[attr-defined]
+    assert event.fallback_used is False  # type: ignore[attr-defined]
 
     async with pool.lease_context() as lease:
         assert lease.context is not None
@@ -760,28 +889,34 @@ async def test_browser_factory_is_bounded_by_absolute_acquire_deadline() -> None
     )
     await pool.start()
 
-    started = time.monotonic()
-    with pytest.raises(PoolAcquireTimeout, match="creating browser"):
-        async with pool.lease_context():
-            pass
-    elapsed = time.monotonic() - started
+    try:
+        started = time.monotonic()
+        with pytest.raises(PoolAcquireTimeout, match="browser context capacity"):
+            async with pool.lease_context():
+                pass
+        elapsed = time.monotonic() - started
 
-    assert factory_started.is_set()
-    assert elapsed < 0.2
-    assert pool.snapshot().creating_slots == 0
+        assert factory_started.is_set()
+        assert elapsed < 0.2
+        for _ in range(20):
+            if pool.snapshot().creating_slots == 0:
+                break
+            await asyncio.sleep(0)
+        assert pool.snapshot().creating_slots == 0
 
-    # The cancellation-resistant launch is quarantined and cannot consume the
-    # usable browser-creation limit forever.
-    async with pool.lease_context() as recovered:
-        assert recovered.context is not None
+        # The pool-owned deadline quarantines the cancellation-resistant launch,
+        # allowing a later acquisition to launch healthy replacement capacity.
+        async with pool.lease_context() as recovered:
+            assert recovered.context is not None
+    finally:
+        allow_cancelled_factory_to_finish.set()
+        for _ in range(20):
+            if not pool._create_watchers:
+                break
+            await asyncio.sleep(0)
+        await pool.close()
 
-    allow_cancelled_factory_to_finish.set()
-    for _ in range(20):
-        if not pool._create_watchers:
-            break
-        await asyncio.sleep(0)
     assert not pool._create_watchers
-    await pool.close()
     assert all(browser.closed for browser in created)
 
 
@@ -857,24 +992,17 @@ async def test_cancellation_after_factory_success_registers_idle_slot_without_le
     acquire_task = asyncio.create_task(acquire())
     await factory_started.wait()
 
-    # Hold the condition after the factory completes so registration cannot finish,
-    # then cancel the requester at the exact ownership hand-off boundary.
-    async with pool._condition:
-        factory_can_finish.set()
-        creation = next(iter(pool._create_tasks))
-        while not creation.done():
-            await asyncio.sleep(0)
-        while not any(
-            task.get_name() == "camouflare-pool-register-browser" for task in asyncio.all_tasks()
-        ):
-            await asyncio.sleep(0)
-        acquire_task.cancel()
+    acquire_task.cancel()
 
     with pytest.raises(asyncio.CancelledError):
         await acquire_task
 
+    # Browser creation belongs to the pool, so the cancelled requester cannot
+    # cancel it. Completion still registers an idle slot for a later requester.
+    factory_can_finish.set()
+
     for _ in range(20):
-        if pool.snapshot().creating_slots == 0:
+        if pool.snapshot().browser_slots == 1:
             break
         await asyncio.sleep(0)
 

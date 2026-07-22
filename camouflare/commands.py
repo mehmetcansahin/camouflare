@@ -9,6 +9,7 @@ from uuid import uuid4
 from camouflare.captcha import CaptchaProvider
 from camouflare.cleanup import CleanupSupervisor
 from camouflare.config import Settings, normalize_proxy
+from camouflare.errors import CamouflareError, V1ErrorCode
 from camouflare.metrics import record_session_event
 from camouflare.models import V1Request, V1Response
 from camouflare.pool import BrowserPool, PersistentCapacityError
@@ -62,7 +63,10 @@ async def dispatch_v1(
     cleanup: CleanupSupervisor | None = None,
 ) -> V1Response:
     if not request.cmd:
-        raise RuntimeError("Request parameter 'cmd' is mandatory.")
+        raise CamouflareError(
+            "Request parameter 'cmd' is mandatory.",
+            error_code=V1ErrorCode.INVALID_REQUEST,
+        )
     if request.cmd != "sessions.destroy":
         # Keep the target alive until session_for_request can rotate it while
         # preserving its proxy and TTL.
@@ -81,7 +85,10 @@ async def dispatch_v1(
     if request.cmd == "sessions.destroy":
         destroyed = await sessions.destroy(request.session)
         if not destroyed:
-            raise RuntimeError("The session doesn't exist.")
+            raise CamouflareError(
+                "The session doesn't exist.",
+                error_code=V1ErrorCode.SESSION_NOT_FOUND,
+            )
         return V1Response(
             status="ok",
             message="The session has been removed.",
@@ -97,7 +104,10 @@ async def dispatch_v1(
             cleanup=cleanup,
             start_timestamp=start_timestamp,
         )
-    raise RuntimeError(f"Request parameter 'cmd' = '{request.cmd}' is invalid.")
+    raise CamouflareError(
+        f"Request parameter 'cmd' = '{request.cmd}' is invalid.",
+        error_code=V1ErrorCode.INVALID_REQUEST,
+    )
 
 
 async def sessions_create(
@@ -183,11 +193,20 @@ async def execute_request(
     cleanup: CleanupSupervisor | None = None,
 ) -> V1Response:
     if request.cmd == "request.get" and not request.url:
-        raise RuntimeError("Request parameter 'url' is mandatory in 'request.get' command.")
+        raise CamouflareError(
+            "Request parameter 'url' is mandatory in 'request.get' command.",
+            error_code=V1ErrorCode.INVALID_REQUEST,
+        )
     if request.cmd == "request.post" and not request.url:
-        raise RuntimeError("Request parameter 'url' is mandatory in 'request.post' command.")
+        raise CamouflareError(
+            "Request parameter 'url' is mandatory in 'request.post' command.",
+            error_code=V1ErrorCode.INVALID_REQUEST,
+        )
     if request.cmd == "request.post" and request.post_data is None:
-        raise RuntimeError("Request parameter 'postData' is mandatory in 'request.post' command.")
+        raise CamouflareError(
+            "Request parameter 'postData' is mandatory in 'request.post' command.",
+            error_code=V1ErrorCode.INVALID_REQUEST,
+        )
 
     if request.session:
         session = await session_for_request(
@@ -266,6 +285,15 @@ async def execute_request(
             )
 
     assert response is not None
+    if response.status == "error":
+        raise CamouflareError(
+            response.message,
+            error_code=response.error_code or V1ErrorCode.INTERNAL_ERROR,
+            retryable=bool(response.retryable),
+            request_outcome_unknown=bool(response.request_outcome_unknown),
+            fallback_used=response.fallback_used,
+            solution=response.solution,
+        )
     response.version = settings.version
     response.start_timestamp = start_timestamp
     return response
@@ -350,7 +378,10 @@ def resolve_proxy(
         return None
     normalized = normalize_proxy(proxy)
     if normalized is None:
-        raise RuntimeError("Request parameter 'proxy' must include a 'url' (or 'server').")
+        raise CamouflareError(
+            "Request parameter 'proxy' must include a 'url' (or 'server').",
+            error_code=V1ErrorCode.INVALID_REQUEST,
+        )
     return normalized
 
 

@@ -13,6 +13,7 @@ from camouflare.metrics import (
     observe_pool_acquire,
     record_browser_event,
     record_browser_recycle,
+    record_browser_transport_error,
     record_pool_acquire_timeout,
     record_timeout,
     set_pool_snapshot,
@@ -157,7 +158,10 @@ class BrowserPool:
         self._slots: list[BrowserSlot] = []
         self._creating_slots = 0
         self._create_tasks: set[asyncio.Task[BrowserSlot]] = set()
+        self._create_supervisors: dict[asyncio.Task[BrowserSlot], asyncio.Task[None]] = {}
         self._create_watchers: dict[asyncio.Task[BrowserSlot], asyncio.Task[None]] = {}
+        self._create_failure_generation = 0
+        self._last_create_failure: BaseException | None = None
         self._close_tasks: dict[BrowserSlot, asyncio.Task[None]] = {}
         self._failed_close_slots: set[BrowserSlot] = set()
         self._physically_closed_slots: set[BrowserSlot] = set()
@@ -355,6 +359,7 @@ class BrowserPool:
                     reservation,
                     discard=body_cancelled or _is_browser_disconnected_error(exc),
                     discard_reason=("error" if body_cancelled else "disconnected"),
+                    transport_phase="context_create",
                 )
                 with suppress(BaseException):
                     await asyncio.shield(release_finalizer)
@@ -428,6 +433,7 @@ class BrowserPool:
                 persistent_reservation,
                 discard=disconnected or isinstance(exc, asyncio.CancelledError),
                 discard_reason="disconnected" if disconnected else "error",
+                transport_phase="context_create",
             )
             # The pool owns the accounting finalizer. Repeated cancellation of the
             # request may interrupt this shield, but cannot orphan either counter.
@@ -506,6 +512,7 @@ class BrowserPool:
         *,
         discard: bool,
         discard_reason: str,
+        transport_phase: str = "cleanup",
     ) -> asyncio.Task[None]:
         cleanup_scope = self._current_cleanup_scope()
         task = asyncio.create_task(
@@ -514,6 +521,7 @@ class BrowserPool:
                 persistent_reservation,
                 discard=discard,
                 discard_reason=discard_reason,
+                transport_phase=transport_phase,
                 cleanup_scope=cleanup_scope,
             ),
             name="camouflare-pool-finalize-persistent-accounting",
@@ -529,6 +537,7 @@ class BrowserPool:
         *,
         discard: bool,
         discard_reason: str,
+        transport_phase: str = "cleanup",
     ) -> asyncio.Task[None]:
         cleanup_scope = self._current_cleanup_scope()
         task = asyncio.create_task(
@@ -536,6 +545,7 @@ class BrowserPool:
                 slot_reservation,
                 discard=discard,
                 discard_reason=discard_reason,
+                transport_phase=transport_phase,
                 cleanup_scope=cleanup_scope,
             ),
             name="camouflare-pool-finalize-transient-accounting",
@@ -552,6 +562,7 @@ class BrowserPool:
         *,
         discard: bool,
         discard_reason: str,
+        transport_phase: str,
         cleanup_scope: CleanupScope | None,
     ) -> None:
         try:
@@ -560,6 +571,7 @@ class BrowserPool:
                     slot_reservation,
                     discard=discard,
                     discard_reason=discard_reason,
+                    transport_phase=transport_phase,
                     wait_for_close=False,
                     cleanup_scope=cleanup_scope,
                 )
@@ -572,12 +584,14 @@ class BrowserPool:
         *,
         discard: bool,
         discard_reason: str,
+        transport_phase: str,
         cleanup_scope: CleanupScope | None,
     ) -> None:
         await self._release_slot(
             slot_reservation,
             discard=discard,
             discard_reason=discard_reason,
+            transport_phase=transport_phase,
             wait_for_close=False,
             cleanup_scope=cleanup_scope,
         )
@@ -642,8 +656,8 @@ class BrowserPool:
         kind: Literal["transient", "persistent"],
     ) -> _SlotReservation:
         deadline = time.monotonic() + self._acquire_timeout_seconds
+        observed_failure_generation = self._create_failure_generation
         while True:
-            create_task: asyncio.Task[BrowserSlot] | None = None
             async with self._condition:
                 if self._closed:
                     raise RuntimeError("Browser pool is closed")
@@ -662,85 +676,41 @@ class BrowserPool:
                         self._publish_metrics_unlocked()
                         return reservation
 
+                for slot in self._slots:
+                    if self._soft_retiring_slot_available(slot):
+                        reservation = self._reserve_slot_unlocked(slot, kind=kind)
+                        self._publish_metrics_unlocked()
+                        return reservation
+
+                if self._create_failure_generation != observed_failure_generation:
+                    failure = self._last_create_failure
+                    if failure is not None:
+                        raise failure
+
                 if (
                     len(self._slots) + len(self._create_tasks) < self._max_browsers
                     and len(self._create_watchers) < self._max_abandoned_creations
                 ):
-                    create_task = self._start_create_task_unlocked()
+                    self._start_create_task_unlocked(supervise=True)
                     self._publish_metrics_unlocked()
-                else:
-                    for slot in self._slots:
-                        if self._soft_retiring_slot_available(slot):
-                            reservation = self._reserve_slot_unlocked(slot, kind=kind)
-                            self._publish_metrics_unlocked()
-                            return reservation
-
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        self._log_acquire_timeout_unlocked("capacity")
-                        raise PoolAcquireTimeout("Timed out waiting for browser context capacity.")
-                    self._waiting_requests += 1
-                    self._publish_metrics_unlocked()
-                    try:
-                        await asyncio.wait_for(self._condition.wait(), timeout=remaining)
-                    except TimeoutError as exc:
-                        self._log_acquire_timeout_unlocked("capacity")
-                        raise PoolAcquireTimeout(
-                            "Timed out waiting for browser context capacity."
-                        ) from exc
-                    finally:
-                        if self._waiting_requests <= 0:
-                            raise RuntimeError("Pool waiter accounting underflow")
-                        self._waiting_requests -= 1
-                        self._publish_metrics_unlocked()
-
-            if create_task is not None:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    async with self._condition:
-                        self._abandon_create_task_unlocked(create_task)
-                        self._log_acquire_timeout_unlocked("browser_launch")
-                        self._publish_metrics_unlocked()
-                        self._condition.notify_all()
-                    raise PoolAcquireTimeout("Timed out while creating browser context capacity.")
+                    self._log_acquire_timeout_unlocked("capacity")
+                    raise PoolAcquireTimeout("Timed out waiting for browser context capacity.")
+                self._waiting_requests += 1
+                self._publish_metrics_unlocked()
                 try:
-                    done, _ = await asyncio.wait({create_task}, timeout=remaining)
-                except BaseException:
-                    async with self._condition:
-                        self._abandon_create_task_unlocked(create_task)
-                        self._publish_metrics_unlocked()
-                        self._condition.notify_all()
-                    raise
-
-                if not done:
-                    async with self._condition:
-                        self._abandon_create_task_unlocked(create_task)
-                        self._log_acquire_timeout_unlocked("browser_launch")
-                        self._publish_metrics_unlocked()
-                        self._condition.notify_all()
-                    raise PoolAcquireTimeout("Timed out while creating browser context capacity.")
-
-                try:
-                    slot = create_task.result()
-                except BaseException:
-                    cleanup = asyncio.create_task(
-                        self._discard_finished_create_task(create_task),
-                        name="camouflare-pool-discard-browser-creation",
-                    )
-                    cleanup.add_done_callback(self._background_task_done)
-                    await asyncio.shield(cleanup)
-                    raise
-
-                registration = asyncio.create_task(
-                    self._register_created_slot(create_task, slot),
-                    name="camouflare-pool-register-browser",
-                )
-                registration.add_done_callback(self._background_task_done)
-                registered = await asyncio.shield(registration)
-                if not registered:
-                    raise RuntimeError("Browser pool is closed")
-                # Registration leaves the slot idle. Reserving it on the next loop
-                # makes cancellation during condition acquisition leak-free.
+                    await asyncio.wait_for(self._condition.wait(), timeout=remaining)
+                except TimeoutError as exc:
+                    self._log_acquire_timeout_unlocked("capacity")
+                    raise PoolAcquireTimeout(
+                        "Timed out waiting for browser context capacity."
+                    ) from exc
+                finally:
+                    if self._waiting_requests <= 0:
+                        raise RuntimeError("Pool waiter accounting underflow")
+                    self._waiting_requests -= 1
+                    self._publish_metrics_unlocked()
 
     async def _release_slot(
         self,
@@ -748,6 +718,7 @@ class BrowserPool:
         *,
         discard: bool = False,
         discard_reason: str = "disconnected",
+        transport_phase: str = "cleanup",
         wait_for_close: bool = True,
         cleanup_scope: CleanupScope | None = None,
     ) -> None:
@@ -769,6 +740,19 @@ class BrowserPool:
                 self._mark_retiring_unlocked(slot, discard_reason)
                 if discard_reason == "disconnected":
                     record_browser_event("disconnected")
+                    record_browser_transport_error(transport_phase)
+                    logger.warning(
+                        "Browser transport error.",
+                        extra={
+                            "phase": transport_phase,
+                            "error_type": "BrowserTransportClosed",
+                            "browser_state": slot.state,
+                            "slot_uses": slot.uses,
+                            "slot_active_contexts": slot.active_contexts,
+                            "retire_reason": slot.retire_reason,
+                            "fallback_used": False,
+                        },
+                    )
                 else:
                     record_browser_event("error")
             elif self._should_recycle(slot):
@@ -1056,14 +1040,73 @@ class BrowserPool:
             name="camouflare-pool-retry-close-browser",
         )
 
-    def _start_create_task_unlocked(self) -> asyncio.Task[BrowserSlot]:
+    def _start_create_task_unlocked(
+        self,
+        *,
+        supervise: bool = False,
+    ) -> asyncio.Task[BrowserSlot]:
         task = asyncio.create_task(
             self._create_slot(),
             name="camouflare-pool-create-browser",
         )
         self._create_tasks.add(task)
         self._creating_slots = len(self._create_tasks)
+        if supervise:
+            supervisor = asyncio.create_task(
+                self._supervise_create_task(task),
+                name="camouflare-pool-supervise-browser-creation",
+            )
+            self._create_supervisors[task] = supervisor
+            supervisor.add_done_callback(
+                lambda completed: self._create_supervisor_done(task, completed)
+            )
         return task
+
+    async def _supervise_create_task(self, task: asyncio.Task[BrowserSlot]) -> None:
+        done, _ = await asyncio.wait(
+            {task},
+            timeout=self._acquire_timeout_seconds,
+        )
+        if not done:
+            async with self._condition:
+                if task in self._create_tasks:
+                    self._abandon_create_task_unlocked(task)
+                    self._log_acquire_timeout_unlocked("browser_launch")
+                    self._publish_metrics_unlocked()
+                    self._condition.notify_all()
+            return
+
+        try:
+            slot = task.result()
+        except BaseException as exc:
+            async with self._condition:
+                if task in self._create_tasks:
+                    self._finish_create_task_unlocked(task)
+                    self._create_failure_generation += 1
+                    self._last_create_failure = exc
+                    self._publish_metrics_unlocked()
+                    self._condition.notify_all()
+            return
+
+        async with self._condition:
+            if task not in self._create_tasks:
+                return
+            self._finish_create_task_unlocked(task)
+            if self._closed:
+                self._schedule_close_unlocked(slot, reason="shutdown")
+            else:
+                self._slots.append(slot)
+            self._publish_metrics_unlocked()
+            self._condition.notify_all()
+
+    def _create_supervisor_done(
+        self,
+        task: asyncio.Task[BrowserSlot],
+        supervisor: asyncio.Task[None],
+    ) -> None:
+        if self._create_supervisors.get(task) is supervisor:
+            self._create_supervisors.pop(task, None)
+        self._background_task_done(supervisor)
 
     def _finish_create_task_unlocked(self, task: asyncio.Task[BrowserSlot]) -> None:
         self._create_tasks.discard(task)
@@ -1138,6 +1181,9 @@ class BrowserPool:
         # usable creation count. This lets a later acquire launch a replacement;
         # the watcher closes any browser the abandoned factory eventually returns.
         self._finish_create_task_unlocked(task)
+        supervisor = self._create_supervisors.pop(task, None)
+        if supervisor is not None and supervisor is not asyncio.current_task():
+            supervisor.cancel()
         task.cancel()
         if self._cleanup_supervisor is not None:
             self._cleanup_supervisor.track(
@@ -1200,8 +1246,21 @@ class BrowserPool:
     async def _create_slot(self) -> BrowserSlot:
         try:
             browser = await self._browser_factory()
-        except BaseException:
+        except BaseException as exc:
             record_browser_event("error")
+            record_browser_transport_error("browser_launch")
+            logger.error(
+                "Browser transport error.",
+                extra={
+                    "phase": "browser_launch",
+                    "error_type": type(exc).__name__,
+                    "browser_state": "starting",
+                    "slot_uses": None,
+                    "slot_active_contexts": None,
+                    "retire_reason": "error",
+                    "fallback_used": False,
+                },
+            )
             raise
         record_browser_event("created")
         return BrowserSlot(browser=browser)

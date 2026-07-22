@@ -7,12 +7,22 @@ from typing import Any
 
 import pytest
 
+import camouflare.metrics as metrics_module
 import camouflare.solver as solver_module
+from camouflare.errors import V1ErrorCode
 from camouflare.limits import MAX_COOKIE_BYTES, ResourceLimitError, ResourceLimits, json_size
 from camouflare.models import V1Request
 from camouflare.solver import MEDIA_PATTERNS, _submit_post_form, solve_request
 from camouflare.timer import TimeoutTimer
 from tests.fakes import FakeContext, FakePage, FakeResponse
+
+
+def _metric_sample_value(collector: object, sample_name: str, **labels: str) -> float:
+    for family in collector.collect():  # type: ignore[attr-defined]
+        for sample in family.samples:
+            if sample.name == sample_name and sample.labels == labels:
+                return float(sample.value)
+    return 0.0
 
 
 @pytest.mark.anyio
@@ -31,6 +41,7 @@ async def test_networkidle_timeout_does_not_prevent_result_collection() -> None:
     assert page.load_states == ["networkidle"]
     assert result.solution is not None
     assert result.solution.url == "https://example.com"
+    assert result.fallback_used is None
 
 
 @pytest.mark.anyio
@@ -548,7 +559,7 @@ async def test_request_post_hidden_form_returns_navigation_response_when_availab
 
 
 @pytest.mark.anyio
-async def test_get_navigation_falls_back_to_commit_when_domcontentloaded_times_out() -> None:
+async def test_get_navigation_waits_for_existing_commit_without_retrying_request() -> None:
     context = FakeContext()
     page = await context.new_page()
     page.goto_failures["domcontentloaded"] = TimeoutError("domcontentloaded timed out")
@@ -560,7 +571,8 @@ async def test_get_navigation_falls_back_to_commit_when_domcontentloaded_times_o
     )
 
     assert result.status == "ok"
-    assert [call["wait_until"] for call in page.goto_calls] == ["domcontentloaded", "commit"]
+    assert [call["wait_until"] for call in page.goto_calls] == ["domcontentloaded"]
+    assert page.load_states == ["commit", "networkidle"]
     assert page.goto_calls[0]["timeout"] < 60000
 
 
@@ -605,7 +617,7 @@ async def test_navigation_error_returns_partial_solution() -> None:
     page.url = "https://example.com/challenge"
     page.content_value = "<html><title>Partial</title><body>timeout</body></html>"
     page.goto_failures["domcontentloaded"] = TimeoutError("domcontentloaded timed out")
-    page.goto_failures["commit"] = TimeoutError("commit timed out")
+    page.wait_failures.add("commit")
 
     result = await solve_request(
         V1Request(
@@ -624,6 +636,56 @@ async def test_navigation_error_returns_partial_solution() -> None:
     assert result.solution.url == "https://example.com/challenge"
     assert result.solution.response == page.content_value
     assert result.solution.user_agent == "DebugBrowser/1.0"
+    assert result.error_code is V1ErrorCode.NAVIGATION_TIMEOUT
+    assert result.retryable is True
+    assert result.request_outcome_unknown is False
+
+
+@pytest.mark.anyio
+async def test_post_transport_failure_reports_uncertain_non_retryable_outcome(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    context = FakeContext()
+    page = await context.new_page()
+    page.goto_failures["domcontentloaded"] = RuntimeError(
+        "Page.goto: Connection closed while reading from the driver"
+    )
+
+    metric_before = _metric_sample_value(
+        metrics_module.BROWSER_TRANSPORT_ERROR_COUNTER,
+        "camouflare_browser_transport_error_total",
+        phase="navigation",
+    )
+    with caplog.at_level(logging.WARNING, logger="camouflare.solver"):
+        result = await solve_request(
+            V1Request(
+                cmd="request.post",
+                url="https://example.com/orders",
+                postData="item=1",
+                maxTimeout=60000,
+            ),
+            context=context,
+            page=page,
+        )
+
+    assert result.status == "error"
+    assert result.error_code is V1ErrorCode.BROWSER_TRANSPORT_CLOSED
+    assert result.retryable is False
+    assert result.request_outcome_unknown is True
+    assert len(page.goto_calls) == 1
+    assert (
+        _metric_sample_value(
+            metrics_module.BROWSER_TRANSPORT_ERROR_COUNTER,
+            "camouflare_browser_transport_error_total",
+            phase="navigation",
+        )
+        == metric_before + 1
+    )
+    event = next(
+        record for record in caplog.records if record.message == "Browser transport error."
+    )
+    assert event.phase == "navigation"  # type: ignore[attr-defined]
+    assert event.fallback_used is False  # type: ignore[attr-defined]
 
 
 @pytest.mark.anyio
@@ -652,7 +714,7 @@ async def test_commit_timeout_uses_direct_http_fallback_for_ajax_get(
     context = FakeContext()
     page = await context.new_page()
     page.goto_failures["domcontentloaded"] = TimeoutError("domcontentloaded timed out")
-    page.goto_failures["commit"] = TimeoutError("commit timed out")
+    page.wait_failures.add("commit")
 
     result = await solve_request(
         V1Request(
@@ -670,6 +732,7 @@ async def test_commit_timeout_uses_direct_http_fallback_for_ajax_get(
     assert result.solution is not None
     assert result.solution.status == 200
     assert result.solution.response == '<div class="product">ok</div>'
+    assert result.fallback_used is True
 
 
 @pytest.mark.anyio
@@ -695,7 +758,7 @@ async def test_commit_timeout_direct_http_challenge_keeps_navigation_error(
     context = FakeContext()
     page = await context.new_page()
     page.goto_failures["domcontentloaded"] = TimeoutError("domcontentloaded timed out")
-    page.goto_failures["commit"] = TimeoutError("commit timed out")
+    page.wait_failures.add("commit")
 
     result = await solve_request(
         V1Request(
@@ -729,7 +792,7 @@ async def test_commit_timeout_does_not_use_direct_http_when_fallback_is_disabled
     context = FakeContext()
     page = await context.new_page()
     page.goto_failures["domcontentloaded"] = TimeoutError("domcontentloaded timed out")
-    page.goto_failures["commit"] = TimeoutError("commit timed out")
+    page.wait_failures.add("commit")
 
     result = await solve_request(
         V1Request(
@@ -750,6 +813,7 @@ async def test_commit_timeout_does_not_use_direct_http_when_fallback_is_disabled
 @pytest.mark.anyio
 async def test_get_transport_crash_uses_direct_http_fallback(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     async def direct_get(url: str, request: V1Request, timer: TimeoutTimer) -> FakeResponse:
         assert url == "https://biletino.example/search?ajax=true"
@@ -772,21 +836,115 @@ async def test_get_transport_crash_uses_direct_http_fallback(
         "Page.goto: Connection closed while reading from the driver"
     )
 
-    result = await solve_request(
-        V1Request(
-            cmd="request.get",
-            url="https://biletino.example/search?ajax=true",
-            maxTimeout=60000,
-        ),
-        context=context,
-        page=page,
+    metric_before = _metric_sample_value(
+        metrics_module.BROWSER_TRANSPORT_ERROR_COUNTER,
+        "camouflare_browser_transport_error_total",
+        phase="navigation",
     )
+    with caplog.at_level(logging.INFO, logger="camouflare.navigation"):
+        result = await solve_request(
+            V1Request(
+                cmd="request.get",
+                url="https://biletino.example/search?ajax=true",
+                maxTimeout=60000,
+            ),
+            context=context,
+            page=page,
+            allow_direct_http_first=False,
+        )
 
     assert result.status == "ok"
     assert result.message == "Challenge not detected!"
     assert result.solution is not None
     assert result.solution.status == 200
     assert "event-url" in result.solution.response
+    assert result.fallback_used is True
+    assert (
+        _metric_sample_value(
+            metrics_module.BROWSER_TRANSPORT_ERROR_COUNTER,
+            "camouflare_browser_transport_error_total",
+            phase="navigation",
+        )
+        == metric_before + 1
+    )
+    event = next(
+        record for record in caplog.records if record.message == "Browser transport error."
+    )
+    assert event.phase == "navigation"  # type: ignore[attr-defined]
+    assert event.error_type == "RuntimeError"  # type: ignore[attr-defined]
+    assert event.browser_state is None  # type: ignore[attr-defined]
+    assert event.slot_uses is None  # type: ignore[attr-defined]
+    assert event.slot_active_contexts is None  # type: ignore[attr-defined]
+    assert event.retire_reason is None  # type: ignore[attr-defined]
+    assert event.fallback_used is True  # type: ignore[attr-defined]
+
+
+@pytest.mark.anyio
+async def test_get_transport_fallback_preserves_provenance_on_challenge_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def direct_get(url: str, request: V1Request, timer: TimeoutTimer) -> FakeResponse:
+        response = FakeResponse(
+            status=403,
+            headers={"content-type": "text/html; charset=utf-8"},
+            text_value="<html><title>Just a moment...</title></html>",
+        )
+        response.raw_body = True  # type: ignore[attr-defined]
+        response.url = url  # type: ignore[attr-defined]
+        return response
+
+    monkeypatch.setattr(solver_module, "_direct_http_get", direct_get)
+
+    context = FakeContext()
+    page = await context.new_page()
+    page.goto_failures["domcontentloaded"] = RuntimeError(
+        "Page.goto: Connection closed while reading from the driver"
+    )
+
+    result = await solve_request(
+        V1Request(cmd="request.get", url="https://example.com", maxTimeout=60000),
+        context=context,
+        page=page,
+        allow_direct_http_first=False,
+    )
+
+    assert result.status == "error"
+    assert result.error_code is V1ErrorCode.CHALLENGE_FAILED
+    assert result.fallback_used is True
+
+
+@pytest.mark.anyio
+async def test_failed_get_transport_fallback_preserves_browser_error_observability(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def direct_get(url: str, request: V1Request, timer: TimeoutTimer) -> FakeResponse:
+        raise RuntimeError("direct HTTP failed")
+
+    monkeypatch.setattr(solver_module, "_direct_http_get", direct_get)
+
+    context = FakeContext()
+    page = await context.new_page()
+    page.goto_failures["domcontentloaded"] = RuntimeError(
+        "Page.goto: Connection closed while reading from the driver"
+    )
+
+    with caplog.at_level(logging.WARNING, logger="camouflare.navigation"):
+        result = await solve_request(
+            V1Request(cmd="request.get", url="https://example.com", maxTimeout=60000),
+            context=context,
+            page=page,
+            allow_direct_http_first=False,
+        )
+
+    assert result.status == "error"
+    assert result.error_code is V1ErrorCode.BROWSER_TRANSPORT_CLOSED
+    assert result.fallback_used is None
+    event = next(
+        record for record in caplog.records if record.message == "Browser transport error."
+    )
+    assert event.phase == "navigation"  # type: ignore[attr-defined]
+    assert event.fallback_used is False  # type: ignore[attr-defined]
 
 
 @pytest.mark.anyio
@@ -969,6 +1127,14 @@ async def test_closed_transport_solution_collection_does_not_log_error(
             wait_until = kwargs.get("wait_until")
             raise TimeoutError(f"{wait_until} timed out")
 
+        async def wait_for_load_state(
+            self,
+            state: str = "load",
+            *,
+            timeout: float | None = None,
+        ) -> None:
+            raise TimeoutError(f"{state} timed out")
+
         async def content(self) -> str:
             raise RuntimeError(f"Page.content: {closed_transport_message}")
 
@@ -1131,6 +1297,8 @@ async def test_remaining_challenge_html_returns_error() -> None:
 
     assert result.status == "error"
     assert "Challenge remained" in result.message
+    assert result.error_code is V1ErrorCode.CHALLENGE_FAILED
+    assert result.retryable is False
 
 
 @pytest.mark.anyio
@@ -1181,6 +1349,8 @@ async def test_captcha_provider_exception_returns_error_envelope() -> None:
     assert result.status == "error"
     assert "provider failed" in result.message
     assert result.solution is not None
+    assert result.error_code is V1ErrorCode.CHALLENGE_FAILED
+    assert result.retryable is False
 
 
 @pytest.mark.anyio
@@ -1197,6 +1367,8 @@ async def test_non_http_url_scheme_is_rejected(scheme_url: str) -> None:
 
     assert result.status == "error"
     assert "http or https" in result.message
+    assert result.error_code is V1ErrorCode.INVALID_REQUEST
+    assert result.retryable is False
     assert page.goto_calls == []
 
 
@@ -1231,6 +1403,7 @@ async def test_final_navigation_response_status_overrides_stale_initial_response
     assert result.status == "ok"
     assert result.solution is not None
     assert result.solution.status == 200
+    assert result.fallback_used is None
 
 
 @pytest.mark.anyio
@@ -1512,7 +1685,9 @@ def test_direct_http_reads_only_limit_plus_one(monkeypatch: pytest.MonkeyPatch) 
 
 
 @pytest.mark.anyio
-async def test_setup_error_returns_error_envelope_not_exception() -> None:
+async def test_setup_error_returns_envelope_and_logs_internal_traceback(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     class BadCookieContext(FakeContext):
         async def add_cookies(self, cookies: list[dict[str, Any]]) -> None:
             raise RuntimeError("cookies[0] must have url or domain")
@@ -1520,21 +1695,26 @@ async def test_setup_error_returns_error_envelope_not_exception() -> None:
     context = BadCookieContext()
     page = await context.new_page()
 
-    result = await solve_request(
-        V1Request(
-            cmd="request.get",
-            url="https://example.com",
-            maxTimeout=60000,
-            cookies=[{"name": "x", "value": "y"}],
-        ),
-        context=context,
-        page=page,
-    )
+    with caplog.at_level(logging.ERROR, logger="camouflare.solver"):
+        result = await solve_request(
+            V1Request(
+                cmd="request.get",
+                url="https://example.com",
+                maxTimeout=60000,
+                cookies=[{"name": "x", "value": "y"}],
+            ),
+            context=context,
+            page=page,
+        )
 
     assert result.status == "error"
     assert "setup failed" in result.message.lower()
     assert result.solution is not None
     assert page.goto_calls == []
+    internal = next(
+        record for record in caplog.records if record.message == "Unexpected request setup error."
+    )
+    assert internal.exc_info is not None
 
 
 @pytest.mark.anyio
@@ -1555,12 +1735,22 @@ async def test_nested_get_fallback_commit_crash_uses_direct_http(
 
     context = FakeContext()
     page = await context.new_page()
-    # domcontentloaded times out -> retry with commit -> commit crashes the
-    # transport -> direct HTTP fallback.
+    # domcontentloaded times out -> waiting on the existing navigation's commit
+    # observes a transport crash -> direct HTTP fallback without replaying GET.
     page.goto_failures["domcontentloaded"] = TimeoutError("domcontentloaded timed out")
-    page.goto_failures["commit"] = RuntimeError(
-        "Page.goto: Connection closed while reading from the driver"
-    )
+    original_wait_for_load_state = page.wait_for_load_state
+
+    async def fail_commit_wait(
+        state: str = "load",
+        *,
+        timeout: float | None = None,
+    ) -> None:
+        if state == "commit":
+            page.load_states.append(state)
+            raise RuntimeError("Page.wait_for_load_state: Connection closed")
+        await original_wait_for_load_state(state, timeout=timeout)
+
+    page.wait_for_load_state = fail_commit_wait  # type: ignore[method-assign]
 
     result = await solve_request(
         V1Request(cmd="request.get", url="https://example.com/x", maxTimeout=60000),
@@ -1571,11 +1761,12 @@ async def test_nested_get_fallback_commit_crash_uses_direct_http(
     assert result.status == "ok"
     assert result.solution is not None
     assert "direct body" in result.solution.response
-    assert [call["wait_until"] for call in page.goto_calls] == ["domcontentloaded", "commit"]
+    assert [call["wait_until"] for call in page.goto_calls] == ["domcontentloaded"]
+    assert result.fallback_used is True
 
 
 @pytest.mark.anyio
-async def test_post_context_request_challenge_falls_back_to_browser_form() -> None:
+async def test_post_context_request_challenge_does_not_retry_with_browser_form() -> None:
     class ChallengeApiRequest:
         def __init__(self) -> None:
             self.calls = 0
@@ -1605,10 +1796,11 @@ async def test_post_context_request_challenge_falls_back_to_browser_form() -> No
     )
 
     assert context.request.calls == 1  # type: ignore[attr-defined]
-    assert result.status == "ok"
-    assert page.posted_form == {"user": "a", "pass": "b"}
+    assert result.status == "error"
+    assert result.error_code is V1ErrorCode.CHALLENGE_FAILED
+    assert page.posted_form is None
     assert result.solution is not None
-    assert "form result" in result.solution.response
+    assert "Just a moment" in result.solution.response
 
 
 @pytest.mark.anyio

@@ -51,6 +51,33 @@ _ACQUIRE_TIMEOUT_REASONS = frozenset(
     {"capacity", "deadline", "browser_launch", "shutdown", "other"}
 )
 _ASYNCIO_UNHANDLED_KINDS = frozenset({"future", "task", "async_generator", "other"})
+_V1_COMMANDS = frozenset(
+    {
+        "sessions.create",
+        "sessions.list",
+        "sessions.destroy",
+        "request.get",
+        "request.post",
+        "invalid",
+        "unknown",
+    }
+)
+_V1_ERROR_CODES = frozenset(
+    {
+        "INVALID_REQUEST",
+        "SESSION_NOT_FOUND",
+        "RESOURCE_LIMIT_EXCEEDED",
+        "POOL_UNAVAILABLE",
+        "REQUEST_TIMEOUT",
+        "NAVIGATION_TIMEOUT",
+        "BROWSER_TRANSPORT_CLOSED",
+        "CHALLENGE_FAILED",
+        "INTERNAL_ERROR",
+    }
+)
+_BROWSER_TRANSPORT_PHASES = frozenset(
+    {"acquire", "browser_launch", "context_create", "navigation", "collection", "cleanup", "other"}
+)
 
 ContextKind = Literal["transient", "persistent"]
 
@@ -236,6 +263,16 @@ ASYNCIO_UNHANDLED_COUNTER = _counter(
     "Unhandled asyncio exception-handler events by bounded kind.",
     ("kind",),
 )
+V1_ERROR_COUNTER = _counter(
+    "camouflare_v1_error_total",
+    "Total /v1 errors by bounded command and error code.",
+    ("command", "error_code"),
+)
+BROWSER_TRANSPORT_ERROR_COUNTER = _counter(
+    "camouflare_browser_transport_error_total",
+    "Browser transport errors by bounded phase.",
+    ("phase",),
+)
 
 
 def _bounded(value: str, allowed: frozenset[str]) -> str:
@@ -348,6 +385,17 @@ def record_pool_acquire_timeout(reason: str) -> None:
 
 def record_asyncio_unhandled(kind: str) -> None:
     ASYNCIO_UNHANDLED_COUNTER.labels(kind=_bounded(kind, _ASYNCIO_UNHANDLED_KINDS)).inc()
+
+
+def record_v1_error(command: str, error_code: str) -> None:
+    bounded_command = command if command in _V1_COMMANDS else "unknown"
+    normalized_code = str(getattr(error_code, "value", error_code)).strip().upper()
+    bounded_code = normalized_code if normalized_code in _V1_ERROR_CODES else "INTERNAL_ERROR"
+    V1_ERROR_COUNTER.labels(command=bounded_command, error_code=bounded_code).inc()
+
+
+def record_browser_transport_error(phase: str) -> None:
+    BROWSER_TRANSPORT_ERROR_COUNTER.labels(phase=_bounded(phase, _BROWSER_TRANSPORT_PHASES)).inc()
 
 
 def install_asyncio_exception_metrics() -> Callable[[], None]:

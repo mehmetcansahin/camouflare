@@ -1,7 +1,7 @@
 services:
   camouflare:
     build: .
-    image: ${CAMOUFLARE_IMAGE:-ghcr.io/mehmetcansahin/camouflare:1.2.0}
+    image: ${CAMOUFLARE_IMAGE:-ghcr.io/mehmetcansahin/camouflare:1.3.0}
     ports:
       - "127.0.0.1:8191:8191"
     cap_drop:
@@ -14,7 +14,7 @@ services:
     stop_grace_period: 45s
     environment:
       LOG_LEVEL: INFO
-      LOG_FORMAT: text
+      LOG_FORMAT: "json"
       CAMOUFLARE_API_TOKEN: ${CAMOUFLARE_API_TOKEN:?Set CAMOUFLARE_API_TOKEN}
       HEADLESS: virtual
       POOL_MIN_BROWSERS: "2"
