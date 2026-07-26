@@ -572,8 +572,45 @@ async def test_get_navigation_waits_for_existing_commit_without_retrying_request
 
     assert result.status == "ok"
     assert [call["wait_until"] for call in page.goto_calls] == ["domcontentloaded"]
-    assert page.load_states == ["commit", "networkidle"]
+    assert [call["wait_until"] for call in page.wait_for_url_calls] == ["commit"]
+    assert page.load_states == ["networkidle"]
     assert page.goto_calls[0]["timeout"] < 60000
+
+
+@pytest.mark.anyio
+async def test_get_navigation_rejects_commit_that_leaves_page_about_blank() -> None:
+    context = FakeContext()
+    page = await context.new_page()
+
+    async def timeout_without_navigation(
+        url: str,
+        *,
+        timeout: float | None = None,
+        wait_until: str | None = None,
+        referer: str | None = None,
+    ) -> FakeResponse:
+        page.goto_calls.append(
+            {"url": url, "timeout": timeout, "wait_until": wait_until, "referer": referer}
+        )
+        raise TimeoutError("domcontentloaded timed out")
+
+    page.goto = timeout_without_navigation  # type: ignore[assignment]
+
+    result = await solve_request(
+        V1Request(cmd="request.get", url="https://example.com", maxTimeout=60000),
+        context=context,
+        page=page,
+    )
+
+    assert result.status == "error"
+    assert result.error_code is V1ErrorCode.NAVIGATION_TIMEOUT
+    assert result.retryable is True
+    assert result.solution is not None
+    assert result.solution.url == ""
+    assert result.solution.status == 0
+    assert [call["wait_until"] for call in page.wait_for_url_calls] == ["commit"]
+    assert page.load_states == []
+    assert len(page.goto_calls) == 1
 
 
 @pytest.mark.anyio
@@ -1134,6 +1171,15 @@ async def test_closed_transport_solution_collection_does_not_log_error(
             timeout: float | None = None,
         ) -> None:
             raise TimeoutError(f"{state} timed out")
+
+        async def wait_for_url(
+            self,
+            _: object,
+            *,
+            timeout: float | None = None,
+            wait_until: str | None = None,
+        ) -> None:
+            raise TimeoutError(f"{wait_until} timed out")
 
         async def content(self) -> str:
             raise RuntimeError(f"Page.content: {closed_transport_message}")
@@ -1738,19 +1784,18 @@ async def test_nested_get_fallback_commit_crash_uses_direct_http(
     # domcontentloaded times out -> waiting on the existing navigation's commit
     # observes a transport crash -> direct HTTP fallback without replaying GET.
     page.goto_failures["domcontentloaded"] = TimeoutError("domcontentloaded timed out")
-    original_wait_for_load_state = page.wait_for_load_state
 
-    async def fail_commit_wait(
-        state: str = "load",
+    async def fail_commit_url_wait(
+        _: object,
         *,
         timeout: float | None = None,
+        wait_until: str | None = None,
     ) -> None:
-        if state == "commit":
-            page.load_states.append(state)
+        if wait_until == "commit":
+            page.wait_for_url_calls.append({"timeout": timeout, "wait_until": wait_until})
             raise RuntimeError("Page.wait_for_load_state: Connection closed")
-        await original_wait_for_load_state(state, timeout=timeout)
 
-    page.wait_for_load_state = fail_commit_wait  # type: ignore[method-assign]
+    page.wait_for_url = fail_commit_url_wait  # type: ignore[method-assign]
 
     result = await solve_request(
         V1Request(cmd="request.get", url="https://example.com/x", maxTimeout=60000),

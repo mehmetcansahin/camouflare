@@ -109,6 +109,7 @@ class FakePage:
         self.url = "about:blank"
         self.goto_calls: list[dict[str, Any]] = []
         self.load_states: list[str] = []
+        self.wait_for_url_calls: list[dict[str, Any]] = []
         self.wait_failures: set[str] = set()
         self.title_value = "Example"
         self.content_value = "<html><title>Example</title><body>ok</body></html>"
@@ -151,6 +152,20 @@ class FakePage:
         self.load_states.append(state)
         if state in self.wait_failures:
             raise TimeoutError(f"{state} timed out")
+
+    async def wait_for_url(
+        self,
+        matcher: Any,
+        *,
+        timeout: float | None = None,
+        wait_until: str | None = None,
+    ) -> None:
+        self.wait_for_url_calls.append({"timeout": timeout, "wait_until": wait_until})
+        if wait_until in self.wait_failures:
+            raise TimeoutError(f"{wait_until} timed out")
+        if callable(matcher) and matcher(self.url):
+            return
+        raise TimeoutError("URL did not change")
 
     async def title(self) -> str:
         return self.title_value

@@ -141,7 +141,13 @@ async def navigate_get(
                 extra={"target": safe_log_url(url), "error": type(exc).__name__},
             )
             try:
-                await page.wait_for_load_state("commit", timeout=timer.remaining_ms)
+                await page.wait_for_url(
+                    lambda current_url: (
+                        urlsplit(str(current_url)).scheme.lower() in ALLOWED_URL_SCHEMES
+                    ),
+                    wait_until="commit",
+                    timeout=timer.remaining_ms,
+                )
                 return None
             except Exception as commit_exc:
                 if (
