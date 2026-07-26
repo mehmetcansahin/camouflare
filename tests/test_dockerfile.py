@@ -93,5 +93,5 @@ def test_compose_uses_balanced_pool_performance_profile() -> None:
     assert "no-new-privileges:true" in compose
     assert 'shm_size: "2gb"' in compose
     assert 'mem_limit: "4g"' in compose
-    assert "pids_limit: 512" in compose
+    assert "pids_limit: 1024" in compose
     assert "stop_grace_period: 45s" in compose

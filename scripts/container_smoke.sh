@@ -63,7 +63,7 @@ docker run --detach --name "${container_name}" \
   --security-opt no-new-privileges \
   --shm-size 2g \
   --memory 4g \
-  --pids-limit 512 \
+  --pids-limit 1024 \
   --publish 127.0.0.1:18191:8191 \
   --env HOST=0.0.0.0 \
   --env CAMOUFLARE_API_TOKEN="${api_token}" \

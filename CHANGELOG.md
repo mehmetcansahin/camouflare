@@ -5,6 +5,21 @@ All notable changes to Camouflare are documented here. The project follows
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-07-26
+
+### Changed
+
+- Production Compose, Docker example, and container smoke profiles now use a 1024 PID
+  limit, preserving browser process and thread headroom for the two-browser pool.
+
+### Fixed
+
+- GET navigations that time out before `domcontentloaded` now accept only a committed
+  HTTP(S) URL, preventing an untouched `about:blank` page from being returned as a
+  successful empty solution.
+- Playwright URL matcher callbacks are normalized across string and URL-object forms so
+  timeout handling returns retryable timeout errors instead of an internal type error.
+
 ## [1.3.0] - 2026-07-22
 
 ### Added
@@ -89,7 +104,8 @@ All notable changes to Camouflare are documented here. The project follows
 - High and critical dependency or container findings block releases unless covered by a
   reasoned, time-bounded exception.
 
-[Unreleased]: https://github.com/mehmetcansahin/camouflare/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/mehmetcansahin/camouflare/compare/v1.3.1...HEAD
+[1.3.1]: https://github.com/mehmetcansahin/camouflare/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/mehmetcansahin/camouflare/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/mehmetcansahin/camouflare/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/mehmetcansahin/camouflare/compare/v1.0.0...v1.1.0

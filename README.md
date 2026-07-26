@@ -73,7 +73,7 @@ site's access controls.
 ## Installation
 
 Camouflare is installed from source or run from the immutable
-`ghcr.io/mehmetcansahin/camouflare:1.3.0` image; it is not published to PyPI.
+`ghcr.io/mehmetcansahin/camouflare:1.3.1` image; it is not published to PyPI.
 For a source installation, fetch the Camoufox browser runtime after installing the package:
 
 ```bash
@@ -234,13 +234,13 @@ docker run --rm \
   --security-opt no-new-privileges \
   --shm-size 2g \
   --memory 4g \
-  --pids-limit 512 \
+  --pids-limit 1024 \
   camouflare:local
 ```
 
 For Compose, set `CAMOUFLARE_API_TOKEN` before running `docker compose pull` and
 `docker compose up -d`. The example `compose.yaml` intentionally fails to start when this
-variable is unset and defaults to the immutable `1.3.0` image. Its retained `build: .`
+variable is unset and defaults to the immutable `1.3.1` image. Its retained `build: .`
 entry supports explicit local builds with `docker compose up --build`.
 
 The Dockerfile pins Ubuntu 24.04, uses `dumb-init`, runs as a non-root user,
