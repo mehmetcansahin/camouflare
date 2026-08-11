@@ -1,11 +1,75 @@
 # Camouflare
 
-Camouflare is a FlareSolverr-compatible `/v1` API backed by FastAPI and Camoufox.
-It keeps browser processes warm in a bounded pool, creates isolated contexts for
-stateless requests, and uses locked persistent contexts for FlareSolverr sessions.
+[![CI](https://github.com/mehmetcansahin/camouflare/actions/workflows/ci.yml/badge.svg)](https://github.com/mehmetcansahin/camouflare/actions/workflows/ci.yml)
+[![Nightly browser validation](https://github.com/mehmetcansahin/camouflare/actions/workflows/nightly.yml/badge.svg)](https://github.com/mehmetcansahin/camouflare/actions/workflows/nightly.yml)
+[![Release](https://img.shields.io/github/v/tag/mehmetcansahin/camouflare?sort=semver&label=release)](https://github.com/mehmetcansahin/camouflare/tags)
+[![Container](https://img.shields.io/badge/GHCR-linux%20amd64%20%7C%20arm64-2496ED?logo=docker&logoColor=white)](https://github.com/mehmetcansahin/camouflare/pkgs/container/camouflare)
+[![Python](https://img.shields.io/badge/Python-3.11--3.14-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
+**Keep the FlareSolverr `/v1` API. Replace unbounded browser churn with warm,
+bounded Camoufox capacity.**
+
+Camouflare is a FastAPI service for predictable, long-running browser automation.
+It keeps Camoufox processes warm, gives stateless requests fresh browser contexts,
+and gives named FlareSolverr sessions locked persistent contexts.
+
+- **Bounded resources:** explicit browser and context limits, bounded queueing, and
+  backpressure instead of unrestricted browser fan-out.
+- **Isolated by default:** stateless requests do not share cookies or storage, while
+  named sessions retain state deliberately.
+- **Operationally visible:** separate liveness, readiness, diagnostics, structured
+  logs, request correlation, and optional Prometheus metrics.
+- **Familiar contract:** GET, POST, and session commands use the established
+  FlareSolverr `/v1` request and response shapes.
+
 Active Cloudflare interstitial and Turnstile handling is disabled by default. Set
 `CHALLENGE_SOLVER=click` to opt in to clicking challenges through
 [playwright-captcha](https://pypi.org/project/playwright-captcha/)'s ClickSolver.
+Camouflare does not guarantee challenge success or access to any third-party site.
+
+## Quick start
+
+Run the immutable Linux `amd64`/`arm64` container with a generated API token:
+
+```bash
+export CAMOUFLARE_API_TOKEN="$(openssl rand -hex 32)"
+docker run --detach --rm \
+  --name camouflare \
+  --publish 127.0.0.1:8191:8191 \
+  --env CAMOUFLARE_API_TOKEN \
+  --cap-drop ALL \
+  --security-opt no-new-privileges \
+  --shm-size 2g \
+  --memory 4g \
+  --pids-limit 1024 \
+  ghcr.io/mehmetcansahin/camouflare:1.3.1
+```
+
+Verify process liveness and browser readiness:
+
+```bash
+curl --fail http://127.0.0.1:8191/health
+curl --fail \
+  --header "Authorization: Bearer ${CAMOUFLARE_API_TOKEN}" \
+  http://127.0.0.1:8191/ready
+```
+
+Then see the [`/v1` request example](#api), use the hardened
+[`compose.yaml`](compose.yaml), or review the full
+[deployment guide](docs/deployment.md).
+
+## Architecture
+
+```mermaid
+flowchart LR
+    client["Existing FlareSolverr client"] --> api["FastAPI /v1"]
+    api --> admission["Bounded admission<br/>wait or explicit 503"]
+    admission --> pool["Warm Camoufox<br/>process pool"]
+    pool --> stateless["Fresh isolated context<br/>stateless request"]
+    pool --> session["Locked persistent context<br/>named session"]
+    api -. inspect .-> ops["/health · /ready<br/>/diagnostics · /metrics"]
+```
 
 ## Why Camouflare?
 
@@ -17,20 +81,6 @@ existing FlareSolverr clients while treating browser capacity as a bounded,
 long-running resource. The goal is predictable local operation, isolated request
 state, explicit backpressure, and enough diagnostics to understand why a request
 or browser is unhealthy.
-
-This is an architectural comparison, not a challenge-success benchmark. The table
-reflects the documented behavior of
-[FlareSolverr 3.5.0](https://github.com/FlareSolverr/FlareSolverr/tree/v3.5.0) and
-[Byparr 2.1.0](https://github.com/ThePhaseless/Byparr/tree/v2.1.0); upstream projects
-may change after those releases.
-
-| Area | FlareSolverr 3.5.0 | Byparr 2.1.0 | Camouflare 1.x |
-| --- | --- | --- | --- |
-| Browser stack | Selenium, undetected-chromedriver, and Chrome | FastAPI with Camoufox through Playwright | FastAPI with Camoufox through Playwright |
-| Stateless request lifecycle | Starts a new browser for each request | Opens a request-scoped browser and context | Leases a fresh, isolated context from a bounded pool of warm browser processes |
-| Persistent sessions | Keeps a browser instance with explicit destruction and optional TTL rotation | Does not implement the FlareSolverr session commands | Keeps a locked persistent context, rotates it by TTL, and reaps expired sessions |
-| `/v1` surface | Reference implementation for GET, POST, and session commands | GET-focused compatibility subset | GET, POST, and session commands with cookies, headers, screenshots, waits, and environment or per-request proxies |
-| Active challenge handling | Core request behavior | Click handling is integrated into the request path | Disabled by default and enabled explicitly with `CHALLENGE_SOLVER=click` |
 
 The design addresses several problems that show up in a long-running local service:
 
