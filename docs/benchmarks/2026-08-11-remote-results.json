@@ -1,0 +1,188 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-11T13:38:07.757Z",
+  "service": {
+    "base_url": "https://camouflare.ariel.ondokuzon.app",
+    "target_url": "https://camouflare.ariel.ondokuzon.app/health",
+    "version": "1.3.1",
+    "playwright_version": "1.61.0"
+  },
+  "method": {
+    "command": "request.get",
+    "max_timeout_ms": 60000,
+    "corrected_concurrency_4_client_timeout_seconds": 20,
+    "rounds_per_concurrency": 5,
+    "warmup_requests_excluded": 3,
+    "invalid_pilot_excluded": true,
+    "percentile_method": "nearest-rank",
+    "latency_percentiles_include": "successful requests only",
+    "prometheus_enabled": false
+  },
+  "diagnostics": {
+    "idle_before": {
+      "capacity_state": "available",
+      "ready_browser_slots": 1,
+      "closing_slots": 3,
+      "active_contexts": 0,
+      "usable_context_slots": 4,
+      "max_browsers": 4,
+      "max_contexts_per_browser": 4,
+      "max_slots": 16
+    },
+    "idle_after": {
+      "capacity_state": "available",
+      "ready_browser_slots": 1,
+      "closing_slots": 3,
+      "active_contexts": 0,
+      "usable_context_slots": 4,
+      "max_browsers": 4,
+      "max_contexts_per_browser": 4,
+      "max_slots": 16
+    }
+  },
+  "aggregates": [
+    {
+      "load": "Sequential baseline",
+      "concurrency": 1,
+      "requests": 10,
+      "successes": 10,
+      "success_rate": 1.0,
+      "timeouts": 0,
+      "server_errors": 0,
+      "client_p50_ms": 1183.723,
+      "client_p95_ms": 1251.267,
+      "internal_p50_ms": 1011,
+      "internal_p95_ms": 1037
+    },
+    {
+      "load": "1 concurrent",
+      "concurrency": 1,
+      "requests": 5,
+      "successes": 5,
+      "success_rate": 1.0,
+      "timeouts": 0,
+      "server_errors": 0,
+      "client_p50_ms": 1250.457,
+      "client_p95_ms": 1318.491,
+      "internal_p50_ms": 1091,
+      "internal_p95_ms": 1161
+    },
+    {
+      "load": "2 concurrent",
+      "concurrency": 2,
+      "requests": 10,
+      "successes": 10,
+      "success_rate": 1.0,
+      "timeouts": 0,
+      "server_errors": 0,
+      "client_p50_ms": 1144.115,
+      "client_p95_ms": 1275.177,
+      "internal_p50_ms": 980,
+      "internal_p95_ms": 1010
+    },
+    {
+      "load": "4 concurrent",
+      "concurrency": 4,
+      "requests": 20,
+      "successes": 5,
+      "success_rate": 0.25,
+      "timeouts": 7,
+      "server_errors": 8,
+      "client_p50_ms": 1763.16,
+      "client_p95_ms": 3737.03,
+      "internal_p50_ms": 1584,
+      "internal_p95_ms": 3552
+    }
+  ],
+  "successful_latency_samples_ms": {
+    "sequential": {
+      "client": [1244.745, 1196.263, 1181.162, 1251.267, 1183.723, 1193.378, 1167.038, 1126.376, 1141.97, 1238.984],
+      "internal": [979, 1011, 1024, 1027, 1021, 1037, 1014, 959, 986, 996]
+    },
+    "concurrency_1": {
+      "client": [1192.694, 1251.0, 1318.491, 1154.397, 1250.457],
+      "internal": [1007, 1093, 1161, 998, 1091]
+    },
+    "concurrency_2": {
+      "client": [1167.102, 1137.608, 1172.124, 1142.08, 1184.906, 1098.961, 1144.115, 1275.177, 1190.773, 1128.703],
+      "internal": [1004, 962, 1010, 985, 998, 942, 961, 980, 1007, 967]
+    },
+    "concurrency_4": {
+      "client": [1257.571, 1786.789, 3737.03, 1446.442, 1763.16],
+      "internal": [1001, 1585, 3552, 1261, 1584]
+    }
+  },
+  "concurrency_4_failures": [
+    {"round": 1, "sample": 1, "kind": "client_timeout", "client_ms": 20005.958},
+    {"round": 1, "sample": 2, "kind": "client_timeout", "client_ms": 20004.833},
+    {"round": 1, "sample": 3, "kind": "client_timeout", "client_ms": 20006.411},
+    {"round": 1, "sample": 4, "kind": "client_timeout", "client_ms": 20006.042},
+    {"round": 2, "sample": 2, "kind": "http_500", "client_ms": 1996.611, "internal_ms": 1749, "error": "BrowserContext.new_page: Target page, context or browser has been closed"},
+    {"round": 2, "sample": 3, "kind": "http_500", "client_ms": 3769.812, "internal_ms": 3518, "error": "BrowserContext.new_page: Target page, context or browser has been closed"},
+    {"round": 2, "sample": 4, "kind": "http_500", "client_ms": 4490.111, "internal_ms": 4236, "error": "BrowserContext.new_page: Target page, context or browser has been closed"},
+    {"round": 3, "sample": 1, "kind": "client_timeout", "client_ms": 20006.127},
+    {"round": 3, "sample": 2, "kind": "http_500", "client_ms": 170.891, "internal_ms": 14, "error": "Browser.new_context: Target page, context or browser has been closed"},
+    {"round": 3, "sample": 3, "kind": "client_timeout", "client_ms": 20003.561},
+    {"round": 3, "sample": 4, "kind": "client_timeout", "client_ms": 20006.244},
+    {"round": 4, "sample": 1, "kind": "http_500", "client_ms": 539.326, "internal_ms": 377, "error": "BrowserContext.new_page: Target page, context or browser has been closed"},
+    {"round": 4, "sample": 2, "kind": "http_500", "client_ms": 558.261, "internal_ms": 375, "error": "BrowserContext.new_page: Target page, context or browser has been closed"},
+    {"round": 4, "sample": 3, "kind": "http_500", "client_ms": 934.946, "internal_ms": 780, "error": "Page.goto: Page crashed"},
+    {"round": 4, "sample": 4, "kind": "http_500", "client_ms": 513.555, "internal_ms": 356, "error": "BrowserContext.new_page: Target page, context or browser has been closed"}
+  ],
+  "prometheus_retest": {
+    "generated_at": "2026-08-11T13:52:40Z",
+    "metrics_endpoint_authenticated": true,
+    "metrics_http_status": 200,
+    "method": {
+      "concurrency": 4,
+      "maximum_rounds": 3,
+      "rounds_run": 1,
+      "stop_after_first_failed_round": true,
+      "api_max_timeout_ms": 60000,
+      "client_timeout_seconds": 70,
+      "idle_gate": "contexts=0, waiting=0, in_flight<=1 before and after every round",
+      "metrics_note": "Prometheus scrapes contribute 1 to camouflare_in_flight_requests"
+    },
+    "summary": {
+      "requests": 4,
+      "successes": 1,
+      "failures": 3,
+      "success_rate": 0.25,
+      "successful_client_ms": 3706.408,
+      "successful_internal_ms": 3515
+    },
+    "results": [
+      {"sample": 1, "kind": "success", "http_status": 200, "client_ms": 3706.408, "internal_ms": 3515},
+      {"sample": 2, "kind": "http_500", "http_status": 500, "client_ms": 203.105, "internal_ms": 22, "error": "Browser.new_context: Target page, context or browser has been closed"},
+      {"sample": 3, "kind": "http_500", "http_status": 500, "client_ms": 191.716, "internal_ms": 24, "error": "Browser.new_context: Target page, context or browser has been closed"},
+      {"sample": 4, "kind": "http_500", "http_status": 500, "client_ms": 180.543, "internal_ms": 18, "error": "Browser.new_context: Target page, context or browser has been closed"}
+    ],
+    "prometheus_delta": {
+      "request_ok": 1,
+      "request_error": 3,
+      "v1_internal_error": 3,
+      "request_timeout": 0,
+      "browser_transport_error_context_create": 3,
+      "browser_event_disconnected": 3,
+      "browser_event_created": 2,
+      "browser_event_recycled": 1,
+      "browser_recycle_disconnected": 1
+    },
+    "process_metrics": {
+      "resident_memory_before_bytes": 170287104,
+      "resident_memory_after_bytes": 170811392,
+      "cpu_seconds_before": 6.53,
+      "cpu_seconds_after": 6.76,
+      "open_fds_before": 20,
+      "open_fds_peak": 26,
+      "open_fds_after": 25,
+      "scope_note": "process_* metrics describe the Python API process and do not include child browser process resource usage"
+    },
+    "pool_state": {
+      "before": {"ready_browsers": 1, "usable_context_slots": 4},
+      "after": {"ready_browsers": 2, "usable_context_slots": 8},
+      "idle_before": true,
+      "idle_after": true
+    }
+  }
+}
