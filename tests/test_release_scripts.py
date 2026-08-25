@@ -54,11 +54,52 @@ def test_camoufox_release_metadata_file_must_be_an_array(
 def test_release_verifier_accepts_exact_tag_and_rejects_mismatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(sys, "argv", ["verify_release.py", "v1.3.2"])
+    monkeypatch.setattr(sys, "argv", ["verify_release.py", "v1.3.3"])
     assert verify_release.main() == 0
 
-    monkeypatch.setattr(sys, "argv", ["verify_release.py", "v1.3.3"])
+    monkeypatch.setattr(sys, "argv", ["verify_release.py", "v1.3.4"])
     assert verify_release.main() == 1
+
+
+def test_release_verifier_rejects_stale_or_missing_changelog_links() -> None:
+    repository_url = "https://github.com/mehmetcansahin/camouflare"
+    changelog = f"""\
+## [Unreleased]
+
+## [1.3.2] - 2026-08-25
+
+## [1.3.1] - 2026-07-26
+
+[Unreleased]: {repository_url}/compare/v1.3.2...HEAD
+[1.3.2]: {repository_url}/compare/v1.3.1...v1.3.2
+[1.3.1]: {repository_url}/releases/tag/v1.3.1
+"""
+    assert (
+        verify_release._changelog_errors(
+            changelog,
+            tag_version="1.3.2",
+            repository_url=repository_url,
+        )
+        == []
+    )
+
+    stale_changelog = changelog.replace(
+        f"{repository_url}/compare/v1.3.2...HEAD",
+        f"{repository_url}/compare/v1.3.1...HEAD",
+    ).replace(
+        f"[1.3.2]: {repository_url}/compare/v1.3.1...v1.3.2\n",
+        "",
+    )
+    errors = verify_release._changelog_errors(
+        stale_changelog,
+        tag_version="1.3.2",
+        repository_url=repository_url,
+    )
+
+    assert len(errors) == 2
+    assert "[Unreleased] link" in errors[0]
+    assert "v1.3.2...HEAD" in errors[0]
+    assert "[1.3.2] link is missing" in errors[1]
 
 
 @pytest.mark.parametrize(

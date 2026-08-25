@@ -12,6 +12,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SEMVER_TAG = re.compile(r"^v(?P<version>0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
+CHANGELOG_RELEASE_HEADING = re.compile(
+    r"^## \[(?P<version>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))\] "
+    r"- \d{4}-\d{2}-\d{2}$",
+    re.MULTILINE,
+)
+CHANGELOG_REFERENCE = re.compile(
+    r"^\[(?P<label>[^\]]+)\]: (?P<url>\S+)$",
+    re.MULTILINE,
+)
 
 
 def _source_version() -> str:
@@ -27,6 +36,49 @@ def _source_version() -> str:
                 ):
                     return node.value.value
     raise ValueError("camouflare/_version.py does not define a literal __version__.")
+
+
+def _changelog_errors(
+    changelog: str,
+    *,
+    tag_version: str,
+    repository_url: str,
+) -> list[str]:
+    errors: list[str] = []
+    release_versions = [
+        match.group("version") for match in CHANGELOG_RELEASE_HEADING.finditer(changelog)
+    ]
+    if tag_version not in release_versions:
+        errors.append(f"CHANGELOG.md has no dated [{tag_version}] release heading")
+
+    references = {
+        match.group("label"): match.group("url")
+        for match in CHANGELOG_REFERENCE.finditer(changelog)
+    }
+    repository_url = repository_url.rstrip("/")
+    expected_unreleased = f"{repository_url}/compare/v{tag_version}...HEAD"
+    actual_unreleased = references.get("Unreleased")
+    if actual_unreleased != expected_unreleased:
+        errors.append(
+            f"CHANGELOG.md [Unreleased] link is {actual_unreleased or 'missing'}, "
+            f"expected {expected_unreleased}"
+        )
+
+    if tag_version in release_versions:
+        release_index = release_versions.index(tag_version)
+        if release_index + 1 < len(release_versions):
+            previous_version = release_versions[release_index + 1]
+            expected_release = f"{repository_url}/compare/v{previous_version}...v{tag_version}"
+        else:
+            expected_release = f"{repository_url}/releases/tag/v{tag_version}"
+        actual_release = references.get(tag_version)
+        if actual_release != expected_release:
+            errors.append(
+                f"CHANGELOG.md [{tag_version}] link is {actual_release or 'missing'}, "
+                f"expected {expected_release}"
+            )
+
+    return errors
 
 
 def main() -> int:
@@ -65,11 +117,18 @@ def main() -> int:
         errors.append(f"camouflare.__version__ has {source_version}, expected {tag_version}")
 
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    release_heading = re.compile(
-        rf"^## \[{re.escape(tag_version)}\] - \d{{4}}-\d{{2}}-\d{{2}}$", re.MULTILINE
-    )
-    if release_heading.search(changelog) is None:
-        errors.append(f"CHANGELOG.md has no dated [{tag_version}] release heading")
+    project_urls = project.get("urls", {})
+    repository_url = project_urls.get("Repository") if isinstance(project_urls, dict) else None
+    if not isinstance(repository_url, str) or not repository_url:
+        errors.append("pyproject.toml has no project.urls.Repository")
+    else:
+        errors.extend(
+            _changelog_errors(
+                changelog,
+                tag_version=tag_version,
+                repository_url=repository_url,
+            )
+        )
 
     if errors:
         for error in errors:

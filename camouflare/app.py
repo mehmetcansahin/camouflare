@@ -399,6 +399,15 @@ def create_app(
             )
             result = response.status
             status_code = 200 if response.status == "ok" else 500
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            response = V1Response.error(
+                "Error: invalid JSON request payload.",
+                version=settings.version,
+                start_timestamp=start_timestamp,
+                error_code=V1ErrorCode.INVALID_REQUEST,
+                retryable=False,
+            )
+            status_code = 500
         except ValidationError as exc:
             response = V1Response.error(
                 _validation_error_message(exc),
