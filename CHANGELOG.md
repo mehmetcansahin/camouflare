@@ -18,6 +18,18 @@ All notable changes to Camouflare are documented here. The project follows
   context was created also returned that browser to the pool as healthy, because the
   context closed cleanly. Concurrent requests turned a single browser death into one
   failure per in-flight request.
+- A browser whose physical close fails is now retried on a later acquisition, bounded
+  and backed off, instead of only at shutdown. A wedged browser process previously
+  survived for the life of the service while its slot kept `closing_slots` above zero.
+- A renderer crash (`Page crashed`, `Target crashed`) is classified as a browser
+  transport failure rather than an internal error, so a crashed GET can use the direct
+  HTTP fallback and is reported as retryable, and a crashed POST reports an uncertain
+  outcome. The browser itself is not retired, because a content-process crash does not
+  imply the browser process died.
+- A single waiting request now starts at most one browser launch. The create gate does
+  not see how many requests are waiting, so any unrelated wake-up during an in-flight
+  launch started another one, letting one request grow the pool to `POOL_MAX_BROWSERS`
+  and consume a whole abandoned-launch generation.
 
 ## [1.3.1] - 2026-07-26
 

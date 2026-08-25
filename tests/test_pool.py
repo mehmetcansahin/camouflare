@@ -8,13 +8,19 @@ import pytest
 
 from camouflare.browser import CamoufoxBrowserHandle
 from camouflare.cleanup import CleanupSupervisor
-from camouflare.pool import BrowserPool, PersistentCapacityError, PoolAcquireTimeout
+from camouflare.pool import (
+    MAX_CLOSE_RETRIES,
+    BrowserPool,
+    PersistentCapacityError,
+    PoolAcquireTimeout,
+)
 from tests.fakes import (
     DelayedFakeBrowserFactory,
     DisconnectingFakeBrowserFactory,
     FakeBrowser,
     FakeBrowserFactory,
     FakeContext,
+    WedgedCloseFakeBrowserFactory,
 )
 
 
@@ -1842,3 +1848,126 @@ async def test_browser_that_dies_mid_lease_is_not_served_again() -> None:
 
     await pool.close()
     assert len(factory.created) == 2
+
+
+async def _settle(turns: int = 80) -> None:
+    for _ in range(turns):
+        await asyncio.sleep(0)
+
+
+@pytest.mark.anyio
+async def test_failed_browser_close_is_retried_on_a_later_acquisition() -> None:
+    factory = WedgedCloseFakeBrowserFactory()
+    pool = BrowserPool(
+        browser_factory=factory,
+        min_browsers=1,
+        max_browsers=1,
+        max_contexts_per_browser=1,
+        browser_max_uses=1,
+        browser_max_age_seconds=3600,
+    )
+    await pool.start()
+    wedged = factory.created[0]
+
+    async with pool.lease_context():
+        pass
+    await _settle()
+
+    # The close failed twice (the inline retry inside _run_close_slot) and the
+    # slot is quarantined, so closing_slots is stuck above zero.
+    assert wedged.close_calls == 2
+    assert wedged.closed is False
+    assert pool.snapshot().closing_slots == 1
+    (wedged_slot,) = pool._failed_close_slots
+
+    # Once the browser can close again, the next acquisition must reap it
+    # instead of leaving it for shutdown.
+    wedged.close_should_fail = False
+    wedged_slot.next_close_retry_at = 0.0
+
+    async with pool.lease_context():
+        pass
+    await _settle()
+
+    assert wedged.close_calls == 3
+    assert wedged.closed is True
+    assert wedged_slot not in pool._failed_close_slots
+
+    await pool.close()
+
+
+@pytest.mark.anyio
+async def test_failed_browser_close_retries_are_bounded() -> None:
+    factory = WedgedCloseFakeBrowserFactory()
+    pool = BrowserPool(
+        browser_factory=factory,
+        min_browsers=1,
+        max_browsers=1,
+        max_contexts_per_browser=1,
+        browser_max_uses=1,
+        browser_max_age_seconds=3600,
+    )
+    await pool.start()
+    wedged = factory.created[0]
+
+    async with pool.lease_context():
+        pass
+    await _settle()
+
+    # A permanently wedged handle must stop being retried, otherwise every
+    # acquisition would start another close task and drain the cleanup budget.
+    for _ in range(6):
+        for slot in pool._failed_close_slots:
+            slot.next_close_retry_at = 0.0
+        async with pool.lease_context():
+            pass
+        await _settle()
+
+    # Two close calls per attempt: the initial close plus MAX_CLOSE_RETRIES - 1
+    # reaper retries, then the pool gives up.
+    assert wedged.close_calls == 2 * MAX_CLOSE_RETRIES
+    assert wedged.closed is False
+
+    await pool.close()
+
+
+@pytest.mark.anyio
+async def test_one_waiting_request_starts_one_browser_launch() -> None:
+    factory = DelayedFakeBrowserFactory(0.01)
+    pool = BrowserPool(
+        browser_factory=factory,
+        min_browsers=1,
+        max_browsers=4,
+        max_contexts_per_browser=1,
+        browser_max_uses=1,
+        browser_max_age_seconds=3600,
+        acquire_timeout_seconds=5,
+    )
+    await pool.start()
+    assert len(factory.created) == 1
+
+    held = pool.lease_context()
+    await held.__aenter__()
+
+    async def waiter() -> None:
+        async with pool.lease_context():
+            pass
+
+    task = asyncio.create_task(waiter())
+    for _ in range(200):
+        if pool.snapshot().waiting_requests == 1:
+            break
+        await asyncio.sleep(0)
+
+    # Releasing the held lease retires that browser and wakes the waiter
+    # several times while its own launch is still in flight.
+    await held.__aexit__(None, None, None)
+    await asyncio.wait_for(task, timeout=5)
+    await asyncio.sleep(0.1)
+
+    # One waiter needs one browser. The create gate cannot see demand, so
+    # without a per-request cap it starts another launch on every wakeup and
+    # walks the pool up to max_browsers.
+    assert len(factory.created) == 2
+
+    await pool.close()

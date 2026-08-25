@@ -37,6 +37,13 @@ BROWSER_DISCONNECTED_MARKERS = (
 )
 
 
+# A browser whose physical close keeps failing is retried a bounded number of
+# times with backoff. Unbounded retries would start a fresh close task on every
+# acquisition and turn a passive leak into steady cleanup pressure.
+MAX_CLOSE_RETRIES = 3
+CLOSE_RETRY_MAX_BACKOFF_SECONDS = 60.0
+
+
 class PoolAcquireTimeout(TimeoutError):
     """Raised when no browser context capacity becomes available in time."""
 
@@ -60,6 +67,8 @@ class BrowserSlot:
     state: Literal["ready", "retiring", "closing"] = "ready"
     retire_reason: str | None = None
     recycle_recorded: bool = False
+    close_failures: int = 0
+    next_close_retry_at: float = 0.0
 
     @property
     def closing(self) -> bool:
@@ -312,7 +321,10 @@ class BrowserPool:
                 for task in list(self._create_tasks):
                     self._abandon_create_task_unlocked(task)
                 for slot in list(self._failed_close_slots):
-                    self._schedule_failed_close_retry_unlocked(slot)
+                    self._schedule_failed_close_retry_unlocked(
+                        slot,
+                        cleanup_scope=self._current_cleanup_scope(),
+                    )
                 for slot in list(self._slots):
                     self._mark_retiring_unlocked(slot, "shutdown")
                     if slot.active_contexts == 0:
@@ -657,6 +669,7 @@ class BrowserPool:
     ) -> _SlotReservation:
         deadline = time.monotonic() + self._acquire_timeout_seconds
         observed_failure_generation = self._create_failure_generation
+        launched = False
         while True:
             async with self._condition:
                 if self._closed:
@@ -687,11 +700,18 @@ class BrowserPool:
                     if failure is not None:
                         raise failure
 
+                # One launch per waiting request. The gate cannot see demand
+                # (_waiting_requests is only incremented below), so without this
+                # every unrelated wakeup during an in-flight launch starts
+                # another one, and a single request can drive the pool to
+                # max_browsers and consume a whole abandoned-launch generation.
                 if (
-                    len(self._slots) + len(self._create_tasks) < self._max_browsers
+                    not launched
+                    and len(self._slots) + len(self._create_tasks) < self._max_browsers
                     and len(self._create_watchers) < self._max_abandoned_creations
                 ):
                     self._start_create_task_unlocked(supervise=True)
+                    launched = True
                     self._publish_metrics_unlocked()
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -917,6 +937,29 @@ class BrowserPool:
                     slot,
                     reason=slot.retire_reason or "other",
                 )
+        self._retry_failed_closes_unlocked()
+
+    def _retry_failed_closes_unlocked(self) -> None:
+        """Reap browsers whose physical close failed.
+
+        Otherwise the only retry runs from ``close()``, so a wedged browser
+        process survives for the life of the service while its slot keeps
+        inflating ``closing_slots``. Attempts are bounded and backed off: a
+        permanently wedged handle must not start a fresh close task on every
+        acquisition and drain the cleanup budget.
+        """
+
+        if not self._failed_close_slots:
+            return
+        now = time.monotonic()
+        for slot in list(self._failed_close_slots):
+            if slot.close_failures >= MAX_CLOSE_RETRIES:
+                continue
+            if now < slot.next_close_retry_at:
+                continue
+            # No cleanup scope: this retry belongs to the pool, not to whichever
+            # request happens to be acquiring right now.
+            self._schedule_failed_close_retry_unlocked(slot, cleanup_scope=None)
 
     def _mark_retiring_unlocked(self, slot: BrowserSlot, reason: str) -> None:
         if slot.state == "closing":
@@ -1043,16 +1086,24 @@ class BrowserPool:
             self._failed_close_slots.discard(slot)
             self._physically_closed_slots.discard(slot)
         else:
+            slot.close_failures += 1
+            slot.next_close_retry_at = time.monotonic() + min(
+                CLOSE_RETRY_MAX_BACKOFF_SECONDS, 2.0**slot.close_failures
+            )
             self._failed_close_slots.add(slot)
         self._publish_metrics_unlocked()
         self._condition.notify_all()
 
-    def _schedule_failed_close_retry_unlocked(self, slot: BrowserSlot) -> asyncio.Task[None]:
+    def _schedule_failed_close_retry_unlocked(
+        self,
+        slot: BrowserSlot,
+        *,
+        cleanup_scope: CleanupScope | None,
+    ) -> asyncio.Task[None]:
         existing = self._close_tasks.get(slot)
         if existing is not None:
             return existing
         self._failed_close_slots.discard(slot)
-        cleanup_scope = self._current_cleanup_scope()
         return self._start_close_task_unlocked(
             slot,
             cleanup_scope=cleanup_scope,
