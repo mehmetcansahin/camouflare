@@ -2129,3 +2129,82 @@ async def test_media_blocking_removed_when_challenge_detected() -> None:
     # Media routes are installed at setup (disableMedia=True) then torn down once a
     # challenge is detected, because block_images breaks Cloudflare challenge solving.
     assert context.routes == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "crash_message",
+    [
+        "Page.goto: Page crashed",
+        "Page.goto: Navigation failed because page crashed!",
+        "Page.goto: Target crashed",
+    ],
+)
+async def test_page_crash_is_classified_as_a_browser_transport_failure(
+    crash_message: str,
+) -> None:
+    # A renderer crash is transient: the browser survives and a retry can work.
+    # Classified as an internal error it would be reported as non-retryable.
+    context = FakeContext()
+    page = await context.new_page()
+    page.goto_failures["domcontentloaded"] = RuntimeError(crash_message)
+
+    result = await solve_request(
+        V1Request(cmd="request.get", url="https://example.com", maxTimeout=60000),
+        context=context,
+        page=page,
+        allow_direct_http_fallback=False,
+    )
+
+    assert result.status == "error"
+    assert result.error_code is V1ErrorCode.BROWSER_TRANSPORT_CLOSED
+    assert result.retryable is True
+
+
+@pytest.mark.anyio
+async def test_page_crash_during_post_reports_an_uncertain_outcome() -> None:
+    # A crash mid-navigation cannot establish whether the POST was delivered.
+    context = FakeContext()
+    page = await context.new_page()
+    page.goto_failures["domcontentloaded"] = RuntimeError("Page.goto: Page crashed")
+
+    result = await solve_request(
+        V1Request(
+            cmd="request.post",
+            url="https://example.com/orders",
+            postData="item=1",
+            maxTimeout=60000,
+        ),
+        context=context,
+        page=page,
+    )
+
+    assert result.status == "error"
+    assert result.error_code is V1ErrorCode.BROWSER_TRANSPORT_CLOSED
+    assert result.request_outcome_unknown is True
+
+
+@pytest.mark.anyio
+async def test_url_containing_crashed_is_not_treated_as_a_crash() -> None:
+    # The markers are matched as substrings, so they must not fire on a target
+    # whose URL merely contains the word.
+    context = FakeContext()
+    page = await context.new_page()
+    page.goto_failures["domcontentloaded"] = RuntimeError(
+        "Page.goto: net::ERR_ABORTED at https://example.com/page-crashed"
+    )
+
+    result = await solve_request(
+        V1Request(
+            cmd="request.get",
+            url="https://example.com/page-crashed",
+            maxTimeout=60000,
+        ),
+        context=context,
+        page=page,
+        allow_direct_http_fallback=False,
+    )
+
+    assert result.status == "error"
+    assert result.error_code is V1ErrorCode.INTERNAL_ERROR
+    assert result.retryable is False

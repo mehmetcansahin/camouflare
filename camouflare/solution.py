@@ -34,6 +34,13 @@ BEST_EFFORT_BROWSER_ERROR_MARKERS = (
     "browser closed",
     "target closed",
     "target page, context or browser has been closed",
+    # A renderer crash kills the page, not the browser process, so it is a
+    # transient transport failure rather than a disconnect. Matched on the
+    # two-word forms Playwright emits ("Page crashed", "Navigation failed
+    # because page crashed!", "Target crashed") so a URL containing
+    # "crashed" cannot trip it.
+    "page crashed",
+    "target crashed",
 )
 
 logger = logging.getLogger(__name__)

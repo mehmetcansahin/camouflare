@@ -304,6 +304,34 @@ class DisconnectingFakeBrowserFactory(FakeBrowserFactory):
         return browser
 
 
+class WedgedCloseFakeBrowser(FakeBrowser):
+    """A browser whose physical close fails and leaves the process alive.
+
+    Mirrors a wedged Firefox tree: close() reports an error and the object is
+    never marked closed, so the pool cannot treat it as physically gone. The
+    error text deliberately avoids BROWSER_DISCONNECTED_MARKERS, which the pool
+    would otherwise accept as a successful close.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.close_calls = 0
+        self.close_should_fail = True
+
+    async def close(self) -> None:
+        self.close_calls += 1
+        if self.close_should_fail:
+            raise RuntimeError("Browser.close: connection is wedged")
+        self.closed = True
+
+
+class WedgedCloseFakeBrowserFactory(FakeBrowserFactory):
+    async def __call__(self) -> FakeBrowser:
+        browser = WedgedCloseFakeBrowser()
+        self.created.append(browser)
+        return browser
+
+
 class DelayedFakeSessionContext(FakeContext):
     def __init__(self, events: list[str]) -> None:
         super().__init__()
