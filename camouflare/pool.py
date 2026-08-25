@@ -889,8 +889,27 @@ class BrowserPool:
     def _is_soft_retire_reason(reason: str | None) -> bool:
         return reason in {"max_uses", "max_age"}
 
+    @staticmethod
+    def _is_slot_disconnected(slot: BrowserSlot) -> bool:
+        """Report a browser that died without a request having failed on it yet.
+
+        Playwright's ``is_connected`` reads a local flag set by the browser's
+        close event, so this costs no IPC and is safe to call while the pool
+        condition is held. Browsers that do not expose it count as connected.
+        """
+
+        probe = getattr(slot.browser, "is_connected", None)
+        return probe is not None and probe() is False
+
     def _refresh_recycling_unlocked(self) -> None:
         for slot in list(self._slots):
+            # Without this, a dead browser is only discovered when a request
+            # fails on it, so every request arriving before that first failure
+            # is handed the same corpse. Retire it before any slot is reserved.
+            if slot.state != "closing" and self._is_slot_disconnected(slot):
+                if not slot.recycle_recorded:
+                    record_browser_event("disconnected")
+                self._mark_retiring_unlocked(slot, "disconnected")
             if slot.state == "ready" and self._should_recycle(slot):
                 self._mark_retiring_unlocked(slot, self._recycle_reason(slot))
             if slot.state == "retiring" and slot.active_contexts == 0:

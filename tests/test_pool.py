@@ -9,7 +9,13 @@ import pytest
 from camouflare.browser import CamoufoxBrowserHandle
 from camouflare.cleanup import CleanupSupervisor
 from camouflare.pool import BrowserPool, PersistentCapacityError, PoolAcquireTimeout
-from tests.fakes import DelayedFakeBrowserFactory, FakeBrowser, FakeBrowserFactory, FakeContext
+from tests.fakes import (
+    DelayedFakeBrowserFactory,
+    DisconnectingFakeBrowserFactory,
+    FakeBrowser,
+    FakeBrowserFactory,
+    FakeContext,
+)
 
 
 @pytest.mark.anyio
@@ -1773,3 +1779,66 @@ async def test_prestart_browser_close_cancellation_releases_scope_hold() -> None
     assert factory.created[0].closed is True
     assert pool.snapshot().closing_slots == 0
     await cleanup.close()
+
+
+@pytest.mark.anyio
+async def test_dead_browser_is_retired_before_concurrent_requests_reserve_it() -> None:
+    factory = DisconnectingFakeBrowserFactory()
+    pool = BrowserPool(
+        browser_factory=factory,
+        min_browsers=1,
+        max_browsers=2,
+        max_contexts_per_browser=4,
+        browser_max_uses=100,
+        browser_max_age_seconds=3600,
+    )
+    await pool.start()
+    dead = factory.created[0]
+    dead.connected = False
+
+    async def lease() -> str:
+        async with pool.lease_context() as leased:
+            await leased.context.new_page()
+            return "ok"
+
+    results = await asyncio.gather(*(lease() for _ in range(4)), return_exceptions=True)
+    await pool.close()
+
+    # Without a liveness check every one of the four reserves the same corpse
+    # before any of them fails on it, so all four requests fail at once.
+    assert results == ["ok"] * 4
+    # The dead browser never served a context; replacements did.
+    assert dead.contexts == []
+    assert len(factory.created) > 1
+    assert all(browser.contexts == [] for browser in factory.created if not browser.connected)
+
+
+@pytest.mark.anyio
+async def test_browser_that_dies_mid_lease_is_not_served_again() -> None:
+    factory = DisconnectingFakeBrowserFactory()
+    pool = BrowserPool(
+        browser_factory=factory,
+        min_browsers=1,
+        max_browsers=2,
+        max_contexts_per_browser=2,
+        browser_max_uses=100,
+        browser_max_age_seconds=3600,
+    )
+    await pool.start()
+    dead = factory.created[0]
+
+    with pytest.raises(RuntimeError, match="has been closed"):
+        async with pool.lease_context() as leased:
+            assert leased.browser is dead
+            dead.connected = False
+            await leased.context.new_page()
+
+    # The lease failed after new_context succeeded, so the context closed
+    # cleanly and the slot was released without being discarded. The next
+    # acquisition must still not be handed the dead browser.
+    async with pool.lease_context() as leased:
+        assert leased.browser is not dead
+        await leased.context.new_page()
+
+    await pool.close()
+    assert len(factory.created) == 2

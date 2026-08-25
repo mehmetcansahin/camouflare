@@ -219,6 +219,8 @@ class FakePage:
 
 
 class FakeBrowser:
+    context_class: type[FakeContext] = FakeContext
+
     def __init__(self) -> None:
         self.contexts: list[FakeContext] = []
         self.context_options: list[dict[str, Any]] = []
@@ -229,7 +231,7 @@ class FakeBrowser:
         if self.fail_new_context:
             raise RuntimeError("new context failed")
         self.context_options.append(options)
-        context = FakeContext(self, options)
+        context = self.context_class(self, options)
         self.contexts.append(context)
         return context
 
@@ -255,6 +257,51 @@ class DelayedFakeBrowserFactory(FakeBrowserFactory):
     async def __call__(self) -> FakeBrowser:
         await asyncio.sleep(self.delay)
         return await super().__call__()
+
+
+class DisconnectingFakeContext(FakeContext):
+    """A context whose browser process can die underneath it."""
+
+    async def new_page(self) -> FakePage:
+        browser = self.browser
+        if browser is not None and not getattr(browser, "connected", True):
+            raise RuntimeError(
+                "BrowserContext.new_page: Target page, context or browser has been closed"
+            )
+        return await super().new_page()
+
+    async def close(self) -> None:
+        # Playwright's BrowserContext.close() early-returns once the context has
+        # seen its browser's close event, so closing a dead browser's context
+        # raises nothing at all.
+        self.closed = True
+
+
+class DisconnectingFakeBrowser(FakeBrowser):
+    """A browser that can lose its process the way a killed Firefox does."""
+
+    context_class = DisconnectingFakeContext
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.connected = True
+
+    def is_connected(self) -> bool:
+        return self.connected
+
+    async def new_context(self, **options: Any) -> FakeContext:
+        if not self.connected:
+            raise RuntimeError(
+                "Browser.new_context: Target page, context or browser has been closed"
+            )
+        return await super().new_context(**options)
+
+
+class DisconnectingFakeBrowserFactory(FakeBrowserFactory):
+    async def __call__(self) -> FakeBrowser:
+        browser = DisconnectingFakeBrowser()
+        self.created.append(browser)
+        return browser
 
 
 class DelayedFakeSessionContext(FakeContext):

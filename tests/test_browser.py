@@ -308,3 +308,91 @@ def test_playwright_protocol_patch_rejects_source_fingerprint_mismatch(
 
     assert status == "fingerprint_mismatch"
     assert "fingerprint was not recognized" in caplog.text
+
+
+@pytest.mark.anyio
+async def test_concurrent_camoufox_launches_never_overlap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Camoufox resolves the virtual display inside __aenter__ by mutating the
+    # shared os.environ and by reading /tmp lock files, neither of which is
+    # guarded. Overlapping launches therefore share one Xvfb and kill each
+    # other's browser, so the factory must serialise them.
+    in_flight = 0
+    max_in_flight = 0
+    fake_module = types.ModuleType("camoufox.async_api")
+
+    class FakeCamoufox:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        async def __aenter__(self) -> object:
+            nonlocal in_flight, max_in_flight
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+            try:
+                await asyncio.sleep(0)
+                return object()
+            finally:
+                in_flight -= 1
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+    fake_module.AsyncCamoufox = FakeCamoufox
+    monkeypatch.setitem(sys.modules, "camoufox.async_api", fake_module)
+    monkeypatch.setattr(browser, "validate_runtime_environment", lambda: None)
+    monkeypatch.setattr(browser, "patch_playwright_cancelled_protocol_future", lambda: None)
+    monkeypatch.setattr(browser, "patch_playwright_page_error_location", lambda: None)
+
+    factory = browser.make_camoufox_browser_factory(Settings())
+    handles = await asyncio.gather(*(factory() for _ in range(4)))
+
+    assert max_in_flight == 1
+    assert len(handles) == 4
+
+
+@pytest.mark.anyio
+async def test_failed_camoufox_launch_does_not_overlap_the_next_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Tearing down a half-launched manager kills its virtual display, so the
+    # failure path has to stay serialised against the following launch too.
+    events: list[str] = []
+    fake_module = types.ModuleType("camoufox.async_api")
+
+    class FakeCamoufox:
+        instances = 0
+
+        def __init__(self, **_: object) -> None:
+            type(self).instances += 1
+            self.index = type(self).instances
+
+        async def __aenter__(self) -> object:
+            events.append(f"enter{self.index}")
+            if self.index == 1:
+                raise RuntimeError("launch failed")
+            return object()
+
+        async def __aexit__(self, *_: object) -> None:
+            await asyncio.sleep(0)
+            events.append(f"exit{self.index}")
+
+    fake_module.AsyncCamoufox = FakeCamoufox
+    monkeypatch.setitem(sys.modules, "camoufox.async_api", fake_module)
+    monkeypatch.setattr(browser, "validate_runtime_environment", lambda: None)
+    monkeypatch.setattr(browser, "patch_playwright_cancelled_protocol_future", lambda: None)
+    monkeypatch.setattr(browser, "patch_playwright_page_error_location", lambda: None)
+
+    cleanup = CleanupSupervisor(timeout_seconds=1)
+    factory = browser.make_camoufox_browser_factory(
+        Settings(cleanup_timeout_seconds=1),
+        cleanup_supervisor=cleanup,
+    )
+
+    results = await asyncio.gather(factory(), factory(), return_exceptions=True)
+    await cleanup.close()
+
+    assert sum(isinstance(result, RuntimeError) for result in results) == 1
+    # The failed launch's teardown completes before the second launch starts.
+    assert events == ["enter1", "exit1", "enter2"]
