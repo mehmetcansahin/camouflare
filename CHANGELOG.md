@@ -5,6 +5,8 @@ All notable changes to Camouflare are documented here. The project follows
 
 ## [Unreleased]
 
+## [1.3.2] - 2026-08-25
+
 ### Fixed
 
 - Camoufox launches are serialized, so two browsers can no longer be started onto the
