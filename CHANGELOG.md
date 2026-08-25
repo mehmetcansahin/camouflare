@@ -5,6 +5,20 @@ All notable changes to Camouflare are documented here. The project follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Camoufox launches are serialized, so two browsers can no longer be started onto the
+  same virtual display. Camoufox resolves the display by mutating the shared process
+  environment from a worker thread and by reading `/tmp` lock files without a lock of
+  its own, so overlapping launches handed one Xvfb to two Firefox processes and the
+  first of the pair to exit or fail killed the display under the other.
+- The pool now checks browser liveness before reserving a context slot. A browser that
+  died was previously only discovered when a request failed on it, so every request
+  arriving in between was handed the same dead browser; a lease that failed after its
+  context was created also returned that browser to the pool as healthy, because the
+  context closed cleanly. Concurrent requests turned a single browser death into one
+  failure per in-flight request.
+
 ## [1.3.1] - 2026-07-26
 
 ### Changed

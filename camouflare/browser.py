@@ -254,6 +254,15 @@ def make_camoufox_browser_factory(
     *,
     cleanup_supervisor: CleanupSupervisor | None = None,
 ) -> BrowserFactory:
+    # Camoufox resolves the virtual display by mutating the live os.environ
+    # (camoufox.utils.launch_options aliases the mapping instead of copying it,
+    # and runs in a worker thread), and picks the display number from /tmp lock
+    # files without a lock of its own. Two launches that overlap therefore hand
+    # a single Xvfb to two Firefox processes, and the first of the pair to exit
+    # or fail kills that display under the other. Both races need the overlap,
+    # so serialising the launch is enough to close them.
+    launch_lock = asyncio.Lock()
+
     async def factory() -> CamoufoxBrowserHandle:
         validate_headless_mode(settings.headless)
         validate_runtime_environment()
@@ -279,24 +288,28 @@ def make_camoufox_browser_factory(
 
             launch_options["addons"] = [str(Path(get_addon_path()).absolute())]
         manager = AsyncCamoufox(**launch_options)
-        try:
-            browser = await manager.__aenter__()
-        except BaseException as exc:
-            cleanup_awaitable = manager.__aexit__(type(exc), exc, exc.__traceback__)
-            if cleanup_supervisor is not None:
-                cleanup_task = cleanup_supervisor.start(
-                    cleanup_awaitable,
-                    kind="browser",
-                    timeout_seconds=settings.cleanup_timeout_seconds,
-                )
-            else:
-                cleanup_task = asyncio.ensure_future(cleanup_awaitable)
-                cleanup_task.add_done_callback(_consume_background_future)
-            # The manager exit is independently owned. Further cancellation of the
-            # launch caller cannot cancel or orphan the physical cleanup.
-            with suppress(BaseException):
-                await asyncio.shield(cleanup_task)
-            raise
+        # The failure path stays inside the lock: tearing down a half-launched
+        # manager kills its virtual display, which must not overlap the next
+        # launch picking a display number.
+        async with launch_lock:
+            try:
+                browser = await manager.__aenter__()
+            except BaseException as exc:
+                cleanup_awaitable = manager.__aexit__(type(exc), exc, exc.__traceback__)
+                if cleanup_supervisor is not None:
+                    cleanup_task = cleanup_supervisor.start(
+                        cleanup_awaitable,
+                        kind="browser",
+                        timeout_seconds=settings.cleanup_timeout_seconds,
+                    )
+                else:
+                    cleanup_task = asyncio.ensure_future(cleanup_awaitable)
+                    cleanup_task.add_done_callback(_consume_background_future)
+                # The manager exit is independently owned. Further cancellation of the
+                # launch caller cannot cancel or orphan the physical cleanup.
+                with suppress(BaseException):
+                    await asyncio.shield(cleanup_task)
+                raise
         return CamoufoxBrowserHandle(manager, browser)
 
     return factory
