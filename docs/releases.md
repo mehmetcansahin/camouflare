@@ -1,0 +1,72 @@
+# Release record
+
+Published artifacts for every release, kept in the repository so that recovering them
+does not depend on CI artifact retention. The [rollback procedure](rollback.md) needs the
+last known-good image digest; these are those digests.
+
+GHCR version tags are immutable, but a digest is stronger than a tag: a tag names
+content, a digest is the content. Deploy by digest when the exact bits matter.
+
+```bash
+export CAMOUFLARE_IMAGE='ghcr.io/mehmetcansahin/camouflare@<index digest below>'
+docker compose pull
+docker compose up -d
+```
+
+Confirm what actually started. The label must equal the commit recorded for that release:
+
+```bash
+docker inspect <container> \
+  --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'
+```
+
+The per-architecture digests are recorded for evidence and for pinning a single platform.
+Normal deployments use the index digest and let the runtime select the platform.
+
+## 1.3.2 - 2026-08-25
+
+- Commit: `53df0cf758e8112be798929d43f79326ac4e326e`
+- Release run: https://github.com/mehmetcansahin/camouflare/actions/runs/32832420311
+- Index: `sha256:3225a20829db139b705c2fd68f494d24ac596efd7b5dc2945b43a8573c764745`
+- linux/amd64: `sha256:3e8cf34dfe6fcd42c32cf1e2cfdbc56bbad393831c9f52388c02a436a5a57feb`
+- linux/arm64: `sha256:cb6996d3a053f78b9ff004d80a419326dc8ae17115924ed023a6ebf4aec33187`
+
+## 1.3.1 - 2026-07-26
+
+- Commit: `01bbeb807a94ef3e19674486a92e3bc83acbe178`
+- Release run: https://github.com/mehmetcansahin/camouflare/actions/runs/30210675066
+- Index: `sha256:8f7c05dd3e785e4b27934c12811b07c733470182a7d09a522feb3bbffbf9b177`
+- linux/amd64: `sha256:69e10c955c75f61bbe87b0a2e0f76b98d5c64fa867175a63eac493aebf1cd07a`
+- linux/arm64: `sha256:21708b9d8b1526cd678d01ec4bad64481d641c8dcda50bab2f208cdfdcf4b94c`
+
+## 1.3.0 - 2026-07-22
+
+- Commit: `a31ed87ffe4eed93e7240808977cee23a9dcb222`
+- Release run: https://github.com/mehmetcansahin/camouflare/actions/runs/29953896489
+- Index: `sha256:37a57f2b3d430761ad5595e0863aaf79829eccd153163a7cda8cd7e733ca0c43`
+- linux/amd64: `sha256:ce1afea75f0afe0418a02e157c95f0323cdad38ca120b1fc5b0ef532b7cfe6ba`
+- linux/arm64: `sha256:e934fd9f4a5bf157fba2a45210ee6354ced5503b5975991049af388e163fff5e`
+
+## 1.2.0 - 2026-07-18
+
+- Commit: `87ab20fc2f8ac448352e083713c14cc5fb665619`
+- Release run: https://github.com/mehmetcansahin/camouflare/actions/runs/29645428644
+- Index: `sha256:accd869e3c1affac1884e5a666a898c25ceb5e80f11f383c5ee75cf0e5ae479d`
+- linux/amd64: `sha256:f43dfadd8976235b30c0cc59f2cb87ccaf2ce53854a608dd7e41c0cf76a07838`
+- linux/arm64: `sha256:0c1b4303fab69a67bfc5c9306bb6c37997b724bfc9e2cf98673b62641e45f5d1`
+
+## 1.1.0 - 2026-07-16
+
+- Commit: `11cf8e8e313437559e82f840b0ed7e102f7c31e0`
+- Release run: https://github.com/mehmetcansahin/camouflare/actions/runs/29492502081
+- Index: `sha256:76d38b0639a88fd95b1abba7d7d3eb055318ab4aa6252e5a509bc50300fbe40b`
+- linux/amd64: `sha256:69bd4bf72cd5fd054fce28e4701aa9cdee16b93f564035e46065a404752f3d29`
+- linux/arm64: `sha256:b776b49d105408db2c97403e6afdcde8a1bbab6557c76e642bd978f7d5626171`
+
+## 1.0.0 - 2026-07-14
+
+- Commit: `39791cac711f57c3676c6277a6a9f53ff8981664`
+- Release run: https://github.com/mehmetcansahin/camouflare/actions/runs/29401128357
+- Index: `sha256:8a606025617ba6a85906d111c12df4612255ab37bbe20fce1b204b1d7676afc5`
+- linux/amd64: `sha256:19ec2d77627236dc90fbb56a1e57a01d5eae815d3e1db41bf0957b08706f77c2`
+- linux/arm64: `sha256:589370a626f4395c84813de3c0051f52aae067803a69f34b5a21729ebb9434d8`

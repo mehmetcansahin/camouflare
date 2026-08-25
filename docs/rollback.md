@@ -6,8 +6,9 @@ tag to make it point at different content.
 
 ## Container rollback
 
-1. Identify the last known-good image digest from release evidence and verify its
-   provenance.
+1. Identify the last known-good image digest from the [release record](releases.md), or
+   from the release evidence artifact, and verify its provenance. The release record is
+   kept in the repository so recovery does not depend on CI artifact retention.
 2. Deploy that digest directly while investigating the failed release. With Compose, set
    `CAMOUFLARE_IMAGE` to the known-good digest or prior exact version tag.
 3. Leave the affected exact version tag unchanged for auditability; release automation

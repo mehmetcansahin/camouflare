@@ -52,7 +52,7 @@ change description and approve the protected `release` environment before public
   cleanup timeouts, and a growing browser-process count.
 - [ ] Observe production for at least one complete configured browser max-age window. If readiness
   or cleanup regresses, roll back to the recorded immutable digest using the documented procedure.
-- [ ] Record the published digests and workflow URL in the release record.
+- [ ] Record the published digests and workflow URL in the [release record](releases.md).
 - [ ] If publication is interrupted, re-run the same tag-push workflow event. The preflight
   reuses an existing GHCR version only after its platform manifests pass smoke, security,
   and source-revision checks.
