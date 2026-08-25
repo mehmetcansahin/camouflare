@@ -947,6 +947,38 @@ async def test_v1_emits_one_safe_structured_completion_event(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("payload", [b"{", b"", b"\xff"])
+async def test_v1_malformed_json_is_invalid_request_without_traceback(
+    payload: bytes,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    app = create_app(browser_factory=FakeBrowserFactory(), lifespan_enabled=False)
+
+    with caplog.at_level(logging.INFO, logger="camouflare.app"):
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.post(
+                "/v1",
+                content=payload,
+                headers={"content-type": "application/json"},
+            )
+
+    body = response.json()
+    assert response.status_code == 500
+    assert body["status"] == "error"
+    assert body["message"] == "Error: invalid JSON request payload."
+    assert body["errorCode"] == "INVALID_REQUEST"
+    assert body["retryable"] is False
+    completion = next(
+        record for record in caplog.records if record.message == "V1 request completed."
+    )
+    assert completion.error_code == "INVALID_REQUEST"  # type: ignore[attr-defined]
+    assert not any(record.exc_info for record in caplog.records)
+
+
+@pytest.mark.anyio
 async def test_v1_expected_error_has_completion_without_traceback(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

@@ -5,6 +5,15 @@ All notable changes to Camouflare are documented here. The project follows
 
 ## [Unreleased]
 
+## [1.3.3] - 2026-08-25
+
+### Fixed
+
+- Malformed JSON request bodies now return a stable `INVALID_REQUEST` envelope without
+  being logged as unexpected internal failures.
+- Release verification now rejects missing or stale changelog comparison links, and
+  the 1.3.2 references point to the correct release ranges.
+
 ## [1.3.2] - 2026-08-25
 
 ### Fixed
@@ -132,7 +141,9 @@ All notable changes to Camouflare are documented here. The project follows
 - High and critical dependency or container findings block releases unless covered by a
   reasoned, time-bounded exception.
 
-[Unreleased]: https://github.com/mehmetcansahin/camouflare/compare/v1.3.1...HEAD
+[Unreleased]: https://github.com/mehmetcansahin/camouflare/compare/v1.3.3...HEAD
+[1.3.3]: https://github.com/mehmetcansahin/camouflare/compare/v1.3.2...v1.3.3
+[1.3.2]: https://github.com/mehmetcansahin/camouflare/compare/v1.3.1...v1.3.2
 [1.3.1]: https://github.com/mehmetcansahin/camouflare/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/mehmetcansahin/camouflare/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/mehmetcansahin/camouflare/compare/v1.1.0...v1.2.0
