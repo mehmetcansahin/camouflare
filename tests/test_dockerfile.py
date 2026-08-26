@@ -78,7 +78,7 @@ def test_dockerfile_keeps_managed_python_out_of_ephemeral_tmp() -> None:
     assert "/app/.venv/bin/python --version" in dockerfile
 
 
-def test_compose_uses_balanced_pool_performance_profile() -> None:
+def test_compose_uses_isolated_browser_context_profile() -> None:
     compose = COMPOSE.read_text()
 
     assert '"127.0.0.1:8191:8191"' in compose
@@ -86,7 +86,7 @@ def test_compose_uses_balanced_pool_performance_profile() -> None:
     assert "change-me" not in compose
     assert 'POOL_MIN_BROWSERS: "2"' in compose
     assert 'POOL_MAX_BROWSERS: "2"' in compose
-    assert 'POOL_MAX_CONTEXTS_PER_BROWSER: "2"' in compose
+    assert 'POOL_MAX_CONTEXTS_PER_BROWSER: "1"' in compose
     assert 'POOL_ACQUIRE_TIMEOUT_MS: "10000"' in compose
     assert 'LOG_FORMAT: "json"' in compose
     assert "cap_drop:\n      - ALL" in compose

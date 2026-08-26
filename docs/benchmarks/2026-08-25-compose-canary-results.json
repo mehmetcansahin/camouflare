@@ -1,0 +1,200 @@
+{
+  "acceptance": {
+    "all_requests_succeeded": true,
+    "idle_after": true,
+    "minimum_recycles_observed": true,
+    "zero_acquire_timeouts": true,
+    "zero_asyncio_unhandled": true,
+    "zero_browser_transport_errors": true,
+    "zero_v1_errors": true
+  },
+  "aggregates": [
+    {
+      "client_errors": 0,
+      "client_p50_ms": 1325.325,
+      "client_p95_ms": 2387.507,
+      "concurrency": 1,
+      "internal_p50_ms": 1321.0,
+      "internal_p95_ms": 2378.0,
+      "load": "Sequential baseline",
+      "requests": 4,
+      "server_errors": 0,
+      "success_rate": 1.0,
+      "successes": 4,
+      "timeouts": 0
+    },
+    {
+      "client_errors": 0,
+      "client_p50_ms": 2483.697,
+      "client_p95_ms": 4270.124,
+      "concurrency": 4,
+      "internal_p50_ms": 2473.0,
+      "internal_p95_ms": 4253.0,
+      "load": "4 concurrent",
+      "requests": 12,
+      "server_errors": 0,
+      "success_rate": 1.0,
+      "successes": 12,
+      "timeouts": 0
+    }
+  ],
+  "diagnostics": {
+    "idle_after": {
+      "capacity_state": "available",
+      "cleanup": {
+        "by_kind": {},
+        "in_flight": 0,
+        "oldest_age_seconds": null
+      },
+      "pool": {
+        "active_contexts": 0,
+        "closing_slots": 0,
+        "creating_slots": 0,
+        "idle_recyclable_slots": 0,
+        "max_browsers": 2,
+        "max_contexts_per_browser": 1,
+        "max_slots": 2,
+        "persistent_contexts": 0,
+        "ready_browser_slots": 1,
+        "retiring_browser_slots": 0,
+        "transient_contexts": 0,
+        "usable_context_slots": 1,
+        "waiting_requests": 0
+      },
+      "runtime": {
+        "playwright_cancel_patch": "applied",
+        "playwright_version": "1.61.0"
+      },
+      "sessions": {
+        "active": 0,
+        "closing": 0,
+        "in_use": 0,
+        "max_sessions": 32
+      },
+      "status": "ok"
+    },
+    "idle_before": {
+      "capacity_state": "unavailable",
+      "cleanup": {
+        "by_kind": {},
+        "in_flight": 0,
+        "oldest_age_seconds": null
+      },
+      "pool": {
+        "active_contexts": 0,
+        "closing_slots": 0,
+        "creating_slots": 0,
+        "idle_recyclable_slots": 0,
+        "max_browsers": 2,
+        "max_contexts_per_browser": 1,
+        "max_slots": 2,
+        "persistent_contexts": 0,
+        "ready_browser_slots": 0,
+        "retiring_browser_slots": 0,
+        "transient_contexts": 0,
+        "usable_context_slots": 0,
+        "waiting_requests": 0
+      },
+      "runtime": {
+        "playwright_cancel_patch": "applied",
+        "playwright_version": "1.61.0"
+      },
+      "sessions": {
+        "active": 0,
+        "closing": 0,
+        "in_use": 0,
+        "max_sessions": 32
+      },
+      "status": "ok"
+    }
+  },
+  "environment": {
+    "client_os": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+    "client_python": "3.14.7",
+    "image": "ghcr.io/mehmetcansahin/camouflare@sha256:82cf3cc28a6da5cb89cbbef820e6cfd158c61fa39e30479b5f4238e090213e42",
+    "label": "Docker Desktop on Apple M1; linux/arm64; safe profile pool min=2 max=2 contexts=1; browser max age=1 minute; browser max uses=2; deterministic host-local HTTP target"
+  },
+  "failures": [],
+  "generated_at": "2026-08-25T20:53:00.374990Z",
+  "method": {
+    "api_max_timeout_ms": 60000,
+    "client_timeout_seconds": 70,
+    "command": "request.get",
+    "concurrency_levels": [
+      4
+    ],
+    "idle_gate": "active=0, waiting=0, creating=0, closing=0, cleanup_in_flight=0",
+    "latency_percentiles_include": "successful requests only",
+    "metrics_required": true,
+    "minimum_recycles": 3,
+    "percentile_method": "nearest-rank",
+    "rounds_per_concurrency": 3,
+    "sequential_requests": 4,
+    "warmup_requests_excluded": 4
+  },
+  "prometheus_delta": {
+    "camouflare_browser_event_total{event=\"created\"}": 9.0,
+    "camouflare_browser_event_total{event=\"recycled\"}": 8.0,
+    "camouflare_browser_recycle_total{reason=\"max_uses\"}": 8.0,
+    "camouflare_challenge_total{outcome=\"not_detected\"}": 16.0,
+    "camouflare_cleanup_total{kind=\"browser\",result=\"success\"}": 8.0,
+    "camouflare_cleanup_total{kind=\"captcha\",result=\"success\"}": 16.0,
+    "camouflare_cleanup_total{kind=\"context\",result=\"success\"}": 16.0,
+    "camouflare_cleanup_total{kind=\"page\",result=\"success\"}": 16.0,
+    "camouflare_cleanup_total{kind=\"proxy\",result=\"success\"}": 16.0,
+    "camouflare_pool_acquire_total{kind=\"transient\",result=\"success\"}": 16.0,
+    "camouflare_request_total{command=\"request.get\",result=\"ok\"}": 16.0
+  },
+  "schema_version": 2,
+  "service": {
+    "base_url": "http://127.0.0.1:18193",
+    "target_url": "http://host.docker.internal:18194/",
+    "version": "1.3.3"
+  },
+  "successful_latency_samples_ms": {
+    "concurrency_4": {
+      "client": [
+        2436.807,
+        3352.944,
+        4270.124,
+        3376.806,
+        1456.28,
+        2592.755,
+        2434.077,
+        3532.766,
+        1392.684,
+        2483.697,
+        3336.432,
+        2289.316
+      ],
+      "internal": [
+        2427,
+        3327,
+        4253,
+        3361,
+        1445,
+        2578,
+        2420,
+        3518,
+        1380,
+        2473,
+        3316,
+        2260
+      ]
+    },
+    "sequential": {
+      "client": [
+        2236.49,
+        1325.325,
+        2387.507,
+        1317.122
+      ],
+      "internal": [
+        2218,
+        1321,
+        2378,
+        1313
+      ]
+    }
+  }
+}

@@ -1,0 +1,294 @@
+{
+  "acceptance": {
+    "all_requests_succeeded": true,
+    "idle_after": true,
+    "zero_acquire_timeouts": true,
+    "zero_asyncio_unhandled": true,
+    "zero_browser_transport_errors": true,
+    "zero_v1_errors": true
+  },
+  "aggregates": [
+    {
+      "client_errors": 0,
+      "client_p50_ms": 827.073,
+      "client_p95_ms": 908.244,
+      "concurrency": 1,
+      "internal_p50_ms": 822.0,
+      "internal_p95_ms": 904.0,
+      "load": "Sequential baseline",
+      "requests": 10,
+      "server_errors": 0,
+      "success_rate": 1.0,
+      "successes": 10,
+      "timeouts": 0
+    },
+    {
+      "client_errors": 0,
+      "client_p50_ms": 772.395,
+      "client_p95_ms": 828.775,
+      "concurrency": 1,
+      "internal_p50_ms": 767.0,
+      "internal_p95_ms": 824.0,
+      "load": "1 concurrent",
+      "requests": 5,
+      "server_errors": 0,
+      "success_rate": 1.0,
+      "successes": 5,
+      "timeouts": 0
+    },
+    {
+      "client_errors": 0,
+      "client_p50_ms": 1323.837,
+      "client_p95_ms": 1924.725,
+      "concurrency": 2,
+      "internal_p50_ms": 1311.0,
+      "internal_p95_ms": 1918.0,
+      "load": "2 concurrent",
+      "requests": 10,
+      "server_errors": 0,
+      "success_rate": 1.0,
+      "successes": 10,
+      "timeouts": 0
+    },
+    {
+      "client_errors": 0,
+      "client_p50_ms": 1465.561,
+      "client_p95_ms": 2612.261,
+      "concurrency": 4,
+      "internal_p50_ms": 1444.0,
+      "internal_p95_ms": 2592.0,
+      "load": "4 concurrent",
+      "requests": 20,
+      "server_errors": 0,
+      "success_rate": 1.0,
+      "successes": 20,
+      "timeouts": 0
+    }
+  ],
+  "diagnostics": {
+    "idle_after": {
+      "capacity_state": "available",
+      "cleanup": {
+        "by_kind": {},
+        "in_flight": 0,
+        "oldest_age_seconds": null
+      },
+      "pool": {
+        "active_contexts": 0,
+        "closing_slots": 0,
+        "creating_slots": 0,
+        "idle_recyclable_slots": 0,
+        "max_browsers": 2,
+        "max_contexts_per_browser": 1,
+        "max_slots": 2,
+        "persistent_contexts": 0,
+        "ready_browser_slots": 2,
+        "retiring_browser_slots": 0,
+        "transient_contexts": 0,
+        "usable_context_slots": 2,
+        "waiting_requests": 0
+      },
+      "runtime": {
+        "playwright_cancel_patch": "applied",
+        "playwright_version": "1.61.0"
+      },
+      "sessions": {
+        "active": 0,
+        "closing": 0,
+        "in_use": 0,
+        "max_sessions": 32
+      },
+      "status": "ok"
+    },
+    "idle_before": {
+      "capacity_state": "available",
+      "cleanup": {
+        "by_kind": {},
+        "in_flight": 0,
+        "oldest_age_seconds": null
+      },
+      "pool": {
+        "active_contexts": 0,
+        "closing_slots": 0,
+        "creating_slots": 0,
+        "idle_recyclable_slots": 0,
+        "max_browsers": 2,
+        "max_contexts_per_browser": 1,
+        "max_slots": 2,
+        "persistent_contexts": 0,
+        "ready_browser_slots": 2,
+        "retiring_browser_slots": 0,
+        "transient_contexts": 0,
+        "usable_context_slots": 2,
+        "waiting_requests": 0
+      },
+      "runtime": {
+        "playwright_cancel_patch": "applied",
+        "playwright_version": "1.61.0"
+      },
+      "sessions": {
+        "active": 0,
+        "closing": 0,
+        "in_use": 0,
+        "max_sessions": 32
+      },
+      "status": "ok"
+    }
+  },
+  "environment": {
+    "client_os": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+    "client_python": "3.14.7",
+    "image": "ghcr.io/mehmetcansahin/camouflare@sha256:82cf3cc28a6da5cb89cbbef820e6cfd158c61fa39e30479b5f4238e090213e42",
+    "label": "Docker Desktop on Apple M1; linux/arm64; 4 GiB memory; 2 GiB shm; 1024 PIDs; safe profile pool min=2 max=2 contexts=1; deterministic host-local HTTP target"
+  },
+  "failures": [],
+  "generated_at": "2026-08-25T20:51:39.066352Z",
+  "method": {
+    "api_max_timeout_ms": 60000,
+    "client_timeout_seconds": 70,
+    "command": "request.get",
+    "concurrency_levels": [
+      1,
+      2,
+      4
+    ],
+    "idle_gate": "active=0, waiting=0, creating=0, closing=0, cleanup_in_flight=0",
+    "latency_percentiles_include": "successful requests only",
+    "metrics_required": true,
+    "percentile_method": "nearest-rank",
+    "rounds_per_concurrency": 5,
+    "sequential_requests": 10,
+    "warmup_requests_excluded": 3
+  },
+  "prometheus_delta": {
+    "camouflare_challenge_total{outcome=\"not_detected\"}": 45.0,
+    "camouflare_cleanup_total{kind=\"captcha\",result=\"success\"}": 45.0,
+    "camouflare_cleanup_total{kind=\"context\",result=\"success\"}": 45.0,
+    "camouflare_cleanup_total{kind=\"page\",result=\"success\"}": 45.0,
+    "camouflare_cleanup_total{kind=\"proxy\",result=\"success\"}": 45.0,
+    "camouflare_pool_acquire_total{kind=\"transient\",result=\"success\"}": 45.0,
+    "camouflare_request_total{command=\"request.get\",result=\"ok\"}": 45.0
+  },
+  "schema_version": 2,
+  "service": {
+    "base_url": "http://127.0.0.1:18193",
+    "target_url": "http://host.docker.internal:18194/",
+    "version": "1.3.3"
+  },
+  "successful_latency_samples_ms": {
+    "concurrency_1": {
+      "client": [
+        760.559,
+        828.775,
+        755.163,
+        772.395,
+        778.267
+      ],
+      "internal": [
+        757,
+        824,
+        751,
+        767,
+        774
+      ]
+    },
+    "concurrency_2": {
+      "client": [
+        881.281,
+        1886.253,
+        1008.13,
+        1649.107,
+        967.991,
+        1323.837,
+        1175.432,
+        1908.978,
+        1924.725,
+        1864.833
+      ],
+      "internal": [
+        876,
+        1879,
+        993,
+        1637,
+        951,
+        1311,
+        1129,
+        1898,
+        1918,
+        1850
+      ]
+    },
+    "concurrency_4": {
+      "client": [
+        1308.526,
+        1465.561,
+        2612.261,
+        2492.935,
+        1193.679,
+        1160.869,
+        2354.235,
+        2221.132,
+        1077.762,
+        1204.833,
+        2574.896,
+        2670.343,
+        969.574,
+        930.702,
+        1848.225,
+        2107.35,
+        979.082,
+        1083.216,
+        1970.339,
+        2216.616
+      ],
+      "internal": [
+        1300,
+        1444,
+        2592,
+        2473,
+        1183,
+        1149,
+        2341,
+        2207,
+        1069,
+        1189,
+        2560,
+        2659,
+        960,
+        920,
+        1833,
+        2091,
+        967,
+        1065,
+        1954,
+        2199
+      ]
+    },
+    "sequential": {
+      "client": [
+        877.608,
+        837.64,
+        770.523,
+        814.373,
+        880.504,
+        806.142,
+        820.753,
+        827.073,
+        859.858,
+        908.244
+      ],
+      "internal": [
+        872,
+        831,
+        766,
+        811,
+        877,
+        799,
+        815,
+        822,
+        855,
+        904
+      ]
+    }
+  }
+}

@@ -65,13 +65,18 @@ async def test_pool_recycles_browser_after_max_uses() -> None:
 
     async with pool.lease_context():
         pass
+    await _wait_for_warm_pool(pool, 1)
     async with pool.lease_context():
         pass
+    await _wait_for_warm_pool(pool, 1)
 
     await pool.close()
 
-    assert len(factory.created) == 2
+    # Each retired browser is replaced in the background, so the pool was warm
+    # again before the second lease and after it.
+    assert len(factory.created) == 3
     assert factory.created[0].closed is True
+    assert factory.created[1].closed is True
 
 
 @pytest.mark.anyio
@@ -1949,9 +1954,11 @@ async def test_one_waiting_request_starts_one_browser_launch() -> None:
     held = pool.lease_context()
     await held.__aenter__()
 
+    launches_when_served: list[int] = []
+
     async def waiter() -> None:
         async with pool.lease_context():
-            pass
+            launches_when_served.append(len(factory.created))
 
     task = asyncio.create_task(waiter())
     for _ in range(200):
@@ -1963,11 +1970,237 @@ async def test_one_waiting_request_starts_one_browser_launch() -> None:
     # several times while its own launch is still in flight.
     await held.__aexit__(None, None, None)
     await asyncio.wait_for(task, timeout=5)
-    await asyncio.sleep(0.1)
 
     # One waiter needs one browser. The create gate cannot see demand, so
     # without a per-request cap it starts another launch on every wakeup and
-    # walks the pool up to max_browsers.
-    assert len(factory.created) == 2
+    # walks the pool up to max_browsers. The background replacement for the
+    # retired browser and the waiter's own launch never both run either.
+    assert launches_when_served == [2]
 
+    # The waiter's browser retires after its single use and is replaced in the
+    # background, which is the only launch after the waiter was served.
+    await _wait_for_warm_pool(pool, 1)
+    assert len(factory.created) == 3
+
+    await pool.close()
+
+
+async def _wait_for_warm_pool(pool: BrowserPool, ready_browsers: int) -> None:
+    for _ in range(500):
+        snapshot = pool.snapshot()
+        if snapshot.ready_browser_slots >= ready_browsers and snapshot.creating_slots == 0:
+            return
+        await asyncio.sleep(0.005)
+    raise AssertionError(f"pool never reached {ready_browsers} ready browsers: {pool.snapshot()}")
+
+
+@pytest.mark.anyio
+async def test_recycled_browser_is_replaced_without_waiting_for_a_request() -> None:
+    factory = FakeBrowserFactory()
+    pool = BrowserPool(
+        browser_factory=factory,
+        min_browsers=1,
+        max_browsers=1,
+        max_contexts_per_browser=1,
+        browser_max_uses=1,
+    )
+    await pool.start()
+
+    async with pool.lease_context():
+        pass
+    await _wait_for_warm_pool(pool, 1)
+
+    assert len(factory.created) == 2
+    assert factory.created[0].closed is True
+    assert factory.created[1].closed is False
+    await pool.close()
+
+
+@pytest.mark.anyio
+async def test_maintain_retires_an_aged_idle_browser_and_relaunches() -> None:
+    factory = FakeBrowserFactory()
+    pool = BrowserPool(
+        browser_factory=factory,
+        min_browsers=1,
+        max_browsers=1,
+        max_contexts_per_browser=1,
+        browser_max_age_seconds=60,
+    )
+    await pool.start()
+    pool._slots[0].created_at -= 61
+
+    await pool.maintain()
+    await _wait_for_warm_pool(pool, 1)
+
+    assert len(factory.created) == 2
+    assert factory.created[0].closed is True
+    assert pool.snapshot().retiring_browser_slots == 0
+    await pool.close()
+
+
+@pytest.mark.anyio
+async def test_maintain_does_not_launch_before_start_or_after_close() -> None:
+    factory = FakeBrowserFactory()
+    pool = BrowserPool(browser_factory=factory, min_browsers=1, max_browsers=1)
+
+    await pool.maintain()
+    assert factory.created == []
+
+    await pool.start()
+    await pool.close()
+    await pool.maintain()
+    assert len(factory.created) == 1
+
+
+@pytest.mark.anyio
+async def test_replenish_never_exceeds_max_browsers_while_launches_are_pending() -> None:
+    factory = DelayedFakeBrowserFactory(0.02)
+    pool = BrowserPool(
+        browser_factory=factory,
+        min_browsers=2,
+        max_browsers=2,
+        max_contexts_per_browser=1,
+        browser_max_age_seconds=60,
+    )
+    await pool.start()
+    for slot in pool._slots:
+        slot.created_at -= 61
+
+    await pool.maintain()
+    await pool.maintain()
+    await pool.maintain()
+    await _wait_for_warm_pool(pool, 2)
+
+    assert len(factory.created) == 4
+    await pool.close()
+
+
+@pytest.mark.anyio
+async def test_request_without_room_is_served_by_the_background_replacement() -> None:
+    factory = DelayedFakeBrowserFactory(0.01)
+    pool = BrowserPool(
+        browser_factory=factory,
+        min_browsers=1,
+        max_browsers=1,
+        max_contexts_per_browser=1,
+        browser_max_uses=1,
+        acquire_timeout_seconds=5,
+    )
+    await pool.start()
+
+    # Releasing retires the only browser; its replacement launches in the
+    # background as soon as the close finishes. With no room for a launch of its
+    # own, the next request waits for that replacement instead of timing out.
+    async with pool.lease_context():
+        pass
+
+    async with pool.lease_context() as lease:
+        assert lease.browser is factory.created[1]
+        assert len(factory.created) == 2
+
+    await _wait_for_warm_pool(pool, 1)
+    assert len(factory.created) == 3
+    await pool.close()
+
+
+@pytest.mark.anyio
+async def test_replenish_yields_to_a_waiting_request() -> None:
+    factory = DelayedFakeBrowserFactory(0.01)
+    pool = BrowserPool(
+        browser_factory=factory,
+        min_browsers=1,
+        max_browsers=4,
+        max_contexts_per_browser=1,
+        browser_max_uses=1,
+        acquire_timeout_seconds=5,
+    )
+    await pool.start()
+    held = pool.lease_context()
+    await held.__aenter__()
+
+    launches_when_served: list[int] = []
+
+    async def waiter() -> None:
+        async with pool.lease_context():
+            launches_when_served.append(len(factory.created))
+
+    task = asyncio.create_task(waiter())
+    for _ in range(200):
+        if pool.snapshot().waiting_requests == 1:
+            break
+        await asyncio.sleep(0)
+
+    # The held browser retires on release and closes; the waiter is already
+    # queued, so it launches for itself and the background replacement stays
+    # out of the way even though the pool has room for four browsers.
+    await held.__aexit__(None, None, None)
+    await asyncio.wait_for(task, timeout=5)
+    assert launches_when_served == [2]
+
+    await _wait_for_warm_pool(pool, 1)
+    assert len(factory.created) == 3
+    await pool.close()
+
+
+@pytest.mark.anyio
+async def test_background_replacement_waits_for_closing_browsers() -> None:
+    class SlowCloseBrowser(FakeBrowser):
+        async def close(self) -> None:
+            await asyncio.sleep(0.03)
+            self.closed = True
+
+    class SlowCloseFactory(FakeBrowserFactory):
+        async def __call__(self) -> FakeBrowser:
+            browser = SlowCloseBrowser()
+            self.created.append(browser)
+            return browser
+
+    factory = SlowCloseFactory()
+    pool = BrowserPool(
+        browser_factory=factory,
+        min_browsers=2,
+        max_browsers=2,
+        max_contexts_per_browser=1,
+        browser_max_age_seconds=60,
+    )
+    await pool.start()
+    for slot in pool._slots:
+        slot.created_at -= 61
+
+    # Both browsers age out in the same tick. Their replacements must not launch
+    # while the old processes are still closing, or the tick would briefly run
+    # twice max_browsers processes.
+    await pool.maintain()
+    peak = 0
+    for _ in range(60):
+        snapshot = pool.snapshot()
+        peak = max(peak, snapshot.browser_slots + snapshot.creating_slots + snapshot.closing_slots)
+        await asyncio.sleep(0.002)
+    await _wait_for_warm_pool(pool, 2)
+
+    assert peak <= 2
+    assert len(factory.created) == 4
+    await pool.close()
+
+
+@pytest.mark.anyio
+async def test_maintain_during_start_does_not_overshoot_min_browsers() -> None:
+    factory = DelayedFakeBrowserFactory(0.02)
+    pool = BrowserPool(
+        browser_factory=factory,
+        min_browsers=2,
+        max_browsers=2,
+        max_contexts_per_browser=1,
+    )
+
+    starting = asyncio.create_task(pool.start())
+    while not starting.done():
+        await pool.maintain()
+        await asyncio.sleep(0.001)
+    await starting
+    await _wait_for_warm_pool(pool, 2)
+
+    # start() hands its browsers over in a separate registration step; a tick
+    # landing in that window must not treat the empty pool as missing browsers.
+    assert len(factory.created) == 2
     await pool.close()

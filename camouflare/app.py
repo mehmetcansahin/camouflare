@@ -6,7 +6,7 @@ import logging
 import math
 import secrets
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager, suppress
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any, Literal
@@ -64,6 +64,7 @@ from camouflare.models import (
     DiagnosticsSessionStatus,
     HealthResponse,
     IndexResponse,
+    ReadyResponse,
     V1Request,
     V1Response,
 )
@@ -246,14 +247,35 @@ def create_app(
 
     @app.get(
         "/ready",
-        response_model=HealthResponse,
+        response_model=ReadyResponse,
+        response_model_exclude_none=True,
         tags=["Service"],
         summary="Check browser readiness",
         description=(
-            "Leases a browser context, opens a page, and evaluates JavaScript. "
+            "Probes browser readiness by leasing a browser context, opening a page, "
+            "and evaluating JavaScript. When every context slot is held by a browser "
+            "that is still serving, returns 200 with capacity_state 'saturated' from "
+            "the pool snapshot instead of queueing a probe behind live requests. "
             "Returns 503 when the browser pool cannot serve a page."
         ),
         responses={
+            200: {
+                "description": "Browser probe succeeded, or the pool is full and serving.",
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "probed": {"value": {"status": "ok"}},
+                            "saturated": {
+                                "value": {
+                                    "status": "ok",
+                                    "capacity_state": "saturated",
+                                    "message": "Every browser context slot is in use.",
+                                }
+                            },
+                        }
+                    }
+                },
+            },
             503: {
                 "description": "Browser pool unavailable.",
                 "content": {
@@ -261,16 +283,38 @@ def create_app(
                         "example": {"status": "error", "message": "browser unavailable"}
                     }
                 },
-            }
+            },
         },
     )
     async def ready() -> Any:
         started = time.monotonic()
-        probe_task = asyncio.create_task(
-            _readiness_probe(app),
-            name="camouflare-readiness-probe",
-        )
         try:
+            # A pool whose every context slot is held by a browser that still
+            # serves is full, not broken. Leasing a probe context there would queue
+            # behind live requests for the acquire timeout and then report 503, so
+            # answer from the pool's own view instead. A dead browser process is
+            # only noticed when something looks at it, so retire any disconnected
+            # browser first: its contexts must not count as serving.
+            refresh: Callable[[], Awaitable[None]] | None = getattr(app.state.pool, "refresh", None)
+            if refresh is not None:
+                await refresh()
+            full_and_serving: Callable[[], bool] | None = getattr(
+                app.state.pool, "is_full_and_serving", None
+            )
+            if full_and_serving is not None and full_and_serving():
+                observe_readiness(result="saturated", duration_seconds=time.monotonic() - started)
+                return ReadyResponse(
+                    status="ok",
+                    capacity_state="saturated",
+                    message=(
+                        "Every browser context slot is in use; the browser probe was "
+                        "skipped so readiness does not queue behind live requests."
+                    ),
+                )
+            probe_task = asyncio.create_task(
+                _readiness_probe(app),
+                name="camouflare-readiness-probe",
+            )
             await _await_with_hard_deadline(
                 probe_task,
                 timeout_seconds=settings.readiness_timeout_seconds,

@@ -112,6 +112,9 @@ class Settings:
     session_reaper_interval_seconds: int = field(
         default_factory=lambda: _int_env("SESSION_REAPER_INTERVAL_SECONDS", 30)
     )
+    pool_maintenance_interval_seconds: int = field(
+        default_factory=lambda: _int_env("POOL_MAINTENANCE_INTERVAL_SECONDS", 15)
+    )
     shutdown_timeout_seconds: int = field(
         default_factory=lambda: _int_env("SHUTDOWN_TIMEOUT_SECONDS", 30)
     )
@@ -203,6 +206,7 @@ def _validate_settings(settings: Settings) -> None:
         "MAX_TIMEOUT_MS": settings.max_timeout_ms,
         "MAX_SESSION_TTL_MINUTES": settings.max_session_ttl_minutes,
         "SESSION_REAPER_INTERVAL_SECONDS": settings.session_reaper_interval_seconds,
+        "POOL_MAINTENANCE_INTERVAL_SECONDS": settings.pool_maintenance_interval_seconds,
         "SHUTDOWN_TIMEOUT_SECONDS": settings.shutdown_timeout_seconds,
         "CLEANUP_TIMEOUT_SECONDS": settings.cleanup_timeout_seconds,
         "READINESS_TIMEOUT_MS": settings.readiness_timeout_ms,

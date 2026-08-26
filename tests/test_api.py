@@ -28,7 +28,13 @@ from camouflare.limits import ResourceLimitError
 from camouflare.metrics import REQUEST_COUNTER
 from camouflare.models import Solution, V1Request, V1Response
 from camouflare.sessions import SessionManager
-from tests.fakes import FakeBrowser, FakeBrowserFactory, FakeContext, FakePage
+from tests.fakes import (
+    DisconnectingFakeBrowserFactory,
+    FakeBrowser,
+    FakeBrowserFactory,
+    FakeContext,
+    FakePage,
+)
 
 
 def _streaming_request(body: bytes, *, content_length: int | None = None) -> Request:
@@ -1270,6 +1276,136 @@ async def test_ready_reports_browser_pool_readiness() -> None:
 
 
 @pytest.mark.anyio
+async def test_ready_reports_saturated_without_leasing_when_every_slot_is_busy() -> None:
+    factory = FakeBrowserFactory()
+    app = create_app(
+        settings=Settings(
+            pool_min_browsers=1,
+            pool_max_browsers=1,
+            pool_max_contexts_per_browser=1,
+            pool_acquire_timeout_ms=5_000,
+        ),
+        browser_factory=factory,
+        lifespan_enabled=False,
+    )
+    await app.state.pool.start()
+
+    try:
+        async with app.state.pool.lease_context(**_context_options(None)):
+            started = time.monotonic()
+            async with AsyncClient(
+                transport=ASGITransport(app=app),
+                base_url="http://test",
+            ) as client:
+                response = await client.get("/ready")
+            elapsed = time.monotonic() - started
+            # The probe never leased a second context on the only browser.
+            assert len(factory.created[0].contexts) == 1
+    finally:
+        await app.state.pool.close()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["capacity_state"] == "saturated"
+    assert "probe was skipped" in body["message"]
+    assert elapsed < 1.0
+
+
+@pytest.mark.anyio
+async def test_ready_reports_saturated_while_a_busy_browser_past_its_limit_serves() -> None:
+    factory = FakeBrowserFactory()
+    app = create_app(
+        settings=Settings(
+            pool_min_browsers=1,
+            pool_max_browsers=1,
+            pool_max_contexts_per_browser=1,
+            browser_max_uses=1,
+            pool_acquire_timeout_ms=200,
+        ),
+        browser_factory=factory,
+        lifespan_enabled=False,
+    )
+    await app.state.pool.start()
+
+    try:
+        # The single use retires the browser at lease time; it keeps serving its
+        # context, so the pool is full and working, not recovering.
+        async with app.state.pool.lease_context(**_context_options(None)):
+            assert app.state.pool.snapshot().retiring_browser_slots == 1
+            started = time.monotonic()
+            async with AsyncClient(
+                transport=ASGITransport(app=app),
+                base_url="http://test",
+            ) as client:
+                response = await client.get("/ready")
+            elapsed = time.monotonic() - started
+    finally:
+        await app.state.pool.close()
+
+    assert response.status_code == 200
+    assert response.json()["capacity_state"] == "saturated"
+    assert elapsed < 0.15
+
+
+@pytest.mark.anyio
+async def test_ready_maps_a_failing_pool_refresh_to_503() -> None:
+    app = create_app(browser_factory=FakeBrowserFactory(), lifespan_enabled=False)
+    await app.state.pool.start()
+
+    async def broken_refresh() -> None:
+        raise RuntimeError("Transient-context accounting exceeds active contexts")
+
+    app.state.pool.refresh = broken_refresh  # type: ignore[method-assign]
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.get("/ready")
+    finally:
+        await app.state.pool.close()
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "status": "error",
+        "message": "Transient-context accounting exceeds active contexts",
+    }
+
+
+@pytest.mark.anyio
+async def test_ready_probes_a_dead_busy_browser_instead_of_calling_it_saturated() -> None:
+    factory = DisconnectingFakeBrowserFactory()
+    app = create_app(
+        settings=Settings(
+            pool_min_browsers=1,
+            pool_max_browsers=1,
+            pool_max_contexts_per_browser=1,
+            pool_acquire_timeout_ms=200,
+        ),
+        browser_factory=factory,
+        lifespan_enabled=False,
+    )
+    await app.state.pool.start()
+
+    try:
+        async with app.state.pool.lease_context(**_context_options(None)):
+            # The only browser dies under its live lease. Its context is still
+            # counted as active, so a raw snapshot would look saturated.
+            factory.created[0].connected = False
+            async with AsyncClient(
+                transport=ASGITransport(app=app),
+                base_url="http://test",
+            ) as client:
+                response = await client.get("/ready")
+    finally:
+        await app.state.pool.close()
+
+    assert response.status_code == 503
+    assert response.json()["status"] == "error"
+
+
+@pytest.mark.anyio
 async def test_metrics_scrape_refreshes_idle_max_age_capacity_gauges() -> None:
     app = create_app(
         settings=Settings(
@@ -1913,6 +2049,17 @@ async def test_no_session_context_close_failure_still_returns_solution() -> None
             "/v1", json={"cmd": "request.get", "url": "https://example.com/next"}
         )
 
+    # Each failed context close discards its browser, and the pool replaces a
+    # discarded browser in the background. Whether the second request reused
+    # that replacement or launched for itself depends on timing, so wait for
+    # the pool to settle and check the invariants rather than a launch count.
+    for _ in range(500):
+        snapshot = app.state.pool.snapshot()
+        if snapshot.creating_slots == 0 and snapshot.closing_slots == 0:
+            break
+        await asyncio.sleep(0.005)
+    settled = app.state.pool.snapshot()
+    live_browsers = [browser for browser in factory.created if not browser.closed]
     await app.state.pool.close()
 
     body = response.json()
@@ -1920,8 +2067,11 @@ async def test_no_session_context_close_failure_still_returns_solution() -> None
     assert body["status"] == "ok"
     assert body["solution"]["url"] == "https://example.com"
     assert replacement_response.status_code == 200
-    assert len(factory.created) == 2
+    # Both serving browsers were discarded, at least one replacement was warm
+    # before shutdown, and nothing beyond the ready browsers stayed alive.
+    assert len(factory.created) >= 3
     assert factory.created[0].closed is True
+    assert 1 <= len(live_browsers) == settled.ready_browser_slots
 
 
 @pytest.mark.anyio
@@ -2377,3 +2527,29 @@ async def test_request_id_is_returned_on_unhandled_endpoint_error() -> None:
     assert response.status_code == 500
     assert response.headers["X-Request-ID"] == "failed-request-42"
     assert response.json() == {"detail": "Internal Server Error"}
+
+
+@pytest.mark.anyio
+async def test_ready_schema_declares_the_saturated_fields_and_omits_them_when_unset() -> None:
+    factory = FakeBrowserFactory()
+    app = create_app(browser_factory=factory, lifespan_enabled=False)
+    await app.state.pool.start()
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            openapi = (await client.get("/openapi.json")).json()
+            probed = await client.get("/ready")
+    finally:
+        await app.state.pool.close()
+
+    schema = openapi["paths"]["/ready"]["get"]["responses"]["200"]["content"]["application/json"][
+        "schema"
+    ]
+    assert schema == {"$ref": "#/components/schemas/ReadyResponse"}
+    properties = openapi["components"]["schemas"]["ReadyResponse"]["properties"]
+    assert set(properties) == {"status", "capacity_state", "message"}
+    assert probed.status_code == 200
+    assert probed.json() == {"status": "ok"}

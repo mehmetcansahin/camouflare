@@ -1,0 +1,322 @@
+{
+  "acceptance": {
+    "all_requests_succeeded": false,
+    "idle_after": true,
+    "zero_acquire_timeouts": true,
+    "zero_asyncio_unhandled": true,
+    "zero_browser_transport_errors": true,
+    "zero_v1_errors": false
+  },
+  "aggregates": [
+    {
+      "client_errors": 0,
+      "client_p50_ms": 775.248,
+      "client_p95_ms": 845.431,
+      "concurrency": 1,
+      "internal_p50_ms": 771.0,
+      "internal_p95_ms": 841.0,
+      "load": "Sequential baseline",
+      "requests": 10,
+      "server_errors": 0,
+      "success_rate": 1.0,
+      "successes": 10,
+      "timeouts": 0
+    },
+    {
+      "client_errors": 0,
+      "client_p50_ms": 766.105,
+      "client_p95_ms": 784.638,
+      "concurrency": 1,
+      "internal_p50_ms": 762.0,
+      "internal_p95_ms": 781.0,
+      "load": "1 concurrent",
+      "requests": 5,
+      "server_errors": 0,
+      "success_rate": 1.0,
+      "successes": 5,
+      "timeouts": 0
+    },
+    {
+      "client_errors": 0,
+      "client_p50_ms": 961.201,
+      "client_p95_ms": 1139.831,
+      "concurrency": 2,
+      "internal_p50_ms": 956.0,
+      "internal_p95_ms": 1134.0,
+      "load": "2 concurrent",
+      "requests": 10,
+      "server_errors": 0,
+      "success_rate": 1.0,
+      "successes": 10,
+      "timeouts": 0
+    },
+    {
+      "client_errors": 0,
+      "client_p50_ms": 1380.622,
+      "client_p95_ms": 3640.715,
+      "concurrency": 4,
+      "internal_p50_ms": 1366.0,
+      "internal_p95_ms": 3625.0,
+      "load": "4 concurrent",
+      "requests": 20,
+      "server_errors": 2,
+      "success_rate": 0.9,
+      "successes": 18,
+      "timeouts": 0
+    }
+  ],
+  "diagnostics": {
+    "idle_after": {
+      "capacity_state": "available",
+      "cleanup": {
+        "by_kind": {},
+        "in_flight": 0,
+        "oldest_age_seconds": null
+      },
+      "pool": {
+        "active_contexts": 0,
+        "closing_slots": 0,
+        "creating_slots": 0,
+        "idle_recyclable_slots": 0,
+        "max_browsers": 2,
+        "max_contexts_per_browser": 2,
+        "max_slots": 4,
+        "persistent_contexts": 0,
+        "ready_browser_slots": 2,
+        "retiring_browser_slots": 0,
+        "transient_contexts": 0,
+        "usable_context_slots": 4,
+        "waiting_requests": 0
+      },
+      "runtime": {
+        "playwright_cancel_patch": "applied",
+        "playwright_version": "1.61.0"
+      },
+      "sessions": {
+        "active": 0,
+        "closing": 0,
+        "in_use": 0,
+        "max_sessions": 32
+      },
+      "status": "ok"
+    },
+    "idle_before": {
+      "capacity_state": "available",
+      "cleanup": {
+        "by_kind": {},
+        "in_flight": 0,
+        "oldest_age_seconds": null
+      },
+      "pool": {
+        "active_contexts": 0,
+        "closing_slots": 0,
+        "creating_slots": 0,
+        "idle_recyclable_slots": 0,
+        "max_browsers": 2,
+        "max_contexts_per_browser": 2,
+        "max_slots": 4,
+        "persistent_contexts": 0,
+        "ready_browser_slots": 2,
+        "retiring_browser_slots": 0,
+        "transient_contexts": 0,
+        "usable_context_slots": 4,
+        "waiting_requests": 0
+      },
+      "runtime": {
+        "playwright_cancel_patch": "applied",
+        "playwright_version": "1.61.0"
+      },
+      "sessions": {
+        "active": 0,
+        "closing": 0,
+        "in_use": 0,
+        "max_sessions": 32
+      },
+      "status": "ok"
+    }
+  },
+  "environment": {
+    "client_os": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+    "client_python": "3.14.7",
+    "image": "ghcr.io/mehmetcansahin/camouflare@sha256:82cf3cc28a6da5cb89cbbef820e6cfd158c61fa39e30479b5f4238e090213e42",
+    "label": "Docker Desktop on Apple M1; linux/arm64; Compose-equivalent 4 GiB memory; 2 GiB shm; 1024 PIDs; pool min=2 max=2 contexts=2; deterministic host-local HTTP target"
+  },
+  "failures": [
+    {
+      "client_ms": 60054.472,
+      "error": "Error: Request exceeded maxTimeout.",
+      "http_status": 500,
+      "internal_ms": 60008,
+      "kind": "http_500",
+      "load": "concurrency_4",
+      "round": 3,
+      "sample": 3,
+      "version": "1.3.3"
+    },
+    {
+      "client_ms": 60055.269,
+      "error": "Error: Request exceeded maxTimeout.",
+      "http_status": 500,
+      "internal_ms": 60012,
+      "kind": "http_500",
+      "load": "concurrency_4",
+      "round": 3,
+      "sample": 4,
+      "version": "1.3.3"
+    }
+  ],
+  "generated_at": "2026-08-25T20:49:17.133288Z",
+  "method": {
+    "api_max_timeout_ms": 60000,
+    "client_timeout_seconds": 70,
+    "command": "request.get",
+    "concurrency_levels": [
+      1,
+      2,
+      4
+    ],
+    "idle_gate": "active=0, waiting=0, creating=0, closing=0, cleanup_in_flight=0",
+    "latency_percentiles_include": "successful requests only",
+    "metrics_required": true,
+    "percentile_method": "nearest-rank",
+    "rounds_per_concurrency": 5,
+    "sequential_requests": 10,
+    "warmup_requests_excluded": 3
+  },
+  "prometheus_delta": {
+    "camouflare_browser_event_total{event=\"created\"}": 1.0,
+    "camouflare_browser_event_total{event=\"error\"}": 2.0,
+    "camouflare_browser_event_total{event=\"recycled\"}": 1.0,
+    "camouflare_browser_recycle_total{reason=\"error\"}": 1.0,
+    "camouflare_challenge_total{outcome=\"not_detected\"}": 43.0,
+    "camouflare_cleanup_total{kind=\"browser\",result=\"success\"}": 1.0,
+    "camouflare_cleanup_total{kind=\"captcha\",result=\"success\"}": 45.0,
+    "camouflare_cleanup_total{kind=\"context\",result=\"success\"}": 45.0,
+    "camouflare_cleanup_total{kind=\"page\",result=\"success\"}": 45.0,
+    "camouflare_cleanup_total{kind=\"proxy\",result=\"success\"}": 45.0,
+    "camouflare_cleanup_total{kind=\"request\",result=\"cancelled\"}": 2.0,
+    "camouflare_pool_acquire_total{kind=\"transient\",result=\"success\"}": 45.0,
+    "camouflare_request_total{command=\"request.get\",result=\"error\"}": 2.0,
+    "camouflare_request_total{command=\"request.get\",result=\"ok\"}": 43.0,
+    "camouflare_timeout_total{phase=\"request\"}": 2.0,
+    "camouflare_v1_error_total{command=\"request.get\",error_code=\"REQUEST_TIMEOUT\"}": 2.0
+  },
+  "schema_version": 2,
+  "service": {
+    "base_url": "http://127.0.0.1:18193",
+    "target_url": "http://host.docker.internal:18194/",
+    "version": "1.3.3"
+  },
+  "successful_latency_samples_ms": {
+    "concurrency_1": {
+      "client": [
+        770.567,
+        742.93,
+        766.105,
+        764.085,
+        784.638
+      ],
+      "internal": [
+        767,
+        740,
+        762,
+        759,
+        781
+      ]
+    },
+    "concurrency_2": {
+      "client": [
+        1139.831,
+        1045.834,
+        988.75,
+        989.898,
+        980.756,
+        961.201,
+        948.809,
+        960.019,
+        925.846,
+        944.259
+      ],
+      "internal": [
+        1134,
+        1035,
+        984,
+        984,
+        975,
+        956,
+        943,
+        954,
+        921,
+        938
+      ]
+    },
+    "concurrency_4": {
+      "client": [
+        1023.173,
+        1041.77,
+        1456.732,
+        1456.748,
+        1158.519,
+        1135.382,
+        1131.443,
+        1159.299,
+        1136.964,
+        1107.444,
+        1998.982,
+        1951.926,
+        3544.477,
+        3640.715,
+        1465.618,
+        1483.37,
+        1380.622,
+        1401.731
+      ],
+      "internal": [
+        1009,
+        1031,
+        1445,
+        1445,
+        1150,
+        1131,
+        1125,
+        1154,
+        1130,
+        1102,
+        1991,
+        1929,
+        3518,
+        3625,
+        1456,
+        1469,
+        1366,
+        1390
+      ]
+    },
+    "sequential": {
+      "client": [
+        807.701,
+        776.412,
+        845.431,
+        820.398,
+        775.083,
+        776.898,
+        751.611,
+        767.911,
+        775.248,
+        766.47
+      ],
+      "internal": [
+        804,
+        772,
+        841,
+        817,
+        771,
+        773,
+        748,
+        763,
+        771,
+        761
+      ]
+    }
+  }
+}
