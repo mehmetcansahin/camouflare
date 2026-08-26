@@ -5,6 +5,8 @@ All notable changes to Camouflare are documented here. The project follows
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-08-26
+
 ### Added
 
 - `scripts/benchmark_service.py`, a reusable service benchmark runner that writes schema 2
@@ -181,7 +183,8 @@ All notable changes to Camouflare are documented here. The project follows
 - High and critical dependency or container findings block releases unless covered by a
   reasoned, time-bounded exception.
 
-[Unreleased]: https://github.com/mehmetcansahin/camouflare/compare/v1.3.3...HEAD
+[Unreleased]: https://github.com/mehmetcansahin/camouflare/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/mehmetcansahin/camouflare/compare/v1.3.3...v1.4.0
 [1.3.3]: https://github.com/mehmetcansahin/camouflare/compare/v1.3.2...v1.3.3
 [1.3.2]: https://github.com/mehmetcansahin/camouflare/compare/v1.3.1...v1.3.2
 [1.3.1]: https://github.com/mehmetcansahin/camouflare/compare/v1.3.0...v1.3.1

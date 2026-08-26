@@ -32,11 +32,11 @@ def test_readme_documents_guarded_default_solver() -> None:
     assert "Use Camouflare only on systems you own" in readme
     assert "does not accept requests to bypass a specific third-party" in readme
     assert "is not published to PyPI" in readme
-    assert "ghcr.io/mehmetcansahin/camouflare:1.3.3" in readme
-    assert "ghcr.io/mehmetcansahin/camouflare:1.3.3" in compose
+    assert "ghcr.io/mehmetcansahin/camouflare:1.4.0" in readme
+    assert "ghcr.io/mehmetcansahin/camouflare:1.4.0" in compose
     assert "git clone https://github.com/mehmetcansahin/camouflare.git" in readme
     assert "python -m pip install ." in readme
-    assert 'python -m pip install "camouflare==1.3.3"' not in readme
+    assert 'python -m pip install "camouflare==1.4.0"' not in readme
     assert "docker compose up --build" in readme
     assert "CAMOUFOX_GEOIP" not in readme
     assert "CAMOUFOX_GEOIP" not in compose
@@ -178,7 +178,7 @@ def test_release_version_has_one_authoritative_source() -> None:
     assert metadata["tool"]["setuptools"]["dynamic"]["version"] == {
         "attr": "camouflare._version.__version__"
     }
-    assert installed_version("camouflare") == __version__ == "1.3.3"
+    assert installed_version("camouflare") == __version__ == "1.4.0"
 
 
 def test_ci_runs_supported_python_matrix_and_builds_package() -> None:
