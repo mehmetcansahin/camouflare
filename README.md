@@ -75,7 +75,7 @@ docker run --detach --rm \
   --publish 127.0.0.1:8191:8191 \
   --env CAMOUFLARE_API_TOKEN \
   --shm-size 2g \
-  ghcr.io/mehmetcansahin/camouflare:1.3.3
+  ghcr.io/mehmetcansahin/camouflare:1.4.0
 ```
 
 Check that the service is ready:
