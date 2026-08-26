@@ -4,7 +4,7 @@ import asyncio
 import logging
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
-from typing import cast
+from typing import Protocol, cast
 
 from fastapi import FastAPI
 
@@ -17,6 +17,10 @@ from camouflare.sessions import SessionManager
 logger = logging.getLogger(__name__)
 
 AppLifespan = Callable[[FastAPI], AbstractAsyncContextManager[None]]
+
+
+class PoolMaintenance(Protocol):
+    async def maintain(self) -> None: ...
 
 
 def make_runtime_lifespan(settings: Settings) -> AppLifespan:
@@ -32,11 +36,19 @@ def make_runtime_lifespan(settings: Settings) -> AppLifespan:
                 ),
                 name="camouflare-session-reaper",
             )
+            maintainer = asyncio.create_task(
+                pool_maintainer(
+                    app.state.pool,
+                    interval_seconds=settings.pool_maintenance_interval_seconds,
+                ),
+                name="camouflare-pool-maintainer",
+            )
             try:
                 yield
             finally:
                 reaper.cancel()
-                await asyncio.gather(reaper, return_exceptions=True)
+                maintainer.cancel()
+                await asyncio.gather(reaper, maintainer, return_exceptions=True)
                 await shutdown_runtime(
                     sessions=app.state.sessions,
                     pool=app.state.pool,
@@ -60,6 +72,19 @@ async def session_reaper(
             await sessions.prune_expired()
         except Exception:
             logger.exception("Failed to prune expired sessions.")
+
+
+async def pool_maintainer(
+    pool: PoolMaintenance,
+    *,
+    interval_seconds: int,
+) -> None:
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            await pool.maintain()
+        except Exception:
+            logger.exception("Failed to maintain the browser pool.")
 
 
 async def shutdown_runtime(

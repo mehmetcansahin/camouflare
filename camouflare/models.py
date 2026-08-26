@@ -331,6 +331,17 @@ class HealthResponse(BaseModel):
     status: str = Field(default="ok", description="Health status.")
 
 
+class ReadyResponse(HealthResponse):
+    capacity_state: Literal["saturated"] | None = Field(
+        default=None,
+        description=(
+            "Present only when every context slot is held by a browser that is still "
+            "serving, so the browser probe was skipped."
+        ),
+    )
+    message: str | None = Field(default=None, description="Why the probe was skipped.")
+
+
 class DiagnosticsPoolStatus(BaseModel):
     ready_browser_slots: int = Field(ge=0)
     retiring_browser_slots: int = Field(ge=0)

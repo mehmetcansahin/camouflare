@@ -20,9 +20,6 @@ change description and approve the protected `release` environment before public
 
 ## Prepare
 
-- [ ] Until this release is deployed, recover an affected existing instance with a planned
-  restart. Do not lower `BROWSER_MAX_AGE_MINUTES`; temporarily keep it above the planned restart
-  interval so the known idle-age failure cannot recur first.
 - [ ] Rotate every API token exposed in logs, chat, incident notes, or other non-secret storage;
   verify the old token is rejected before publishing.
 - [ ] Update `camouflare.__version__` and package metadata to the same semantic version.

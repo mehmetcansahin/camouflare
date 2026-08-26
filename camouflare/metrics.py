@@ -46,7 +46,7 @@ _CLEANUP_KINDS = frozenset(
     {"request", "readiness", "page", "context", "browser", "proxy", "captcha", "session", "other"}
 )
 _CLEANUP_RESULTS = frozenset({"success", "cancelled", "timeout", "error", "other"})
-_READINESS_RESULTS = frozenset({"success", "timeout", "unavailable", "error", "other"})
+_READINESS_RESULTS = frozenset({"success", "saturated", "timeout", "unavailable", "error", "other"})
 _ACQUIRE_TIMEOUT_REASONS = frozenset(
     {"capacity", "deadline", "browser_launch", "shutdown", "other"}
 )

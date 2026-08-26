@@ -379,7 +379,17 @@ DOCUMENTATION_HTML = """
         </div>
         <div class="box">
           <p><span class="method">GET</span> <code>/ready</code></p>
-          <p>Runs the browser-readiness probe by creating a page and evaluating JS.</p>
+          <p>
+            Runs the browser-readiness probe by creating a page and evaluating JS.
+            When every context slot is held by a browser that is still serving,
+            including one past a recycle limit that is finishing its work, it
+            answers HTTP 200 with <code>capacity_state</code> <code>saturated</code>
+            from the pool's own view instead of queueing a probe behind live
+            requests, so HTTP 503 means the pool could not produce a working
+            browser. Browsers whose process has disconnected are retired before
+            that verdict, so a dead busy browser is probed, never reported as
+            saturated.
+          </p>
         </div>
         <div class="box">
           <p><span class="method">GET</span> <code>/diagnostics</code></p>
@@ -628,7 +638,22 @@ DOCUMENTATION_HTML = """
         classify failures without parsing <code>message</code>.
         <code>requestOutcomeUnknown</code> is true when a failed POST may have reached
         the target. <code>fallbackUsed</code> is true only after a stateless GET actually
-        transitions from browser navigation to direct HTTP.
+        transitions from browser navigation to direct HTTP. Optional fields are omitted
+        when they do not apply, so treat an absent <code>errorCode</code>,
+        <code>retryable</code>, <code>requestOutcomeUnknown</code>, or
+        <code>fallbackUsed</code> as unset rather than as false.
+      </p>
+      <p>
+        When no proxy is configured, a stateless GET whose query string contains
+        <code>ajax=true</code> and that requests no cookies, wait time, or screenshot
+        is attempted over direct HTTP before the browser. When that preflight returns a
+        2xx response without challenge markers it is served as-is, and
+        <code>fallbackUsed</code> is omitted because no browser navigation was
+        attempted. A non-2xx status, a transport error, or a challenge-looking body
+        falls through to normal browser navigation; a body over the response size
+        limit ends the request with <code>RESOURCE_LIMIT_EXCEEDED</code> instead.
+        Neither the preflight nor the transport-failure fallback runs when a
+        request-level or environment proxy is set.
       </p>
       <pre><code>{
   "status": "error",
@@ -688,6 +713,20 @@ DOCUMENTATION_HTML = """
         Sessions keep a persistent browser context behind a named id. Requests
         that share a session are serialized with a per-session lock, so cookies
         and browser state are preserved without concurrent page races.
+      </p>
+      <p>
+        A session holds a context slot for its whole lifetime. The number of
+        sessions that can exist at once is
+        <code>POOL_MAX_BROWSERS * POOL_MAX_CONTEXTS_PER_BROWSER
+        - POOL_RESERVED_TRANSIENT_CONTEXTS</code>, and
+        <code>MAX_SESSIONS</code> only caps the registry above that. Over the limit,
+        <code>sessions.create</code> is rejected immediately with HTTP 503 and
+        <code>POOL_UNAVAILABLE</code>; it does not wait for
+        <code>POOL_ACQUIRE_TIMEOUT_MS</code>. Under the limit it acquires a context
+        slot like any other request, so while every slot is busy it waits for the
+        earlier of <code>POOL_ACQUIRE_TIMEOUT_MS</code> and its <code>maxTimeout</code>.
+        The shipped Compose profile (two browsers, one context each, one reserved)
+        therefore allows one concurrent session.
       </p>
       <pre><code>curl -L -X POST 'http://localhost:8191/v1' \\
   -H 'Content-Type: application/json' \\
@@ -778,9 +817,64 @@ DOCUMENTATION_HTML = """
             <td>Max browsers.</td>
           </tr>
           <tr>
+            <td><code>POOL_MAX_CONTEXTS_PER_BROWSER</code></td>
+            <td><code>1</code></td>
+            <td>
+              Concurrent contexts per browser process. Total context slots are
+              <code>POOL_MAX_BROWSERS * POOL_MAX_CONTEXTS_PER_BROWSER</code>.
+            </td>
+          </tr>
+          <tr>
+            <td><code>POOL_RESERVED_TRANSIENT_CONTEXTS</code></td>
+            <td><code>1</code></td>
+            <td>
+              Context slots withheld from persistent sessions so that sessions cannot
+              occupy every slot. Concurrent sessions are limited to total context
+              slots minus this value.
+            </td>
+          </tr>
+          <tr>
+            <td><code>POOL_ACQUIRE_TIMEOUT_MS</code></td>
+            <td><code>30000</code></td>
+            <td>
+              How long a request or readiness probe waits for a free context slot
+              before HTTP 503 <code>POOL_UNAVAILABLE</code>. A request's own
+              <code>maxTimeout</code> also covers this wait, so whichever deadline is
+              shorter wins; when <code>maxTimeout</code> expires first the caller gets
+              HTTP 500 <code>REQUEST_TIMEOUT</code> instead.
+            </td>
+          </tr>
+          <tr>
+            <td><code>BROWSER_MAX_USES</code></td>
+            <td><code>200</code></td>
+            <td>
+              Contexts leased from one browser process before it stops being
+              preferred for new leases. Spare context slots on a browser that is
+              still serving remain usable as a fallback; it is closed once its
+              in-flight contexts finish.
+            </td>
+          </tr>
+          <tr>
+            <td><code>BROWSER_MAX_AGE_MINUTES</code></td>
+            <td><code>120</code></td>
+            <td>
+              Age after which a browser process, busy or not, stops being preferred
+              for new leases. Spare context slots on a browser that is still
+              serving remain usable as a fallback; it is closed once its in-flight
+              contexts finish.
+            </td>
+          </tr>
+          <tr>
             <td><code>MAX_SESSIONS</code></td>
             <td><code>32</code></td>
-            <td>Session cap.</td>
+            <td>
+              Upper bound on the session registry. It is not the concurrency limit:
+              concurrent sessions are capped by the pool's persistent context
+              capacity, which is total context slots minus
+              <code>POOL_RESERVED_TRANSIENT_CONTEXTS</code>. Keep it at or above that
+              capacity; a lower value is checked after a context is already leased and
+              fails with HTTP 500 <code>INTERNAL_ERROR</code> rather than 503.
+            </td>
           </tr>
           <tr>
             <td><code>SESSION_TTL_MINUTES</code></td>
@@ -821,6 +915,20 @@ DOCUMENTATION_HTML = """
             <td><code>SESSION_REAPER_INTERVAL_SECONDS</code></td>
             <td><code>30</code></td>
             <td>Expired-session cleanup interval.</td>
+          </tr>
+          <tr>
+            <td><code>POOL_MAINTENANCE_INTERVAL_SECONDS</code></td>
+            <td><code>15</code></td>
+            <td>
+              Interval of the background pool tick that retires idle browsers past
+              <code>BROWSER_MAX_AGE_MINUTES</code> and relaunches browsers up to
+              <code>POOL_MIN_BROWSERS</code>. A browser retired by a request is
+              replaced as soon as it closes unless a request is already waiting;
+              that request launches for itself and the next tick fills any
+              remaining shortfall. Background launches wait for closing browsers,
+              so the tick never runs more than <code>POOL_MAX_BROWSERS</code>
+              processes at once.
+            </td>
           </tr>
           <tr>
             <td><code>SHUTDOWN_TIMEOUT_SECONDS</code></td>

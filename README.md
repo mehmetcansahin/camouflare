@@ -17,6 +17,54 @@ handling. Use Camouflare only on systems you own, administer, or have permission
 test. This project does not accept requests to bypass a specific third-party site's
 access controls.
 
+## Why Camouflare
+
+Camouflare pairs a Camoufox runtime with the familiar FlareSolverr `/v1` API, but
+its main focus is predictable operation:
+
+- **Warm, bounded capacity.** Browser processes launch at startup, are replaced in
+  the background when a recycle limit retires them, and stay warm between requests,
+  while hard browser, context, session, payload, and timeout limits prevent unbounded
+  growth.
+- **Failure-aware responses.** Stable error codes report retryability, uncertain POST
+  outcomes, and visible GET fallback use instead of reducing every failure to an opaque
+  internal error. When no proxy is configured, GET can fall back to direct HTTP after a
+  browser transport failure, and an `ajax=true` GET that asks for no cookies, wait time,
+  or screenshot is tried over direct HTTP first; that preflight response omits
+  `fallbackUsed` because no navigation was attempted. POST is never replayed
+  automatically.
+- **Self-healing lifecycle.** Browser liveness is checked before leasing capacity;
+  unhealthy, old, or overused browsers retire through bounded cleanup that survives
+  caller cancellation.
+- **Useful production signals.** Browser-backed readiness, passive diagnostics,
+  structured request logs, and low-cardinality Prometheus metrics expose pool,
+  session, cleanup, timeout, and browser transport state.
+- **Measured release profile.** The published image completed all 45 load requests
+  and all 16 lifecycle-canary requests, including eight browser recycle cycles, with
+  no cleanup backlog in the accepted profile. See the
+  [recorded evidence](docs/benchmarks/README.md).
+- **Hardened, verifiable delivery.** The container runs as a non-root user; Compose
+  binds to loopback, requires a token, drops Linux capabilities, and applies memory,
+  shared-memory, and PID limits. Multi-architecture releases include SBOM and
+  provenance evidence.
+- **Small deployment surface.** One container and no external state service keep
+  setup simple. The tradeoff is explicit: one trusted user, one worker, and no shared
+  sessions across replicas.
+
+## FlareSolverr compatibility
+
+Camouflare supports `request.get`, `request.post`, `sessions.create`,
+`sessions.list`, and `sessions.destroy`, including the common proxy, cookie, header,
+wait, screenshot, and persistent-session fields. It preserves the familiar response
+envelope and adds optional machine-readable error metadata.
+
+`download`, `returnRawHtml`, and `tabs_till_verify` are accepted but ignored.
+Unknown fields are also ignored for compatibility.
+
+No named third-party client integration is currently part of CI, so the project
+does not claim verified drop-in compatibility with Prowlarr, Jackett, Sonarr, or
+similar clients. See `/documentation` for the full field and behavior reference.
+
 ## Run with Docker
 
 ```bash
@@ -62,6 +110,23 @@ docker compose up -d
 is unset. Use `docker compose up --build` to build the image locally instead of
 pulling it.
 
+The production profile keeps two warm browser processes with one isolated context
+per browser, so two requests run at a time. `POOL_RESERVED_TRANSIENT_CONTEXTS` holds one
+of those two slots for stateless traffic, which leaves room for exactly one concurrent
+persistent session: once that session exists, the next `sessions.create` is rejected
+immediately with HTTP 503 `POOL_UNAVAILABLE` instead of waiting, and `MAX_SESSIONS` only
+caps the registry above that limit. Any other request, including a first
+`sessions.create` while both slots are busy, waits for a free slot until the earlier of
+`POOL_ACQUIRE_TIMEOUT_MS` (10 seconds in this profile, then the same 503) and its own
+`maxTimeout` (then HTTP 500 `REQUEST_TIMEOUT`). To run more sessions at once, raise
+`POOL_MAX_BROWSERS` only after measuring container memory and PID usage under your
+intended load (for example with `docker stats`), because the project publishes no
+per-browser figures. Alternatively set `POOL_RESERVED_TRANSIENT_CONTEXTS=0`; with no
+reservation, two idle sessions leave nothing for stateless requests until they expire, and
+`/ready` reports `saturated` for that whole time. Do not increase contexts per browser without
+repeating the
+[load evidence](docs/benchmarks/README.md) for that profile.
+
 ## Install from source
 
 Camouflare requires Python 3.11-3.14. It is not published to PyPI.
@@ -105,7 +170,9 @@ Other endpoints:
 - `GET /` returns service metadata.
 - `GET /documentation` serves the full API and configuration reference.
 - `GET /health` returns process liveness only and does not read browser state.
-- `GET /ready` checks that the browser pool can create a page and evaluate JS.
+- `GET /ready` checks that the browser pool can create a page and evaluate JS. When
+  every context slot is held by a browser that is still serving it returns 200 with
+  `capacity_state: saturated` instead of queueing a probe behind live requests.
 - `GET /diagnostics` returns a passive pool, session, and cleanup snapshot without
   leasing browser capacity.
 - `GET /metrics` returns Prometheus metrics when `PROMETHEUS_ENABLED=true`.
@@ -127,7 +194,9 @@ The most commonly used environment variables are:
 | `POOL_MIN_BROWSERS` | `1` | Browsers started on launch |
 | `POOL_MAX_BROWSERS` | `2` | Maximum browser processes |
 | `POOL_MAX_CONTEXTS_PER_BROWSER` | `1` | Concurrent contexts per browser |
-| `POOL_ACQUIRE_TIMEOUT_MS` | `30000` | Wait for free browser capacity |
+| `POOL_RESERVED_TRANSIENT_CONTEXTS` | `1` | Context slots withheld from sessions |
+| `POOL_ACQUIRE_TIMEOUT_MS` | `30000` | Wait for free capacity before HTTP 503 |
+| `MAX_SESSIONS` | `32` | Session registry cap, above the context limit |
 | `SESSION_TTL_MINUTES` | `60` | Default session lifetime |
 | `PROXY_URL` | unset | Default proxy URL |
 | `PROMETHEUS_ENABLED` | `false` | Enable `/metrics` |

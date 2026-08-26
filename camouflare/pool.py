@@ -183,6 +183,7 @@ class BrowserPool:
         self._condition = asyncio.Condition()
         self._close_lock = asyncio.Lock()
         self._started = False
+        self._starting = False
         self._closed = False
 
     @property
@@ -207,10 +208,12 @@ class BrowserPool:
                     "Browser startup launch quarantine is at its bounded limit."
                 )
             self._started = True
+            self._starting = True
             tasks = [self._start_create_task_unlocked() for _ in range(self._min_browsers)]
             self._publish_metrics_unlocked()
 
         if not tasks:
+            self._starting = False
             return
 
         try:
@@ -225,6 +228,7 @@ class BrowserPool:
                     self._abandon_create_task_unlocked(task)
                 if not self._closed:
                     self._started = False
+                self._starting = False
                 self._publish_metrics_unlocked()
                 self._condition.notify_all()
             raise
@@ -248,6 +252,7 @@ class BrowserPool:
                 ]
                 if not self._closed:
                     self._started = False
+                self._starting = False
                 if pending:
                     self._log_acquire_timeout_unlocked("browser_launch")
                 self._publish_metrics_unlocked()
@@ -277,6 +282,7 @@ class BrowserPool:
         except BaseException:
             registration_state.cancelled = True
             self._started = False
+            self._starting = False
             recovery = asyncio.create_task(
                 self._recover_cancelled_start(registration, slots),
                 name="camouflare-pool-recover-cancelled-start",
@@ -285,8 +291,68 @@ class BrowserPool:
             with suppress(BaseException):
                 await asyncio.shield(recovery)
             raise
+        self._starting = False
         if not registered:
             raise RuntimeError("Browser pool is closed")
+
+    def is_full_and_serving(self) -> bool:
+        """Report a pool whose every context slot is held by a browser that can serve.
+
+        The readiness probe uses this to tell "full" from "broken" without leasing.
+        Call ``refresh()`` first so dead browsers have already been retired. A busy
+        browser past a recycle limit still serves its contexts, so it counts; an
+        idle retired browser is about to close and is neither capacity nor service.
+        """
+
+        if not self._started or self._closed:
+            return False
+        active = 0
+        for slot in self._slots:
+            if self._is_slot_disconnected(slot):
+                return False
+            if slot.state == "retiring" and not self._is_soft_retire_reason(slot.retire_reason):
+                return False
+            if slot.active_contexts == 0:
+                if slot.state == "ready":
+                    return False
+                continue
+            if slot.active_contexts < self._max_contexts_per_browser:
+                return False
+            active += slot.active_contexts
+        return active > 0
+
+    async def refresh(self) -> None:
+        """Retire disconnected and aged browsers without launching anything.
+
+        A dead browser process is only noticed when something looks at it, so a
+        caller that is about to judge capacity from a snapshot asks for this first.
+        """
+
+        async with self._condition:
+            if not self._started or self._closed:
+                return
+            self._refresh_recycling_unlocked()
+            self._publish_metrics_unlocked()
+            self._condition.notify_all()
+
+    async def maintain(self) -> None:
+        """Retire aged idle browsers and relaunch toward ``min_browsers``.
+
+        Recycle limits are otherwise enforced only inside ``_acquire_slot``, so an
+        idle pool kept a stale browser until the next request, which then paid for
+        the relaunch. A periodic tick keeps the warm-pool promise honest without
+        traffic. A browser retired by a request is replaced as soon as it closes
+        unless a request is already waiting; that request launches for itself and
+        the next tick fills whatever shortfall remains.
+        """
+
+        async with self._condition:
+            if not self._started or self._closed:
+                return
+            self._refresh_recycling_unlocked()
+            self._replenish_unlocked()
+            self._publish_metrics_unlocked()
+            self._condition.notify_all()
 
     async def quiesce(self) -> None:
         """Reject new acquisitions while allowing existing leases to drain."""
@@ -939,6 +1005,33 @@ class BrowserPool:
                 )
         self._retry_failed_closes_unlocked()
 
+    def _replenish_unlocked(self) -> None:
+        # Launch toward min_browsers only while the pool is serving and nobody is
+        # waiting: a waiting request launches for itself, and it must keep doing so
+        # rather than trust a background launch that may hang. Launches in flight
+        # count as capacity. Unlike the acquire path, a browser that is still
+        # closing (or wedged after a failed close) also counts, so background work
+        # never runs more than max_browsers processes at once. A factory that
+        # keeps failing is retried on every tick and every close completion; the
+        # maintenance interval is the backoff.
+        if self._starting or not self._started or self._closed or self._waiting_requests > 0:
+            return
+        healthy = sum(
+            1 for slot in self._slots if slot.state == "ready" and not self._should_recycle(slot)
+        )
+        missing = self._min_browsers - healthy - len(self._create_tasks)
+        occupied = (
+            len(self._slots)
+            + len(self._create_tasks)
+            + len(self._close_tasks)
+            + len(self._failed_close_slots)
+        )
+        room = self._max_browsers - occupied
+        for _ in range(min(missing, room)):
+            if len(self._create_watchers) >= self._max_abandoned_creations:
+                break
+            self._start_create_task_unlocked(supervise=True)
+
     def _retry_failed_closes_unlocked(self) -> None:
         """Reap browsers whose physical close failed.
 
@@ -1091,6 +1184,9 @@ class BrowserPool:
                 CLOSE_RETRY_MAX_BACKOFF_SECONDS, 2.0**slot.close_failures
             )
             self._failed_close_slots.add(slot)
+        # The retired browser has left the pool; relaunch now so the next request
+        # finds a warm browser instead of paying for the launch itself.
+        self._replenish_unlocked()
         self._publish_metrics_unlocked()
         self._condition.notify_all()
 

@@ -5,6 +5,46 @@ All notable changes to Camouflare are documented here. The project follows
 
 ## [Unreleased]
 
+### Added
+
+- `scripts/benchmark_service.py`, a reusable service benchmark runner that writes schema 2
+  JSON evidence with a machine-readable acceptance block, plus load and lifecycle-canary
+  evidence for the published 1.3.3 image. Metric-derived acceptance checks fail instead of
+  passing vacuously when `/metrics` exposes no Camouflare counters.
+
+- Background pool maintenance. A browser retired by `BROWSER_MAX_USES` or
+  `BROWSER_MAX_AGE_MINUTES` is now replaced as soon as it closes (a request that is
+  already waiting launches for itself instead, and the next tick fills any shortfall),
+  and a periodic tick (`POOL_MAINTENANCE_INTERVAL_SECONDS`, default 15) retires idle
+  browsers past their max age and relaunches to `POOL_MIN_BROWSERS` without waiting for
+  a request. Background launches wait for closing browsers so the tick never runs more
+  than `POOL_MAX_BROWSERS` processes.
+
+### Changed
+
+- Production Compose now limits each browser process to one concurrent context. A 1.3.3
+  load run completed 45 of 45 requests with isolated contexts, while the previous
+  two-context profile timed out two requests in one of five four-client rounds.
+- The isolated-context profile lowers concurrent persistent sessions from three to one,
+  because `POOL_RESERVED_TRANSIENT_CONTEXTS` withholds one of the two context slots from
+  sessions. Raise `POOL_MAX_BROWSERS` after load testing memory and PID usage as
+  described in `docs/deployment.md`, or set `POOL_RESERVED_TRANSIENT_CONTEXTS=0`, to
+  restore session capacity.
+- README positioning now defines Camouflare's deliberately narrow operational focus,
+  tested FlareSolverr protocol surface, compatibility no-ops, and named-client
+  verification status.
+- `/documentation` now lists the pool context, reserved-context, acquire-timeout, and
+  browser recycle settings, states the real concurrent-session limit next to
+  `MAX_SESSIONS`, and documents the direct-HTTP GET preflight path.
+- `/ready` no longer queues a probe context behind live requests. When every context
+  slot is held by a browser that is still serving, including one past a recycle limit
+  that is finishing its work, it returns HTTP 200 with `capacity_state: saturated`
+  from the pool's own view, after first retiring any browser whose process has
+  disconnected; the readiness metric records the probe as `saturated`, and a failure
+  while taking that view maps to 503 like every other readiness failure. The OpenAPI
+  schema declares the optional `capacity_state` and `message` fields of that body. A
+  503 now means the pool could not produce a working browser.
+
 ## [1.3.3] - 2026-08-25
 
 ### Fixed
