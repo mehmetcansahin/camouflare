@@ -5,7 +5,7 @@ All notable changes to Camouflare are documented here. The project follows
 
 ## [Unreleased]
 
-## [1.4.0] - 2026-08-26
+## [1.4.0] - 2026-08-27
 
 ### Added
 
