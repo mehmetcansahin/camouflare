@@ -5,8 +5,8 @@ Recorded load and lifecycle runs. Schema 2 files are produced by
 and is retained as legacy evidence.
 
 `method.minimum_recycles` and `acceptance.minimum_recycles_observed` appear only when a
-run passes `--minimum-recycles`, so the two 2026-08-25 profile files omit them and the
-canary file carries them. Every other schema 2 key is present in every schema 2 file.
+run passes `--minimum-recycles`, so the profile files omit them and the canary files
+carry them. Every other schema 2 key is present in every schema 2 file.
 
 These files are records of what was measured, not performance guarantees or CI
 gates. Numbers depend on the host, network path, pool configuration, and Camoufox
@@ -78,6 +78,27 @@ The legacy schema 1 file uses `concurrency_4_failures` and
 timestamps in Camouflare's response. Percentiles include successful requests only.
 
 ## Runs
+
+### 2026-08-27, published 1.4.0 image
+
+`2026-08-27-compose-canary-results.json`. The published linux/arm64 image at index
+digest `sha256:4d97100173a191b15163d2c1500c74ae02074803608cf5a7cb693c458e5985fe` on
+Docker Desktop on an Apple M1, with the Compose limits of 4 GiB memory, 2 GiB shared
+memory, and 1024 PIDs, the isolated-context profile, a one-minute browser max age, a
+two-use browser limit, and a deterministic host-local HTTP target.
+
+All 16 measured requests completed across sequential and four-client traffic. The run
+observed eight complete `max_uses` browser recycle operations and eight replacement
+launches, zero request or transport errors, zero acquire timeouts, zero unhandled
+asyncio events, and idle snapshots with no cleanup backlog. Unlike the 1.3.3 canary,
+both idle snapshots show two ready browsers and `capacity_state` `available`:
+background replacement now relaunches a retired browser without waiting for the next
+request.
+
+| Load | Requests | Successes | HTTP 500 | client p50 | client p95 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Sequential baseline | 4 | 4 | 0 | 1323 ms | 1521 ms |
+| 4 concurrent | 12 | 12 | 0 | 2305 ms | 4534 ms |
 
 ### 2026-08-25, published 1.3.3 image
 
