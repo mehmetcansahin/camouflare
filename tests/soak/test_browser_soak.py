@@ -559,7 +559,7 @@ async def _drain_browser_for_resource_baseline(
     client: AsyncClient,
     payload: dict[str, Any],
 ) -> None:
-    """Retire the warmed browser without creating replacement capacity."""
+    """Retire the warmed browser while suppressing automatic warm-pool replacement."""
 
     pool = app.state.pool
     assert len(pool._slots) == 1
@@ -567,12 +567,18 @@ async def _drain_browser_for_resource_baseline(
     assert previous_slot.state == "ready"
     assert previous_slot.active_contexts == 0
 
+    original_min_browsers = pool._min_browsers
     original_max_uses = pool._browser_max_uses
+    pool._min_browsers = 0
     pool._browser_max_uses = previous_slot.uses + 1
     try:
         _assert_success(await client.post("/v1", json=payload))
+        close_task = pool._close_tasks.get(previous_slot)
+        if close_task is not None:
+            await asyncio.shield(close_task)
     finally:
         pool._browser_max_uses = original_max_uses
+        pool._min_browsers = original_min_browsers
 
     assert previous_slot not in pool._slots
     assert not pool._slots
@@ -817,6 +823,11 @@ async def test_real_browser_memory_and_contexts_stay_bounded() -> None:
             assert baseline_rss > 0
             assert baseline_pool.active_contexts == 0
 
+            # Keep measurement demand-driven so every exact max-use boundary
+            # fully drains before resource sampling instead of launching a warm
+            # replacement browser from the close callback.
+            app.state.pool._min_browsers = 0
+
             started = time.monotonic()
             for completed in range(1, config.requests + 1):
                 _assert_success(await client.post("/v1", json=payload))
@@ -879,6 +890,7 @@ async def test_real_browser_memory_and_contexts_stay_bounded() -> None:
                 f"{config.max_rss_growth_percent:.2f}% threshold"
             )
     finally:
+        app.state.pool._min_browsers = settings.pool_min_browsers
         try:
             await shutdown_runtime(
                 sessions=app.state.sessions,
