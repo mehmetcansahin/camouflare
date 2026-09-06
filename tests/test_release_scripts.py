@@ -176,10 +176,10 @@ def test_camoufox_download_rejects_digest_mismatch() -> None:
 def test_release_verifier_accepts_exact_tag_and_rejects_mismatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(sys, "argv", ["verify_release.py", "v1.4.0"])
+    monkeypatch.setattr(sys, "argv", ["verify_release.py", "v2.0.0"])
     assert verify_release.main() == 0
 
-    monkeypatch.setattr(sys, "argv", ["verify_release.py", "v1.4.1"])
+    monkeypatch.setattr(sys, "argv", ["verify_release.py", "v2.0.1"])
     assert verify_release.main() == 1
 
 
