@@ -79,6 +79,28 @@ timestamps in Camouflare's response. Percentiles include successful requests onl
 
 ## Runs
 
+### 2026-09-06, published 2.0.0 image
+
+`2026-09-06-compose-canary-results.json`. The published linux/arm64 image at index
+digest `sha256:eaa2260c0fa110ce9abc5bf3616e071c1ef6a12528f69d9ff88d4e33c14f7534` on
+Docker Desktop on an Apple M1, with the Compose limits of 4 GiB memory, 2 GiB shared
+memory, and 1024 PIDs, the isolated-context profile, a one-minute browser max age, a
+two-use browser limit, and a deterministic host-local HTTP target.
+
+All 16 measured requests completed across sequential and four-client traffic. The run
+observed eight complete `max_uses` browser recycle operations and eight replacement
+launches, zero request or transport errors, zero acquire timeouts, zero unhandled
+asyncio events, and idle snapshots with no cleanup backlog. After the run the container
+was left idle for 80 seconds: the maintenance tick retired both browsers by `max_age`
+and relaunched them, the browser process count stayed at ten, the container PID count
+moved from 264 to 251, and `/ready` kept answering `ok` with zero closing or creating
+slots.
+
+| Load | Requests | Successes | HTTP 500 | client p50 | client p95 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Sequential baseline | 4 | 4 | 0 | 765 ms | 1139 ms |
+| 4 concurrent | 12 | 12 | 0 | 1303 ms | 2186 ms |
+
 ### 2026-08-27, published 1.4.0 image
 
 `2026-08-27-compose-canary-results.json`. The published linux/arm64 image at index
