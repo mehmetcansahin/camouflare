@@ -477,7 +477,7 @@ DOCUMENTATION_HTML = """
       <pre><code>{
   "status": "ok",
   "sessions": ["account-a"],
-  "version": "1.4.0"
+  "version": "2.0.0"
 }</code></pre>
 
       <h3 id="sessions-destroy"><code>sessions.destroy</code></h3>
@@ -652,7 +652,7 @@ DOCUMENTATION_HTML = """
   },
   "startTimestamp": 1770000000000,
   "endTimestamp": 1770000001500,
-  "version": "1.4.0"
+  "version": "2.0.0"
 }</code></pre>
       <p>
         Errors use the same envelope with <code>status: "error"</code>.

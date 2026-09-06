@@ -5,6 +5,8 @@ All notable changes to Camouflare are documented here. The project follows
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-09-06
+
 ### Changed
 
 - **Breaking:** non-`User-Agent` target `headers` on `request.get` now select a
@@ -246,7 +248,8 @@ All notable changes to Camouflare are documented here. The project follows
 - High and critical dependency or container findings block releases unless covered by a
   reasoned, time-bounded exception.
 
-[Unreleased]: https://github.com/mehmetcansahin/camouflare/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/mehmetcansahin/camouflare/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/mehmetcansahin/camouflare/compare/v1.4.0...v2.0.0
 [1.4.0]: https://github.com/mehmetcansahin/camouflare/compare/v1.3.3...v1.4.0
 [1.3.3]: https://github.com/mehmetcansahin/camouflare/compare/v1.3.2...v1.3.3
 [1.3.2]: https://github.com/mehmetcansahin/camouflare/compare/v1.3.1...v1.3.2
