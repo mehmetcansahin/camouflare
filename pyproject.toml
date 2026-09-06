@@ -30,6 +30,7 @@ dependencies = [
     "fastapi>=0.136,<0.137",
     "playwright-captcha>=0.1.5,<0.2",
     "prometheus-client>=0.23,<0.24",
+    "publicsuffixlist>=1.0.2.20260702,<2",
     "pydantic>=2,<3",
     "uvicorn[standard]>=0.38,<0.39",
 ]

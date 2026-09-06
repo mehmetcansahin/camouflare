@@ -5,6 +5,7 @@ import asyncio
 import pytest
 
 from camouflare.cleanup import CleanupSupervisor
+from camouflare.errors import SessionCapacityError, V1ErrorCode
 from camouflare.sessions import SessionManager
 from tests.fakes import DelayedFakeSessionContext, FakeContext
 
@@ -146,6 +147,39 @@ async def test_destroy_waits_for_in_flight_lock_holder() -> None:
 
 
 @pytest.mark.anyio
+async def test_transport_eviction_is_nonblocking_and_queued_users_do_not_use_context() -> None:
+    manager = SessionManager(max_sessions=1, default_ttl_seconds=3600)
+    context = FakeContext()
+    session = manager.register_existing("abc", context)
+    observed_current: list[bool] = []
+
+    await session.lock.acquire()
+
+    async def queued_user() -> None:
+        async with session.lock:
+            observed_current.append(manager.get("abc") is session)
+
+    waiter = asyncio.create_task(queued_user())
+    await asyncio.sleep(0)
+
+    assert await manager.evict_if_current(session) is True
+    assert manager.get("abc") is None
+    assert manager.is_closing("abc") is True
+    assert context.closed is False
+
+    session.lock.release()
+    await waiter
+    assert observed_current == [False]
+
+    for _ in range(20):
+        if not manager.is_closing("abc"):
+            break
+        await asyncio.sleep(0)
+    assert context.closed is True
+    assert manager.snapshot().closing == 0
+
+
+@pytest.mark.anyio
 async def test_cancelled_destroy_keeps_cleanup_tracked_and_reserves_id_and_capacity() -> None:
     close_started = asyncio.Event()
     finish_close = asyncio.Event()
@@ -168,8 +202,10 @@ async def test_cancelled_destroy_keeps_cleanup_tracked_and_reserves_id_and_capac
     assert manager.is_closing("abc") is True
     with pytest.raises(RuntimeError, match="still closing"):
         manager.register_existing("abc", FakeContext())
-    with pytest.raises(RuntimeError, match="Maximum sessions"):
+    with pytest.raises(SessionCapacityError, match="Maximum sessions") as capacity:
         manager.register_existing("other", FakeContext())
+    assert capacity.value.error_code is V1ErrorCode.POOL_UNAVAILABLE
+    assert capacity.value.retryable is True
 
     destroy_task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -303,7 +339,7 @@ async def test_session_id_stays_reserved_until_timed_out_physical_cleanup_finish
 
     with pytest.raises(RuntimeError, match="still closing"):
         manager.register_existing("abc", FakeContext())
-    with pytest.raises(RuntimeError, match="Maximum sessions"):
+    with pytest.raises(SessionCapacityError, match="Maximum sessions"):
         manager.register_existing("other", FakeContext())
 
     finish_cancelled_close.set()

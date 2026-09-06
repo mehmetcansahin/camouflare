@@ -6,6 +6,7 @@ import time
 from dataclasses import dataclass, field
 
 from camouflare.cleanup import CleanupSupervisor
+from camouflare.errors import SessionCapacityError
 from camouflare.metrics import record_session_event, set_session_snapshot
 from camouflare.protocols import AsyncCleanup, BrowserContextLike
 
@@ -137,7 +138,7 @@ class SessionManager:
             raise RuntimeError("Session is still closing.")
         if len(self._sessions) + len(self._closing) >= self._max_sessions:
             record_session_event("rejected")
-            raise RuntimeError("Maximum sessions reached.")
+            raise SessionCapacityError()
         session = Session(
             session_id=session_id,
             context=context,
@@ -177,7 +178,19 @@ class SessionManager:
 
         return session_id in self._closing
 
-    async def prune_expired(self, *, exclude: str | None = None) -> list[str]:
+    async def prune_expired(
+        self,
+        *,
+        exclude: str | None = None,
+        wait_for_cleanup: bool = True,
+    ) -> list[str]:
+        """Remove expired idle sessions and start their manager-owned cleanup.
+
+        Callers that only need registry pruning can opt out of waiting so one
+        cancellation-resistant physical close does not delay unrelated work. Session
+        ids and capacity remain reserved by closing tombstones until cleanup finishes.
+        """
+
         async with self._lock:
             if self._closed:
                 return []
@@ -199,12 +212,29 @@ class SessionManager:
             record_session_event("expired")
         # All expired cleanups are started before waiting for any one of them.
         # Shielding preserves manager ownership if the reaper itself is cancelled.
-        if closing:
+        if closing and wait_for_cleanup:
             await asyncio.gather(
                 *(asyncio.shield(item.task) for item in closing),
                 return_exceptions=True,
             )
         return sorted(expired_ids)
+
+    async def evict_if_current(self, session: Session) -> bool:
+        """Quarantine an unusable session without waiting for physical cleanup.
+
+        Identity matching prevents a late failure from evicting a replacement that
+        reused the same id. The close task acquires ``session.lock`` itself, so this
+        method is safe to call while the failing request still owns that lock.
+        """
+
+        async with self._lock:
+            if self._sessions.get(session.session_id) is not session:
+                return False
+            self._sessions.pop(session.session_id)
+            self._start_closing_unlocked(session, reason="error")
+            self._publish_metrics()
+        record_session_event("error")
+        return True
 
     async def destroy(self, session_id: str | None) -> bool:
         if not session_id:

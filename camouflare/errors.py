@@ -36,3 +36,14 @@ class CamouflareError(Exception):
         self.request_outcome_unknown = request_outcome_unknown
         self.fallback_used = fallback_used
         self.solution = solution
+
+
+class SessionCapacityError(CamouflareError):
+    """Raised when the bounded session registry cannot accept another session."""
+
+    def __init__(self, message: str = "Maximum sessions reached.") -> None:
+        super().__init__(
+            message,
+            error_code=V1ErrorCode.POOL_UNAVAILABLE,
+            retryable=True,
+        )

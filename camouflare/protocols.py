@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
 from typing import Any, Protocol, TypedDict
 
@@ -43,24 +43,8 @@ class APIResponseLike(ResponseLike, Protocol):
     def dispose(self) -> Awaitable[None] | None: ...
 
 
-class RouteRequestLike(Protocol):
-    headers: Mapping[str, str]
-
-    async def all_headers(self) -> Mapping[str, str]: ...
-
-
 class RouteLike(Protocol):
-    request: RouteRequestLike
-
     async def abort(self) -> None: ...
-
-    async def continue_(
-        self,
-        *,
-        method: str,
-        post_data: str,
-        headers: Mapping[str, str],
-    ) -> None: ...
 
 
 class RequestContextLike(Protocol):
@@ -71,6 +55,7 @@ class RequestContextLike(Protocol):
         data: str,
         headers: Mapping[str, str],
         timeout: int,
+        max_redirects: int,
     ) -> APIResponseLike: ...
 
 
@@ -88,8 +73,6 @@ class PageLike(Protocol):
 
     async def screenshot(self, **kwargs: Any) -> bytes: ...
 
-    async def set_content(self, html: str) -> None: ...
-
     async def set_extra_http_headers(self, headers: Mapping[str, str]) -> None: ...
 
     async def wait_for_load_state(self, state: str, **kwargs: Any) -> None: ...
@@ -98,18 +81,12 @@ class PageLike(Protocol):
 
     async def close(self) -> None: ...
 
-    async def route(
-        self,
-        url: str,
-        handler: Callable[[RouteLike], Awaitable[None]],
-        **kwargs: Any,
-    ) -> None: ...
-
     def on(self, event: str, handler: Callable[[ResponseLike], None]) -> None: ...
 
 
 class BrowserContextLike(Protocol):
     request: RequestContextLike
+    pages: Sequence[PageLike]
 
     async def new_page(self) -> PageLike: ...
 

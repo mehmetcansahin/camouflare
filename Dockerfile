@@ -20,6 +20,7 @@ WORKDIR /app
 COPY pyproject.toml uv.lock README.md LICENSE ./
 COPY --chown=1000:1000 camouflare ./camouflare
 COPY scripts/fetch_camoufox.py ./scripts/fetch_camoufox.py
+COPY scripts/camoufox-artifacts.json ./scripts/camoufox-artifacts.json
 
 RUN --mount=type=secret,id=camoufox_releases,required=false \
     set -eux; \

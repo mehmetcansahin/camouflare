@@ -16,6 +16,20 @@ CHALLENGE_MARKERS = (
     "cf-challenge",
 )
 CHALLENGE_CLEAR_POLL_MS = 1000
+# With the default provider the clearance poll is the only thing that lets a
+# browser-side challenge finish, so it may use the request's remaining budget.
+# It never consumes the last reserve: the caller still needs time to classify
+# the result, collect the requested solution fields, and close browser resources
+# before the outer request supervisor fires.
+CHALLENGE_RESULT_RESERVE_MS = 1000
+
+_CHALLENGE_DOM_MARKERS_SCRIPT = """
+() => Boolean(document.querySelector(
+  '[src*="/cdn-cgi/challenge-platform/"], '
+  + '[href*="/cdn-cgi/challenge-platform/"], '
+  + '[id*="cf-challenge"], [class*="cf-challenge"]'
+))
+"""
 
 Sleep = Callable[[float], Awaitable[None]]
 
@@ -64,16 +78,37 @@ def content_has_challenge_markers(content: str) -> bool:
     )
 
 
-async def challenge_detected(page: PageLike, limits: ResourceLimits) -> bool:
+async def challenge_detected(
+    page: PageLike,
+    limits: ResourceLimits,
+    *,
+    include_content: bool = True,
+) -> bool:
     if title_is_challenge(await safe_page_title(page)):
         return True
+    if not include_content:
+        try:
+            return bool(await page.evaluate(_CHALLENGE_DOM_MARKERS_SCRIPT))
+        except Exception:
+            return False
     return content_has_challenge_markers(await safe_page_content(page, limits))
 
 
-async def challenge_state(page: PageLike, limits: ResourceLimits) -> str:
+async def challenge_state(
+    page: PageLike,
+    limits: ResourceLimits,
+    *,
+    include_content: bool = True,
+) -> str:
     """Return ``present``, ``cleared``, or ``unknown`` for the current page."""
     if title_is_challenge(await safe_page_title(page)):
         return "present"
+    if not include_content:
+        try:
+            detected = bool(await page.evaluate(_CHALLENGE_DOM_MARKERS_SCRIPT))
+        except Exception:
+            return "unknown"
+        return "present" if detected else "cleared"
     try:
         content = await page.content()
         ensure_text_size(
@@ -94,18 +129,29 @@ async def wait_for_challenge_cleared(
     *,
     limits: ResourceLimits,
     sleep: Sleep,
+    include_content: bool = True,
 ) -> bool:
-    """Poll until the challenge positively clears or the timeout budget is spent."""
-    budget_ms = timer.remaining_ms
-    waited_ms = 0.0
-    while True:
-        if await challenge_state(page, limits) == "cleared":
-            return True
-        if waited_ms >= budget_ms or timer.remaining_ms <= 0:
+    """Poll for clearance until only the request's finalization reserve remains."""
+    if await challenge_state(page, limits, include_content=include_content) == "cleared":
+        return True
+
+    # ``waited_ms`` bounds injected sleeps that do not advance the timer; the
+    # timer bounds real waits whose page inspections take wall-clock time.
+    budget_ms = max(0, timer.remaining_ms - CHALLENGE_RESULT_RESERVE_MS)
+    waited_ms = 0
+    while waited_ms < budget_ms:
+        step_ms = min(
+            CHALLENGE_CLEAR_POLL_MS,
+            budget_ms - waited_ms,
+            timer.remaining_ms - CHALLENGE_RESULT_RESERVE_MS,
+        )
+        if step_ms <= 0:
             return False
-        step_ms = min(CHALLENGE_CLEAR_POLL_MS, budget_ms - waited_ms)
         await sleep(step_ms / 1000)
         waited_ms += step_ms
+        if await challenge_state(page, limits, include_content=include_content) == "cleared":
+            return True
+    return False
 
 
 def challenge_markers_remain(title: str, content: str) -> bool:

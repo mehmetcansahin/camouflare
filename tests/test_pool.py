@@ -1290,6 +1290,68 @@ async def test_failed_start_can_be_retried() -> None:
 
 
 @pytest.mark.anyio
+async def test_concurrent_start_callers_wait_for_the_same_startup() -> None:
+    factory_started = asyncio.Event()
+    release_factory = asyncio.Event()
+    factory = FakeBrowserFactory()
+
+    async def delayed_factory() -> FakeBrowser:
+        factory_started.set()
+        await release_factory.wait()
+        return await factory()
+
+    pool = BrowserPool(browser_factory=delayed_factory, min_browsers=1, max_browsers=1)
+    first = asyncio.create_task(pool.start())
+    await factory_started.wait()
+    second = asyncio.create_task(pool.start())
+    await asyncio.sleep(0)
+
+    assert second.done() is False
+
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    assert second.done() is False
+
+    release_factory.set()
+    await second
+
+    assert pool.snapshot().ready_browser_slots == 1
+    assert len(factory.created) == 1
+    await pool.close()
+
+
+@pytest.mark.anyio
+async def test_cancelling_one_start_waiter_does_not_cancel_shared_startup() -> None:
+    factory_started = asyncio.Event()
+    release_factory = asyncio.Event()
+    factory = FakeBrowserFactory()
+
+    async def delayed_factory() -> FakeBrowser:
+        factory_started.set()
+        await release_factory.wait()
+        return await factory()
+
+    pool = BrowserPool(browser_factory=delayed_factory, min_browsers=1, max_browsers=1)
+    cancelled_waiter = asyncio.create_task(pool.start())
+    await factory_started.wait()
+    surviving_waiter = asyncio.create_task(pool.start())
+    await asyncio.sleep(0)
+
+    cancelled_waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled_waiter
+    assert surviving_waiter.done() is False
+
+    release_factory.set()
+    await surviving_waiter
+
+    assert pool.snapshot().ready_browser_slots == 1
+    assert len(factory.created) == 1
+    await pool.close()
+
+
+@pytest.mark.anyio
 async def test_start_launch_timeout_is_bounded_and_allows_healthy_retry() -> None:
     finish_stubborn_factory = asyncio.Event()
     calls = 0
@@ -1419,6 +1481,111 @@ async def test_cancelling_start_during_registration_closes_created_browser() -> 
 
 
 @pytest.mark.anyio
+async def test_startup_handoff_reserves_capacity_until_registration() -> None:
+    registration_started = asyncio.Event()
+    release_registration = asyncio.Event()
+    factory = FakeBrowserFactory()
+    pool = BrowserPool(
+        browser_factory=factory,
+        min_browsers=1,
+        max_browsers=1,
+        max_contexts_per_browser=1,
+        acquire_timeout_seconds=0.5,
+    )
+    original_register = pool._register_started_slots
+
+    async def delayed_register(
+        slots: list[object],
+        registration: object,
+    ) -> bool:
+        registration_started.set()
+        await release_registration.wait()
+        return await original_register(slots, registration)  # type: ignore[arg-type]
+
+    pool._register_started_slots = delayed_register  # type: ignore[method-assign]
+    start_task = asyncio.create_task(pool.start())
+    await registration_started.wait()
+
+    lease_manager = pool.lease_context()
+    lease_task = asyncio.create_task(lease_manager.__aenter__())
+    for _ in range(10):
+        await asyncio.sleep(0)
+
+    # The completed startup result is not usable yet, but it still owns the only
+    # browser reservation. Concurrent demand must wait instead of launching a
+    # second physical browser during the registration handoff.
+    assert pool.snapshot().creating_slots == 1
+    assert pool.snapshot().browser_slots == 0
+    assert len(factory.created) == 1
+    assert lease_task.done() is False
+
+    release_registration.set()
+    await start_task
+    lease = await lease_task
+
+    assert lease.browser is factory.created[0]
+    assert pool.snapshot().browser_slots == 1
+    assert len(factory.created) == 1
+
+    await lease_manager.__aexit__(None, None, None)
+    await pool.close()
+
+
+@pytest.mark.anyio
+async def test_cancelling_start_during_completed_launch_handoff_does_not_wedge_pool() -> None:
+    factory_started = asyncio.Event()
+    release_factory = asyncio.Event()
+    created: list[FakeBrowser] = []
+
+    async def factory() -> FakeBrowser:
+        factory_started.set()
+        await release_factory.wait()
+        browser = FakeBrowser()
+        created.append(browser)
+        return browser
+
+    pool = BrowserPool(
+        browser_factory=factory,
+        min_browsers=1,
+        max_browsers=1,
+        acquire_timeout_seconds=1,
+    )
+    start_task = asyncio.create_task(pool.start())
+    await factory_started.wait()
+
+    # Hold the exact handoff lock while the factory result becomes ready. Startup
+    # must keep the done task registered until an abandonment watcher owns it.
+    await pool._condition.acquire()
+    release_factory.set()
+    for _ in range(20):
+        if pool._create_tasks and all(task.done() for task in pool._create_tasks):
+            break
+        await asyncio.sleep(0)
+    for _ in range(5):
+        await asyncio.sleep(0)
+    start_task.cancel()
+    await asyncio.sleep(0)
+    pool._condition.release()
+
+    with pytest.raises(asyncio.CancelledError):
+        await start_task
+    for _ in range(40):
+        if not pool._create_watchers and created[0].closed:
+            break
+        await asyncio.sleep(0)
+
+    assert pool._started is False
+    assert pool._starting is False
+    assert not pool._create_tasks
+    assert not pool._create_watchers
+    assert created[0].closed is True
+
+    await pool.start()
+    assert pool.snapshot().ready_browser_slots == 1
+    await pool.close()
+
+
+@pytest.mark.anyio
 async def test_close_racing_start_cleans_up_factory_task() -> None:
     factory_started = asyncio.Event()
     release_factory = asyncio.Event()
@@ -1441,6 +1608,75 @@ async def test_close_racing_start_cleans_up_factory_task() -> None:
     assert snapshot.browser_slots == 0
     assert snapshot.creating_slots == 0
     assert snapshot.closing_slots == 0
+
+
+@pytest.mark.anyio
+async def test_close_waits_for_successful_startup_registration_handoff() -> None:
+    registration_started = asyncio.Event()
+    release_registration = asyncio.Event()
+    factory = FakeBrowserFactory()
+    pool = BrowserPool(browser_factory=factory, min_browsers=1, max_browsers=1)
+    original_register = pool._register_started_slots
+
+    async def delayed_register(
+        slots: list[object],
+        registration: object,
+    ) -> bool:
+        registration_started.set()
+        await release_registration.wait()
+        return await original_register(slots, registration)  # type: ignore[arg-type]
+
+    pool._register_started_slots = delayed_register  # type: ignore[method-assign]
+    start_task = asyncio.create_task(pool.start())
+    await registration_started.wait()
+
+    close_task = asyncio.create_task(pool.close())
+    await asyncio.sleep(0)
+
+    assert close_task.done() is False
+    assert len(factory.created) == 1
+    assert factory.created[0].closed is False
+
+    release_registration.set()
+    await asyncio.wait_for(close_task, timeout=0.5)
+    with pytest.raises(asyncio.CancelledError):
+        await start_task
+
+    assert factory.created[0].closed is True
+    assert pool.snapshot().browser_slots == 0
+    assert pool.snapshot().closing_slots == 0
+
+
+@pytest.mark.anyio
+async def test_failed_startup_registration_closes_unregistered_browser() -> None:
+    registration_started = asyncio.Event()
+    release_registration = asyncio.Event()
+    factory = FakeBrowserFactory()
+    pool = BrowserPool(browser_factory=factory, min_browsers=1, max_browsers=1)
+
+    async def failing_register(
+        _slots: list[object],
+        _registration: object,
+    ) -> bool:
+        registration_started.set()
+        await release_registration.wait()
+        raise RuntimeError("registration failed")
+
+    pool._register_started_slots = failing_register  # type: ignore[method-assign]
+    start_task = asyncio.create_task(pool.start())
+    await registration_started.wait()
+    release_registration.set()
+
+    with pytest.raises(RuntimeError, match="registration failed"):
+        await start_task
+    for _ in range(20):
+        if factory.created[0].closed:
+            break
+        await asyncio.sleep(0)
+
+    assert factory.created[0].closed is True
+    assert pool.snapshot().browser_slots == 0
+    await pool.close()
 
 
 @pytest.mark.anyio
@@ -1924,8 +2160,7 @@ async def test_failed_browser_close_retries_are_bounded() -> None:
     for _ in range(6):
         for slot in pool._failed_close_slots:
             slot.next_close_retry_at = 0.0
-        async with pool.lease_context():
-            pass
+        await pool.refresh()
         await _settle()
 
     # Two close calls per attempt: the initial close plus MAX_CLOSE_RETRIES - 1
@@ -1933,6 +2168,42 @@ async def test_failed_browser_close_retries_are_bounded() -> None:
     assert wedged.close_calls == 2 * MAX_CLOSE_RETRIES
     assert wedged.closed is False
 
+    await pool.close()
+
+
+@pytest.mark.anyio
+async def test_failed_browser_generations_open_a_bounded_launch_circuit() -> None:
+    factory = WedgedCloseFakeBrowserFactory()
+    pool = BrowserPool(
+        browser_factory=factory,
+        min_browsers=1,
+        max_browsers=1,
+        max_contexts_per_browser=1,
+        browser_max_uses=1,
+        browser_max_age_seconds=3600,
+        acquire_timeout_seconds=0.01,
+    )
+    await pool.start()
+
+    for _ in range(2):
+        async with pool.lease_context():
+            pass
+        await _settle()
+
+    assert len(factory.created) == 2
+    assert len(pool._failed_close_slots) == 2
+
+    # Both permitted physical generations are quarantined. Further demand must
+    # time out without launching a third process.
+    for _ in range(3):
+        with pytest.raises(PoolAcquireTimeout):
+            async with pool.lease_context():
+                pass
+    assert len(factory.created) == 2
+    assert len(pool._failed_close_slots) == 2
+
+    for browser in factory.created:
+        browser.close_should_fail = False  # type: ignore[attr-defined]
     await pool.close()
 
 

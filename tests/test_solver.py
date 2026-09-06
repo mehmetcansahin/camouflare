@@ -9,10 +9,10 @@ import pytest
 
 import camouflare.metrics as metrics_module
 import camouflare.solver as solver_module
-from camouflare.errors import V1ErrorCode
+from camouflare.errors import CamouflareError, V1ErrorCode
 from camouflare.limits import MAX_COOKIE_BYTES, ResourceLimitError, ResourceLimits, json_size
 from camouflare.models import V1Request
-from camouflare.solver import MEDIA_PATTERNS, _submit_post_form, solve_request
+from camouflare.solver import MEDIA_PATTERNS, solve_request
 from camouflare.timer import TimeoutTimer
 from tests.fakes import FakeContext, FakePage, FakeResponse
 
@@ -127,6 +127,109 @@ async def test_return_only_cookies_strips_response_headers_and_screenshot() -> N
 
 
 @pytest.mark.anyio
+async def test_return_only_cookies_does_not_read_or_limit_response_body() -> None:
+    class BodyMustNotBeReadPage(FakePage):
+        async def content(self) -> str:
+            raise AssertionError("cookies-only collection must not serialize page content")
+
+    context = FakeContext()
+    page = BodyMustNotBeReadPage(context)
+    context.pages.append(page)
+
+    result = await solve_request(
+        V1Request(
+            cmd="request.get",
+            url="https://example.com",
+            maxTimeout=60000,
+            returnOnlyCookies=True,
+        ),
+        context=context,
+        page=page,
+        limits=ResourceLimits(response_body_bytes=20),
+    )
+
+    assert result.status == "ok"
+    assert result.solution is not None
+    assert result.solution.response is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("error_path", "expected_code"),
+    [
+        ("setup", V1ErrorCode.INTERNAL_ERROR),
+        ("navigation", V1ErrorCode.INTERNAL_ERROR),
+        ("captcha", V1ErrorCode.CHALLENGE_FAILED),
+        ("wait", V1ErrorCode.REQUEST_TIMEOUT),
+    ],
+)
+async def test_return_only_cookies_error_paths_do_not_read_page_content(
+    error_path: str,
+    expected_code: V1ErrorCode,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ErrorContext(FakeContext):
+        async def add_cookies(self, cookies: list[dict[str, Any]]) -> None:
+            if error_path == "setup":
+                raise RuntimeError("cookie setup failed")
+            await super().add_cookies(cookies)
+
+    class TrackingPage(FakePage):
+        def __init__(self, context: FakeContext) -> None:
+            super().__init__(context)
+            self.content_calls = 0
+
+        async def content(self) -> str:
+            self.content_calls += 1
+            raise AssertionError("cookies-only error paths must not read page content")
+
+    class FailingProvider:
+        async def solve(self, **_: object) -> str | None:
+            raise RuntimeError("provider failed")
+
+    async def fail_navigation(*_: object, **__: object) -> Any:
+        raise RuntimeError("navigation failed")
+
+    async def fail_wait(*_: object, **__: object) -> None:
+        raise solver_module.RequestTimeoutError("Request timed out during waitInSeconds.")
+
+    if error_path == "navigation":
+        monkeypatch.setattr(solver_module, "_navigate_get", fail_navigation)
+    if error_path == "wait":
+        monkeypatch.setattr(solver_module, "_wait_requested", fail_wait)
+
+    context = ErrorContext()
+    page = TrackingPage(context)
+    context.pages.append(page)
+    if error_path == "captcha":
+        page.title_value = "Just a moment..."
+
+    request_args: dict[str, Any] = {
+        "cmd": "request.get",
+        "url": "https://example.com",
+        "maxTimeout": 60000,
+        "returnOnlyCookies": True,
+    }
+    if error_path == "setup":
+        request_args["cookies"] = [{"name": "x", "value": "y", "url": "https://example.com"}]
+    if error_path == "wait":
+        request_args["waitInSeconds"] = 1
+
+    result = await solve_request(
+        V1Request(**request_args),
+        context=context,
+        page=page,
+        captcha_provider=FailingProvider() if error_path == "captcha" else None,
+    )
+
+    assert result.status == "error"
+    assert result.error_code is expected_code
+    assert result.solution is not None
+    assert result.solution.response is None
+    assert page.content_calls == 0
+
+
+@pytest.mark.anyio
 async def test_disable_media_installs_context_routes() -> None:
     context = FakeContext()
     page = await context.new_page()
@@ -167,11 +270,26 @@ async def test_disable_media_routes_installed_once_per_reused_context() -> None:
 
 
 @pytest.mark.anyio
-async def test_request_headers_are_applied_to_page_before_navigation() -> None:
+async def test_request_headers_use_direct_transport_without_browser_navigation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def direct_get(
+        url: str,
+        request: V1Request,
+        timer: TimeoutTimer,
+    ) -> solver_module.RawResponse:
+        return solver_module.RawResponse(
+            url=url,
+            status=200,
+            headers={"content-type": "text/html"},
+            body="<html><title>Direct</title><body>header-safe</body></html>",
+        )
+
+    monkeypatch.setattr(solver_module, "_direct_http_get", direct_get)
     context = FakeContext()
     page = await context.new_page()
 
-    await solve_request(
+    result = await solve_request(
         V1Request(
             cmd="request.get",
             url="https://example.com",
@@ -186,14 +304,12 @@ async def test_request_headers_are_applied_to_page_before_navigation() -> None:
         page=page,
     )
 
-    assert page.events[:2] == ["headers", "goto"]
-    assert page.extra_http_headers_calls == [
-        {
-            "Accept": "text/html",
-            "X-Retry": "1",
-        }
-    ]
-    assert page.goto_calls[-1]["referer"] == "https://tickets.example/"
+    assert result.status == "ok"
+    assert result.solution is not None
+    assert "header-safe" in result.solution.response
+    assert page.events == []
+    assert page.extra_http_headers_calls == []
+    assert page.goto_calls == []
 
 
 @pytest.mark.anyio
@@ -243,7 +359,19 @@ async def test_user_agent_header_overrides_request_header_and_navigator() -> Non
 
 @pytest.mark.anyio
 async def test_request_post_submits_form_encoded_post_data() -> None:
+    class ApiRequest:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        async def post(self, url: str, **kwargs: Any) -> FakeResponse:
+            self.calls.append({"url": url, **kwargs})
+            return FakeResponse(
+                headers={"content-type": "text/html"},
+                text_value="<html><body>form-ok</body></html>",
+            )
+
     context = FakeContext()
+    context.request = ApiRequest()  # type: ignore[attr-defined]
     page = await context.new_page()
 
     result = await solve_request(
@@ -258,8 +386,9 @@ async def test_request_post_submits_form_encoded_post_data() -> None:
     )
 
     assert result.status == "ok"
-    assert page.posted_form == {"a": "b", "c": "d"}
-    assert page.goto_calls[-1]["url"] == "https://example.com/form"
+    assert context.request.calls[0]["data"] == "a=b&c=d"  # type: ignore[attr-defined]
+    assert context.request.calls[0]["max_redirects"] == 0  # type: ignore[attr-defined]
+    assert page.goto_calls == []
 
 
 @pytest.mark.anyio
@@ -309,9 +438,9 @@ async def test_request_post_uses_context_request_for_form_endpoint_body() -> Non
             "data": "starting=1&pageno=1",
             "headers": {"Content-Type": "application/x-www-form-urlencoded"},
             "timeout": 60000,
+            "max_redirects": 0,
         }
     ]
-    assert page.posted_form is None
     assert context.request.response is not None  # type: ignore[attr-defined]
     assert context.request.response.disposed is True  # type: ignore[attr-defined]
 
@@ -356,42 +485,19 @@ async def test_request_post_sends_json_content_type_as_raw_body() -> None:
             "data": post_data,
             "headers": {"Content-Type": "application/json-patch+json"},
             "timeout": 60000,
+            "max_redirects": 0,
         }
     ]
-    assert page.posted_form is None
 
 
 @pytest.mark.anyio
-async def test_request_post_uses_browser_navigation_with_exact_json_body() -> None:
-    continued: dict[str, Any] = {}
+async def test_request_post_uses_context_transport_with_exact_json_body() -> None:
+    class ApiRequest:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
 
-    class RouteRequest:
-        async def all_headers(self) -> dict[str, str]:
-            return {"Accept": "text/html", "Content-Length": "0"}
-
-    class Route:
-        request = RouteRequest()
-
-        async def continue_(self, **kwargs: Any) -> None:
-            continued.update(kwargs)
-
-    class RoutedPage(FakePage):
-        def __init__(self, context: FakeContext) -> None:
-            super().__init__(context)
-            self.route_url = ""
-            self.route_times = 0
-            self.route_handler: Any | None = None
-
-        async def route(self, url: str, handler: Any, *, times: int) -> None:
-            self.route_url = url
-            self.route_times = times
-            self.route_handler = handler
-
-        async def goto(self, url: str, **kwargs: Any) -> FakeResponse:
-            assert self.route_handler is not None
-            await self.route_handler(Route())
-            self.url = url
-            self.goto_calls.append({"url": url, **kwargs})
+        async def post(self, url: str, **kwargs: Any) -> FakeResponse:
+            self.calls.append({"url": url, **kwargs})
             return FakeResponse(
                 status=200,
                 headers={"content-type": "application/json"},
@@ -399,7 +505,8 @@ async def test_request_post_uses_browser_navigation_with_exact_json_body() -> No
             )
 
     context = FakeContext()
-    page = RoutedPage(context)
+    context.request = ApiRequest()  # type: ignore[attr-defined]
+    page = await context.new_page()
     post_data = '{"search":"İstanbul"}'
 
     result = await solve_request(
@@ -408,7 +515,6 @@ async def test_request_post_uses_browser_navigation_with_exact_json_body() -> No
             url="https://api.example/search#results",
             postData=post_data,
             headers={"Content-Type": "application/json", "X-Request-ID": "abc"},
-            returnScreenshot=True,
             maxTimeout=60000,
         ),
         context=context,
@@ -418,16 +524,17 @@ async def test_request_post_uses_browser_navigation_with_exact_json_body() -> No
     assert result.status == "ok"
     assert result.solution is not None
     assert result.solution.response == '{"ok":true}'
-    assert result.solution.screenshot is not None
-    assert page.route_url == "https://api.example/search"
-    assert page.route_times == 1
-    assert page.goto_calls[0]["url"] == "https://api.example/search#results"
-    assert page.goto_calls[0]["wait_until"] == "domcontentloaded"
-    assert continued["method"] == "POST"
-    assert continued["post_data"] == post_data
-    assert continued["headers"]["Content-Type"] == "application/json"
-    assert continued["headers"]["X-Request-ID"] == "abc"
-    assert all(name.lower() != "content-length" for name in continued["headers"])
+    assert result.solution.screenshot is None
+    assert context.request.calls == [  # type: ignore[attr-defined]
+        {
+            "url": "https://api.example/search#results",
+            "data": post_data,
+            "headers": {"Content-Type": "application/json", "X-Request-ID": "abc"},
+            "timeout": 60000,
+            "max_redirects": 0,
+        }
+    ]
+    assert page.goto_calls == []
 
 
 @pytest.mark.anyio
@@ -463,99 +570,7 @@ async def test_json_post_challenge_fallback_does_not_reencode_body_as_form() -> 
 
     assert result.status == "error"
     assert "Challenge remained" in result.message
-    assert page.posted_form is None
     assert context.request.calls[0]["data"] == post_data  # type: ignore[attr-defined]
-
-
-@pytest.mark.anyio
-async def test_request_post_hidden_form_preserves_decoded_values() -> None:
-    class HtmlFormPage:
-        def __init__(self) -> None:
-            self.html = ""
-            self.evaluated: list[str] = []
-            self.load_states: list[str] = []
-
-        async def set_content(self, html: str) -> None:
-            self.html = html
-
-        async def evaluate(self, script: str) -> str:
-            self.evaluated.append(script)
-            return ""
-
-        async def wait_for_load_state(
-            self,
-            state: str = "load",
-            *,
-            timeout: float | None = None,
-        ) -> None:
-            self.load_states.append(state)
-
-    page = HtmlFormPage()
-
-    await _submit_post_form(
-        page,
-        V1Request(
-            cmd="request.post",
-            url="https://example.com/form",
-            postData="q=hello+world&literal=a%25b",
-        ),
-        TimeoutTimer(60000),
-    )
-
-    assert 'name="q"' in page.html
-    assert 'value="hello world"' in page.html
-    assert 'name="literal"' in page.html
-    assert 'value="a%b"' in page.html
-    assert "hello%20world" not in page.html
-    assert "<script>" not in page.html
-    assert "camouflare-post-form" in page.evaluated[-1]
-
-
-@pytest.mark.anyio
-async def test_request_post_hidden_form_returns_navigation_response_when_available() -> None:
-    class NavigationInfo:
-        def __init__(self, response: FakeResponse) -> None:
-            self.value = response
-
-        async def __aenter__(self):  # type: ignore[no-untyped-def]
-            return self
-
-        async def __aexit__(self, *args: object) -> None:
-            return None
-
-    class HtmlFormPage:
-        def __init__(self) -> None:
-            self.html = ""
-            self.evaluated: list[str] = []
-            self.expect_navigation_calls: list[dict[str, object]] = []
-            self.navigation_response = FakeResponse(status=201, headers={"x-post": "ok"})
-
-        async def set_content(self, html: str) -> None:
-            self.html = html
-
-        async def evaluate(self, script: str) -> str:
-            self.evaluated.append(script)
-            return ""
-
-        def expect_navigation(self, **kwargs: object) -> NavigationInfo:
-            self.expect_navigation_calls.append(kwargs)
-            return NavigationInfo(self.navigation_response)
-
-    page = HtmlFormPage()
-
-    response = await _submit_post_form(
-        page,
-        V1Request(
-            cmd="request.post",
-            url="https://example.com/form",
-            postData="a=b",
-        ),
-        TimeoutTimer(60000),
-    )
-
-    assert response is page.navigation_response
-    assert page.expect_navigation_calls == [{"timeout": 60000, "wait_until": "domcontentloaded"}]
-    assert page.evaluated
 
 
 @pytest.mark.anyio
@@ -682,11 +697,13 @@ async def test_navigation_error_returns_partial_solution() -> None:
 async def test_post_transport_failure_reports_uncertain_non_retryable_outcome(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    class FailingApiRequest:
+        async def post(self, url: str, **kwargs: Any) -> FakeResponse:
+            raise RuntimeError("APIRequestContext.post: Connection closed while reading")
+
     context = FakeContext()
+    context.request = FailingApiRequest()  # type: ignore[attr-defined]
     page = await context.new_page()
-    page.goto_failures["domcontentloaded"] = RuntimeError(
-        "Page.goto: Connection closed while reading from the driver"
-    )
 
     metric_before = _metric_sample_value(
         metrics_module.BROWSER_TRANSPORT_ERROR_COUNTER,
@@ -709,7 +726,7 @@ async def test_post_transport_failure_reports_uncertain_non_retryable_outcome(
     assert result.error_code is V1ErrorCode.BROWSER_TRANSPORT_CLOSED
     assert result.retryable is False
     assert result.request_outcome_unknown is True
-    assert len(page.goto_calls) == 1
+    assert page.goto_calls == []
     assert (
         _metric_sample_value(
             metrics_module.BROWSER_TRANSPORT_ERROR_COUNTER,
@@ -723,6 +740,152 @@ async def test_post_transport_failure_reports_uncertain_non_retryable_outcome(
     )
     assert event.phase == "navigation"  # type: ignore[attr-defined]
     assert event.fallback_used is False  # type: ignore[attr-defined]
+
+
+@pytest.mark.anyio
+async def test_post_unclassified_failure_still_reports_uncertain_outcome() -> None:
+    class FailingApiRequest:
+        async def post(self, url: str, **kwargs: Any) -> FakeResponse:
+            raise RuntimeError("ECONNRESET")
+
+    context = FakeContext()
+    context.request = FailingApiRequest()  # type: ignore[attr-defined]
+    page = await context.new_page()
+
+    result = await solve_request(
+        V1Request(
+            cmd="request.post",
+            url="https://example.com/orders",
+            postData="item=1",
+            maxTimeout=60000,
+        ),
+        context=context,
+        page=page,
+    )
+
+    assert result.status == "error"
+    assert result.error_code is V1ErrorCode.INTERNAL_ERROR
+    assert result.retryable is False
+    assert result.request_outcome_unknown is True
+
+
+@pytest.mark.anyio
+async def test_post_domain_failure_cannot_remain_retryable_after_send_starts() -> None:
+    class FailingApiRequest:
+        async def post(self, url: str, **kwargs: Any) -> FakeResponse:
+            raise CamouflareError(
+                "transport wrapper requested a retry",
+                error_code=V1ErrorCode.REQUEST_TIMEOUT,
+                retryable=True,
+            )
+
+    context = FakeContext()
+    context.request = FailingApiRequest()  # type: ignore[attr-defined]
+    page = await context.new_page()
+
+    result = await solve_request(
+        V1Request(
+            cmd="request.post",
+            url="https://example.com/orders",
+            postData="item=1",
+            maxTimeout=60000,
+        ),
+        context=context,
+        page=page,
+    )
+
+    assert result.status == "error"
+    assert result.error_code is V1ErrorCode.REQUEST_TIMEOUT
+    assert result.retryable is False
+    assert result.request_outcome_unknown is True
+
+
+@pytest.mark.anyio
+async def test_post_response_limit_preserves_uncertain_outcome() -> None:
+    class ApiResponse:
+        status = 200
+        url = "https://example.com/orders"
+
+        def __init__(self) -> None:
+            self.headers = {"content-type": "text/plain; charset=utf-8"}
+
+        async def body(self) -> bytes:
+            return b"12345"
+
+        async def dispose(self) -> None:
+            return None
+
+    class ApiRequest:
+        async def post(self, url: str, **kwargs: Any) -> ApiResponse:
+            return ApiResponse()
+
+    context = FakeContext()
+    context.request = ApiRequest()  # type: ignore[attr-defined]
+    page = await context.new_page()
+
+    with pytest.raises(CamouflareError) as caught:
+        await solve_request(
+            V1Request(
+                cmd="request.post",
+                url="https://example.com/orders",
+                postData="item=1",
+                maxTimeout=60000,
+            ),
+            context=context,
+            page=page,
+            limits=ResourceLimits(response_body_bytes=4),
+        )
+
+    assert caught.value.error_code is V1ErrorCode.RESOURCE_LIMIT_EXCEEDED
+    assert caught.value.retryable is False
+    assert caught.value.request_outcome_unknown is True
+
+
+@pytest.mark.anyio
+async def test_return_only_cookies_post_does_not_read_or_limit_response_body() -> None:
+    class ApiResponse:
+        status = 200
+        url = "https://example.com/orders"
+
+        def __init__(self) -> None:
+            self.headers = {"content-type": "text/plain; charset=utf-8"}
+            self.disposed = False
+
+        async def body(self) -> bytes:
+            raise AssertionError("cookies-only POST must not buffer its omitted body")
+
+        async def dispose(self) -> None:
+            self.disposed = True
+
+    class ApiRequest:
+        def __init__(self) -> None:
+            self.response = ApiResponse()
+
+        async def post(self, url: str, **kwargs: Any) -> ApiResponse:
+            return self.response
+
+    context = FakeContext()
+    api_request = ApiRequest()
+    context.request = api_request  # type: ignore[attr-defined]
+    page = await context.new_page()
+
+    result = await solve_request(
+        V1Request(
+            cmd="request.post",
+            url="https://example.com/orders",
+            postData="item=1",
+            returnOnlyCookies=True,
+            maxTimeout=60000,
+        ),
+        context=context,
+        page=page,
+        limits=ResourceLimits(response_body_bytes=1),
+    )
+
+    assert result.status == "ok"
+    assert result.solution is not None
+    assert result.solution.response is None
+    assert api_request.response.disposed is True
 
 
 @pytest.mark.anyio
@@ -917,6 +1080,203 @@ async def test_get_transport_crash_uses_direct_http_fallback(
 
 
 @pytest.mark.anyio
+async def test_transport_fallback_preserves_raw_cookies_when_browser_context_is_dead(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DeadCookieContext(FakeContext):
+        async def add_cookies(self, cookies: list[dict[str, Any]]) -> None:
+            raise RuntimeError(
+                "BrowserContext.add_cookies: Target page, context or browser has been closed"
+            )
+
+        async def cookies(self) -> list[dict[str, Any]]:
+            raise RuntimeError(
+                "BrowserContext.cookies: Target page, context or browser has been closed"
+            )
+
+    raw_cookie = {
+        "name": "direct",
+        "value": "cookie",
+        "url": "https://example.com/account/__camouflare_cookie_scope__",
+        "expires": 1_900_000_000.0,
+        "secure": True,
+        "httpOnly": True,
+    }
+
+    async def direct_get(
+        url: str,
+        request: V1Request,
+        timer: TimeoutTimer,
+    ) -> solver_module.RawResponse:
+        return solver_module.RawResponse(
+            url=url,
+            status=200,
+            headers={"content-type": "text/html; charset=utf-8"},
+            body="<html><title>Example</title><body>direct</body></html>",
+            cookies=[raw_cookie],
+        )
+
+    monkeypatch.setattr(solver_module, "_direct_http_get", direct_get)
+    context = DeadCookieContext()
+    page = await context.new_page()
+    page.goto_failures["domcontentloaded"] = RuntimeError(
+        "Page.goto: Target page, context or browser has been closed"
+    )
+
+    result = await solve_request(
+        V1Request(cmd="request.get", url="https://example.com", maxTimeout=60000),
+        context=context,
+        page=page,
+        allow_direct_http_first=False,
+    )
+
+    assert result.status == "ok"
+    assert result.fallback_used is True
+    assert result.solution is not None
+    assert result.solution.cookies == [
+        {
+            "name": "direct",
+            "value": "cookie",
+            "domain": "example.com",
+            "path": "/account",
+            "expires": 1_900_000_000.0,
+            "expiry": 1_900_000_000.0,
+            "secure": True,
+            "httpOnly": True,
+        }
+    ]
+
+
+@pytest.mark.anyio
+async def test_transport_fallback_merges_response_cookies_over_partial_context_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class PartiallyAvailableCookieContext(FakeContext):
+        async def add_cookies(self, cookies: list[dict[str, Any]]) -> None:
+            raise RuntimeError(
+                "BrowserContext.add_cookies: Target page, context or browser has been closed"
+            )
+
+    response_cookies = [
+        {
+            "name": "shared",
+            "value": "fresh",
+            "url": "https://example.com/account/__camouflare_cookie_scope__",
+        },
+        {
+            "name": "response-only",
+            "value": "new",
+            "domain": "example.com",
+            "path": "/",
+        },
+    ]
+
+    async def direct_get(
+        url: str,
+        request: V1Request,
+        timer: TimeoutTimer,
+    ) -> solver_module.RawResponse:
+        return solver_module.RawResponse(
+            url=url,
+            status=200,
+            headers={"content-type": "text/html; charset=utf-8"},
+            body="<html><title>Example</title><body>direct</body></html>",
+            cookies=response_cookies,
+        )
+
+    monkeypatch.setattr(solver_module, "_direct_http_get", direct_get)
+    context = PartiallyAvailableCookieContext()
+    context.cookies_result = [
+        {
+            "name": "shared",
+            "value": "stale",
+            "domain": "example.com",
+            "path": "/account",
+        },
+        {
+            "name": "context-only",
+            "value": "keep",
+            "domain": "example.com",
+            "path": "/",
+        },
+    ]
+    page = await context.new_page()
+    page.goto_failures["domcontentloaded"] = RuntimeError(
+        "Page.goto: Target page, context or browser has been closed"
+    )
+
+    result = await solve_request(
+        V1Request(cmd="request.get", url="https://example.com", maxTimeout=60000),
+        context=context,
+        page=page,
+        allow_direct_http_first=False,
+    )
+
+    assert result.status == "ok"
+    assert result.solution is not None
+    assert result.solution.cookies == [
+        {
+            "name": "shared",
+            "value": "fresh",
+            "domain": "example.com",
+            "path": "/account",
+        },
+        {
+            "name": "context-only",
+            "value": "keep",
+            "domain": "example.com",
+            "path": "/",
+        },
+        {
+            "name": "response-only",
+            "value": "new",
+            "domain": "example.com",
+            "path": "/",
+        },
+    ]
+
+
+@pytest.mark.anyio
+async def test_browser_cookie_output_adds_selenium_expiry_alias() -> None:
+    context = FakeContext()
+    context.cookies_result = [
+        {
+            "name": "persistent",
+            "value": "cookie",
+            "domain": ".example.com",
+            "path": "/",
+            "expires": 1_900_000_000.0,
+            "secure": True,
+            "httpOnly": True,
+            "sameSite": "Lax",
+        },
+        {
+            "name": "session",
+            "value": "cookie",
+            "domain": "example.com",
+            "path": "/",
+            "expires": -1,
+        },
+    ]
+    page = await context.new_page()
+
+    result = await solve_request(
+        V1Request(cmd="request.get", url="https://example.com", maxTimeout=60000),
+        context=context,
+        page=page,
+        allow_direct_http_first=False,
+    )
+
+    assert result.status == "ok"
+    assert result.solution is not None
+    persistent, session = result.solution.cookies
+    assert persistent["expires"] == 1_900_000_000.0
+    assert persistent["expiry"] == 1_900_000_000.0
+    assert session["expires"] == -1
+    assert "expiry" not in session
+
+
+@pytest.mark.anyio
 async def test_get_transport_fallback_preserves_provenance_on_challenge_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -948,6 +1308,59 @@ async def test_get_transport_fallback_preserves_provenance_on_challenge_error(
     assert result.status == "error"
     assert result.error_code is V1ErrorCode.CHALLENGE_FAILED
     assert result.fallback_used is True
+
+
+@pytest.mark.anyio
+async def test_return_only_cookies_classifies_challenge_from_direct_fallback_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def direct_get(url: str, request: V1Request, timer: TimeoutTimer) -> FakeResponse:
+        response = FakeResponse(
+            status=403,
+            headers={"content-type": "text/html; charset=utf-8"},
+            text_value="<html><title>Just a moment...</title></html>",
+        )
+        response.raw_body = True  # type: ignore[attr-defined]
+        response.url = url  # type: ignore[attr-defined]
+        return response
+
+    class TrackingPage(FakePage):
+        def __init__(self, context: FakeContext) -> None:
+            super().__init__(context)
+            self.content_calls = 0
+
+        async def content(self) -> str:
+            self.content_calls += 1
+            return await super().content()
+
+    monkeypatch.setattr(solver_module, "_direct_http_get", direct_get)
+
+    context = FakeContext()
+    page = TrackingPage(context)
+    context.pages.append(page)
+    page.goto_failures["domcontentloaded"] = RuntimeError(
+        "Page.goto: Connection closed while reading from the driver"
+    )
+
+    result = await solve_request(
+        V1Request(
+            cmd="request.get",
+            url="https://example.com",
+            maxTimeout=60000,
+            returnOnlyCookies=True,
+        ),
+        context=context,
+        page=page,
+        allow_direct_http_first=False,
+    )
+
+    assert result.status == "error"
+    assert result.error_code is V1ErrorCode.CHALLENGE_FAILED
+    assert result.fallback_used is True
+    assert result.solution is not None
+    assert result.solution.status == 403
+    assert result.solution.response is None
+    assert page.content_calls == 0
 
 
 @pytest.mark.anyio
@@ -1093,7 +1506,7 @@ def test_direct_http_get_percent_encodes_non_ascii_url(
 
     def fake_open(http_request: Any, timeout: float) -> UrlopenResponse:
         opened_urls.append(http_request.full_url)
-        assert timeout == 5
+        assert 0 < timeout <= 5
         return UrlopenResponse()
 
     monkeypatch.setattr(solver_module._HTTP_OPENER, "open", fake_open)
@@ -1348,6 +1761,100 @@ async def test_remaining_challenge_html_returns_error() -> None:
 
 
 @pytest.mark.anyio
+async def test_passive_challenge_clearance_may_use_the_request_budget() -> None:
+    """The default provider relies on the clearance poll to finish a JS challenge."""
+    context = FakeContext()
+    page = await context.new_page()
+    page.title_value = "Just a moment..."
+    page.content_value = '<html><script src="/cdn-cgi/challenge-platform/test"></script></html>'
+    simulated_seconds = 0.0
+
+    async def clearing_sleep(seconds: float) -> None:
+        nonlocal simulated_seconds
+        simulated_seconds += seconds
+        if simulated_seconds >= 8:
+            page.title_value = "Example"
+            page.content_value = "<html><title>Example</title><body>ok</body></html>"
+
+    result = await solve_request(
+        V1Request(cmd="request.get", url="https://example.com", maxTimeout=60000),
+        context=context,
+        page=page,
+        sleep=clearing_sleep,
+    )
+
+    assert result.status == "ok"
+    assert result.message == "Challenge solved!"
+    assert simulated_seconds == 8
+
+
+@pytest.mark.anyio
+async def test_remaining_challenge_reserves_time_for_error_response() -> None:
+    context = FakeContext()
+    page = await context.new_page()
+    page.title_value = "Just a moment..."
+    page.content_value = '<html><script src="/cdn-cgi/challenge-platform/test"></script></html>'
+
+    result = await asyncio.wait_for(
+        solve_request(
+            V1Request(cmd="request.get", url="https://example.com", maxTimeout=30),
+            context=context,
+            page=page,
+        ),
+        timeout=0.5,
+    )
+
+    assert result.status == "error"
+    assert result.error_code is V1ErrorCode.CHALLENGE_FAILED
+    assert "Challenge remained" in result.message
+
+
+@pytest.mark.anyio
+async def test_challenge_clearance_checks_immediately_when_only_reserve_remains() -> None:
+    class TrackingPage(FakePage):
+        def __init__(self, context: FakeContext) -> None:
+            super().__init__(context)
+            self.content_calls = 0
+
+        async def content(self) -> str:
+            self.content_calls += 1
+            return await super().content()
+
+    class ClearingProvider:
+        async def solve(self, **kwargs: object) -> str | None:
+            page = kwargs["page"]
+            page.title_value = "Example"  # type: ignore[attr-defined]
+            page.content_value = "<html><title>Example</title><body>ok</body></html>"  # type: ignore[attr-defined]
+            return None
+
+    async def unexpected_sleep(_: float) -> None:
+        raise AssertionError("clearance polling must not consume the reserved budget")
+
+    context = FakeContext()
+    page = TrackingPage(context)
+    context.pages.append(page)
+    page.title_value = "Just a moment..."
+    page.content_value = '<html><script src="/cdn-cgi/challenge-platform/x"></script></html>'
+
+    result = await solve_request(
+        V1Request(
+            cmd="request.get",
+            url="https://example.com",
+            maxTimeout=500,
+            returnOnlyCookies=True,
+        ),
+        context=context,
+        page=page,
+        captcha_provider=ClearingProvider(),
+        sleep=unexpected_sleep,
+    )
+
+    assert result.status == "ok"
+    assert result.message == "Challenge solved!"
+    assert page.content_calls == 0
+
+
+@pytest.mark.anyio
 async def test_captcha_provider_timeout_returns_error_envelope() -> None:
     class HangingProvider:
         async def solve(self, **_: object) -> str | None:
@@ -1406,7 +1913,11 @@ async def test_non_http_url_scheme_is_rejected(scheme_url: str) -> None:
     page = await context.new_page()
 
     result = await solve_request(
-        V1Request(cmd="request.get", url=scheme_url, maxTimeout=60000),
+        V1Request.model_construct(
+            cmd="request.get",
+            url=scheme_url,
+            max_timeout=60000,
+        ),
         context=context,
         page=page,
     )
@@ -1592,7 +2103,7 @@ async def test_response_cookie_count_limit_is_enforced() -> None:
 @pytest.mark.anyio
 async def test_response_cookie_byte_limit_accepts_boundary_and_rejects_plus_one() -> None:
     context = FakeContext()
-    cookie_template = [{"name": "x", "value": "", "domain": "example.com"}]
+    cookie_template = [{"name": "x", "value": "", "domain": "example.com", "path": "/"}]
     overhead = json_size(cookie_template)
     context.cookies_result = [
         {
@@ -1747,7 +2258,7 @@ async def test_setup_error_returns_envelope_and_logs_internal_traceback(
                 cmd="request.get",
                 url="https://example.com",
                 maxTimeout=60000,
-                cookies=[{"name": "x", "value": "y"}],
+                cookies=[{"name": "x", "value": "y", "url": "https://example.com"}],
             ),
             context=context,
             page=page,
@@ -1843,45 +2354,8 @@ async def test_post_context_request_challenge_does_not_retry_with_browser_form()
     assert context.request.calls == 1  # type: ignore[attr-defined]
     assert result.status == "error"
     assert result.error_code is V1ErrorCode.CHALLENGE_FAILED
-    assert page.posted_form is None
     assert result.solution is not None
     assert "Just a moment" in result.solution.response
-
-
-@pytest.mark.anyio
-async def test_submit_post_form_preserves_duplicate_field_keys() -> None:
-    class CapturePage:
-        def __init__(self) -> None:
-            self.html = ""
-            self.evaluated: list[str] = []
-
-        async def set_content(self, html: str) -> None:
-            self.html = html
-
-        async def evaluate(self, script: str) -> str:
-            self.evaluated.append(script)
-            return ""
-
-        async def wait_for_load_state(self, state: str = "load", *, timeout: float | None = None):
-            return None
-
-    page = CapturePage()  # no posted_form attr -> builds the real hidden HTML form
-
-    await _submit_post_form(
-        page,  # type: ignore[arg-type]
-        V1Request(
-            cmd="request.post",
-            url="https://example.com/f",
-            postData="cat=books&cat=toys&page=1",
-            maxTimeout=60000,
-        ),
-        TimeoutTimer(60000),
-    )
-
-    # Both repeated cat fields must survive; a dict would have dropped 'books'.
-    assert page.html.count('name="cat"') == 2
-    assert 'value="books"' in page.html
-    assert 'value="toys"' in page.html
 
 
 def test_direct_http_get_sends_matching_cookies_as_header(
@@ -2164,9 +2638,13 @@ async def test_page_crash_is_classified_as_a_browser_transport_failure(
 @pytest.mark.anyio
 async def test_page_crash_during_post_reports_an_uncertain_outcome() -> None:
     # A crash mid-navigation cannot establish whether the POST was delivered.
+    class CrashingApiRequest:
+        async def post(self, url: str, **kwargs: Any) -> FakeResponse:
+            raise RuntimeError("APIRequestContext.post: Page crashed")
+
     context = FakeContext()
+    context.request = CrashingApiRequest()  # type: ignore[attr-defined]
     page = await context.new_page()
-    page.goto_failures["domcontentloaded"] = RuntimeError("Page.goto: Page crashed")
 
     result = await solve_request(
         V1Request(

@@ -5,6 +5,69 @@ All notable changes to Camouflare are documented here. The project follows
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** non-`User-Agent` target `headers` on `request.get` now select a
+  stateless direct HTTP transport that removes those headers before any cross-origin
+  redirect. They are no longer applied to browser navigation, so JavaScript rendering,
+  browser challenge handling, and screenshots do not apply to such requests, and the
+  request is rejected with `INVALID_REQUEST` when it names a session, proxy, or
+  screenshot. `Referer` is one of those headers; it is no longer passed to `page.goto`.
+  `User-Agent` still configures the browser context.
+- **Breaking:** `request.post` always uses the browser context request transport with
+  automatic redirects disabled and returns the first response; the hidden-form document
+  navigation is removed. `returnScreenshot` is rejected for POST, and every failure after
+  the POST was sent reports `requestOutcomeUnknown: true` with `retryable: false`.
+- Direct HTTP GET follows at most ten redirects under one shared deadline, returns
+  non-2xx responses instead of raising (the `ajax=true` preflight and the
+  navigation-timeout fallback still accept only 2xx), imports the cookies it received
+  into the browser context, and merges them into `solution.cookies`. Collected cookies
+  now also carry Selenium's `expiry` spelling.
+- Request cookies are validated and normalized: `name`/`value` must be storable by a
+  browser, `url` and `domain` are exclusive, a cookie with neither is scoped to the
+  target URL, `expiry` maps to `expires`, `sameSite` is case-insensitive, public-suffix
+  domains and invalid `__Secure-`/`__Host-` scopes are rejected, and unknown
+  browser-export fields are ignored.
+- Request `proxy` values are validated: only `http`, `https`, `socks4`, `socks5`, and
+  `socks5h` servers, no credentials with SOCKS4, and SOCKS5 credentials of at most 255
+  UTF-8 bytes. `url`, `headers`, and `userAgent` reject control characters.
+- Tokenless mode accepts only loopback peers and `Host` values, rejects cross-origin and
+  cross-site browser requests, and requires a JSON content type for `POST /v1`.
+  `camouflare.asgi:app` now requires `CAMOUFLARE_API_TOKEN`; use `python -m camouflare`
+  for tokenless local development.
+- A session request no longer falls back to direct HTTP after a browser transport
+  failure, a session whose context can no longer open a page is evicted, and popup
+  pages opened during a request are closed with it.
+- `sessions.create` beyond `MAX_SESSIONS` returns HTTP 503 with `POOL_UNAVAILABLE` and
+  `retryable: true` instead of an internal error.
+- Challenge clearance polling keeps one second of the request budget in reserve so the
+  error envelope and solution can still be collected before `maxTimeout` expires.
+- Browser pool startup is shared by concurrent callers, keeps launched browsers
+  accounted for until they are registered, and caps live plus closing browser
+  generations at twice `POOL_MAX_BROWSERS`. Expired-session pruning no longer waits for
+  physical cleanup.
+- `returnOnlyCookies` responses no longer read or serialize page content; direct HTTP
+  reads only a bounded prefix to classify challenge interstitials.
+
+### Added
+
+- Direct HTTP requests run on a bounded worker executor (four workers) owned by the
+  application runtime; it stops accepting work and drains during shutdown.
+- `scripts/camoufox-artifacts.json` pins the Camoufox release tag and per-platform
+  SHA-256 digests. `scripts/fetch_camoufox.py` fetches only that tag, installs only
+  listed archives, and verifies each download before extraction; CI and release
+  workflows resolve the pinned tag instead of the latest release.
+
+### Fixed
+
+- Log redaction now covers `socks4://` URLs.
+
+### Security
+
+- Direct HTTP cookie handling rejects public-suffix domains, `Domain` cookies from IP
+  literals, `Secure` cookies received over HTTP, `SameSite=None` without `Secure`,
+  malformed `__Secure-`/`__Host-` cookies, and `Partitioned` cookies.
+
 ## [1.4.0] - 2026-08-27
 
 ### Added

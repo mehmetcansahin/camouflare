@@ -4,8 +4,9 @@ import asyncio
 import json
 import logging
 import weakref
+from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack, suppress
-from typing import Any
+from typing import Any, cast
 
 from camouflare import challenge as _challenge
 from camouflare import navigation as _navigation
@@ -79,22 +80,17 @@ _ACTIVE_LIMITS = _navigation._ACTIVE_LIMITS
 _build_http_opener = _navigation._build_http_opener
 _direct_http_get = _navigation._direct_http_get
 _direct_http_get_sync = _navigation._direct_http_get_sync
-_can_submit_hidden_form = _navigation.can_submit_hidden_form
 _clean_url = _navigation.clean_url
-_cookie_header_for_url = _navigation.cookie_header_for_url
 _has_header = _navigation.has_header
 _is_timeout_error = _navigation.is_timeout_error
 _post_with_context_request = _navigation.post_with_context_request
 _quote_url_for_http = _navigation.quote_url_for_http
 _raw_response_from_api_response = _navigation.raw_response_from_api_response
-_resolve_navigation_value = _navigation.resolve_navigation_value
 _set_default_header = _navigation.set_default_header
 _should_try_direct_get_after_navigation_timeout = (
     _navigation.should_try_direct_get_after_navigation_timeout
 )
 _should_try_direct_get_first = _navigation.should_try_direct_get_first
-_submit_hidden_form = _navigation.submit_hidden_form
-_submit_post_navigation = _navigation.submit_post_navigation
 _target_request_headers = _navigation.target_request_headers
 _try_direct_http_get_after_navigation_timeout = (
     _navigation.try_direct_http_get_after_navigation_timeout
@@ -194,19 +190,86 @@ async def _run_solve(
     allow_direct_http_first: bool = True,
     sleep: Sleep = asyncio.sleep,
 ) -> V1Response:
+    post_state = _PostRequestState()
+    try:
+        return await _run_solve_inner(
+            request,
+            context=context,
+            page=page,
+            provider=provider,
+            limits=limits,
+            post_state=post_state,
+            allow_direct_http_fallback=allow_direct_http_fallback,
+            allow_direct_http_first=allow_direct_http_first,
+            sleep=sleep,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        if not post_state.started:
+            raise
+        if isinstance(exc, CamouflareError) and exc.request_outcome_unknown and not exc.retryable:
+            raise
+        raise _post_request_failure(exc) from exc
+
+
+class _PostRequestState:
+    def __init__(self) -> None:
+        self.started = False
+
+    def mark_started(self) -> None:
+        self.started = True
+
+
+def _post_request_failure(exc: Exception) -> CamouflareError:
+    if isinstance(exc, CamouflareError):
+        return CamouflareError(
+            str(exc),
+            error_code=exc.error_code,
+            retryable=False,
+            request_outcome_unknown=True,
+            fallback_used=exc.fallback_used,
+            solution=exc.solution,
+        )
+    if isinstance(exc, ResourceLimitError):
+        error_code = V1ErrorCode.RESOURCE_LIMIT_EXCEEDED
+    elif _is_best_effort_browser_error(exc):
+        error_code = V1ErrorCode.BROWSER_TRANSPORT_CLOSED
+    elif _is_timeout_error(exc):
+        error_code = V1ErrorCode.NAVIGATION_TIMEOUT
+    else:
+        error_code = V1ErrorCode.INTERNAL_ERROR
+    return CamouflareError(
+        str(exc),
+        error_code=error_code,
+        retryable=False,
+        request_outcome_unknown=True,
+    )
+
+
+async def _run_solve_inner(
+    request: V1Request,
+    *,
+    context: BrowserContextLike,
+    page: PageLike,
+    provider: CaptchaProvider,
+    limits: ResourceLimits,
+    post_state: _PostRequestState,
+    allow_direct_http_fallback: bool = True,
+    allow_direct_http_first: bool = True,
+    sleep: Sleep = asyncio.sleep,
+) -> V1Response:
     timer = TimeoutTimer(request.max_timeout)
+    inspect_response_content = not request.return_only_cookies
     response: Any = None
     final_response: MainFrameResponseHolder = {"value": None}
     turnstile_token = None
 
     _track_main_frame_responses(page, final_response)
     try:
-        target_headers = request.target_headers()
         target_user_agent = request.target_user_agent()
         if target_user_agent:
-            target_headers = {**target_headers, "User-Agent": target_user_agent}
-        if target_headers:
-            await page.set_extra_http_headers(target_headers)
+            await page.set_extra_http_headers({"User-Agent": target_user_agent})
         await _install_user_agent_override(page, target_user_agent)
         await _apply_media_blocking(context, bool(request.disable_media))
         if request.cookies:
@@ -216,7 +279,7 @@ async def _run_solve(
             "Unexpected request setup error.",
             extra={"error_code": V1ErrorCode.INTERNAL_ERROR.value},
         )
-        content = await _safe_page_content(page, limits)
+        content = await _safe_page_content(page, limits) if inspect_response_content else ""
         return V1Response(
             status="error",
             message=f"Request setup failed: {exc}",
@@ -235,7 +298,14 @@ async def _run_solve(
 
     try:
         if request.cmd == "request.post":
-            response = await _submit_post(context, page, request, timer, limits)
+            response = await _submit_post(
+                context,
+                page,
+                request,
+                timer,
+                limits,
+                on_request_started=post_state.mark_started,
+            )
         else:
             response = await _navigate_get(
                 page,
@@ -260,7 +330,7 @@ async def _run_solve(
                 "Unexpected navigation error.",
                 extra={"error_code": V1ErrorCode.INTERNAL_ERROR.value},
             )
-        content = await _safe_page_content(page, limits)
+        content = await _safe_page_content(page, limits) if inspect_response_content else ""
         return V1Response(
             status="error",
             message=_navigation_error_message(exc, page=page, page_response=response),
@@ -274,14 +344,16 @@ async def _run_solve(
                 else V1ErrorCode.INTERNAL_ERROR
             ),
             retryable=(
-                domain_error.retryable
+                False
+                if post_state.started
+                else domain_error.retryable
                 if domain_error is not None
                 else request.cmd == "request.get" and (transport_closed or timed_out)
             ),
             request_outcome_unknown=(
-                domain_error.request_outcome_unknown
+                (post_state.started or domain_error.request_outcome_unknown)
                 if domain_error is not None
-                else request.cmd == "request.post" and (transport_closed or timed_out)
+                else post_state.started
             ),
             solution=await _collect_solution(
                 request,
@@ -296,7 +368,11 @@ async def _run_solve(
 
     fallback_used = True if getattr(response, "fallback_used", False) else None
     await _wait_networkidle_best_effort(page, timer)
-    detected = await _challenge_detected(page, limits)
+    detected = await _challenge_detected(
+        page,
+        limits,
+        include_content=inspect_response_content,
+    )
     record_challenge("detected" if detected else "not_detected")
     if detected:
         await _apply_media_blocking(context, False)
@@ -310,12 +386,13 @@ async def _run_solve(
                 record_challenge("timeout")
             else:
                 record_challenge("failed")
-            content = await _safe_page_content(page, limits)
+            content = await _safe_page_content(page, limits) if inspect_response_content else ""
             return V1Response(
                 status="error",
                 message=str(exc),
                 error_code=V1ErrorCode.CHALLENGE_FAILED,
                 retryable=False,
+                request_outcome_unknown=post_state.started,
                 fallback_used=fallback_used,
                 solution=await _collect_solution(
                     request,
@@ -327,20 +404,46 @@ async def _run_solve(
                     limits=limits,
                 ),
             )
-        await _wait_for_challenge_cleared(page, timer, limits=limits, sleep=sleep)
+        cleared = await _wait_for_challenge_cleared(
+            page,
+            timer,
+            limits=limits,
+            sleep=sleep,
+            include_content=inspect_response_content,
+        )
+        if not cleared:
+            record_challenge("failed")
+            content = await _safe_page_content(page, limits) if inspect_response_content else ""
+            return V1Response(
+                status="error",
+                message="Challenge remained after solving attempt.",
+                error_code=V1ErrorCode.CHALLENGE_FAILED,
+                retryable=False,
+                request_outcome_unknown=post_state.started,
+                fallback_used=fallback_used,
+                solution=await _collect_solution(
+                    request,
+                    context=context,
+                    page=page,
+                    page_response=response,
+                    content=content,
+                    turnstile_token=turnstile_token,
+                    limits=limits,
+                ),
+            )
 
     if request.wait_in_seconds and request.wait_in_seconds > 0:
         try:
             await _wait_requested(request.wait_in_seconds, sleep=sleep, timer=timer)
         except RequestTimeoutError as exc:
             record_timeout("collection")
-            content = await _safe_page_content(page, limits)
+            content = await _safe_page_content(page, limits) if inspect_response_content else ""
             return V1Response(
                 status="error",
                 message=str(exc),
                 error_code=V1ErrorCode.REQUEST_TIMEOUT,
                 retryable=request.cmd == "request.get",
-                request_outcome_unknown=False,
+                request_outcome_unknown=post_state.started,
                 fallback_used=fallback_used,
                 solution=await _collect_solution(
                     request,
@@ -356,9 +459,29 @@ async def _run_solve(
     effective_response = (
         response if getattr(response, "raw_body", False) else final_response["value"] or response
     )
-    content = await _response_text_or_page_content(page, effective_response, limits)
-    title = await _safe_page_title(page)
-    if _challenge_markers_remain(title, content):
+    if inspect_response_content:
+        content = await _response_text_or_page_content(page, effective_response, limits)
+        title = await _safe_page_title(page)
+        challenge_remains = _challenge_markers_remain(title, content)
+    else:
+        content = ""
+        challenge_remains = await _challenge_detected(
+            page,
+            limits,
+            include_content=False,
+        )
+        if not challenge_remains and getattr(effective_response, "raw_body", False):
+            text_reader = getattr(effective_response, "text", None)
+            if callable(text_reader):
+                try:
+                    raw_content = await cast(Callable[[], Awaitable[str]], text_reader)()
+                    challenge_remains = _content_has_challenge_markers(raw_content)
+                except Exception:
+                    logger.warning(
+                        "Failed to inspect buffered raw response for challenge markers.",
+                        exc_info=True,
+                    )
+    if challenge_remains:
         if detected:
             record_challenge("failed")
         return V1Response(
@@ -366,6 +489,7 @@ async def _run_solve(
             message="Challenge remained after solving attempt.",
             error_code=V1ErrorCode.CHALLENGE_FAILED,
             retryable=False,
+            request_outcome_unknown=post_state.started,
             fallback_used=fallback_used,
             solution=await _collect_solution(
                 request,
@@ -438,16 +562,17 @@ async def _submit_post(
     request: V1Request,
     timer: TimeoutTimer,
     limits: ResourceLimits,
+    *,
+    on_request_started: Callable[[], None] | None = None,
 ) -> Any:
-    return await _navigation.submit_post(context, page, request, timer, limits)
-
-
-async def _submit_post_form(
-    page: PageLike,
-    request: V1Request,
-    timer: TimeoutTimer,
-) -> Any:
-    return await _navigation.submit_post_form(page, request, timer)
+    return await _navigation.submit_post(
+        context,
+        page,
+        request,
+        timer,
+        limits,
+        on_request_started=on_request_started,
+    )
 
 
 async def _apply_media_blocking(context: BrowserContextLike, enabled: bool) -> None:

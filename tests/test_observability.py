@@ -71,6 +71,7 @@ def test_request_id_context_is_nested_and_resets() -> None:
             "https://example.com/path",
         ),
         ("socks5://name:pass@[2001:db8::1]:1080", "socks5://[2001:db8::1]:1080"),
+        ("socks4://name:pass@proxy.example:1080", "socks4://proxy.example:1080"),
         ("https://example.com/plain", "https://example.com/plain"),
     ],
 )

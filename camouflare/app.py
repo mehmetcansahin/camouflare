@@ -36,7 +36,7 @@ from camouflare.commands import (
     session_for_request,
     sessions_create,
 )
-from camouflare.config import Settings
+from camouflare.config import Settings, is_loopback_host
 from camouflare.documentation import (
     DOCUMENTATION_HTML,
     V1_ENDPOINT_DESCRIPTION,
@@ -68,6 +68,7 @@ from camouflare.models import (
     V1Request,
     V1Response,
 )
+from camouflare.navigation import DirectHttpExecutor
 from camouflare.observability import bind_request_id, reset_request_id, resolve_request_id
 from camouflare.pool import BrowserPool, PersistentCapacityError, PoolAcquireTimeout
 from camouflare.protocols import BrowserFactory
@@ -132,12 +133,14 @@ def create_app(
         cleanup_timeout_seconds=settings.cleanup_timeout_seconds,
         cleanup_supervisor=cleanup,
     )
+    direct_http = DirectHttpExecutor()
     command_service = CommandService(
         settings=settings,
         pool=pool,
         sessions=sessions,
         captcha_provider=provider,
         cleanup=cleanup,
+        direct_http=direct_http,
     )
 
     if lifespan is None and lifespan_enabled:
@@ -163,6 +166,7 @@ def create_app(
     app.state.sessions = sessions
     app.state.captcha_provider = provider
     app.state.command_service = command_service
+    app.state.direct_http = direct_http
     app.state.resource_limits = settings.resource_limits
     app.state.cleanup = cleanup
 
@@ -173,7 +177,12 @@ def create_app(
         token = bind_request_id(request_id)
         request_started()
         try:
-            if (
+            if not settings.camouflare_api_token and (
+                policy_error := _tokenless_request_policy_error(request)
+            ):
+                detail, status_code = policy_error
+                response = JSONResponse({"detail": detail}, status_code=status_code)
+            elif (
                 settings.camouflare_api_token
                 and request.url.path != "/health"
                 and not _api_token_matches(request, settings.camouflare_api_token)
@@ -859,6 +868,88 @@ def _api_token_from_request(request: Request) -> str | None:
     if scheme.lower() != "bearer" or not token:
         return None
     return token
+
+
+def _tokenless_request_policy_error(request: Request) -> tuple[str, int] | None:
+    """Reject browser-reachable requests that are unsafe without authentication."""
+
+    client_host = request.client.host if request.client is not None else None
+    if client_host is None or not is_loopback_host(client_host):
+        return "Tokenless requests require a loopback client", 403
+
+    request_origin = _request_origin(request)
+    if request_origin is None:
+        return "Invalid Host header", 400
+
+    origin = request.headers.get("origin")
+    if origin is not None and _normalized_origin(origin) != request_origin:
+        return "Cross-origin requests require CAMOUFLARE_API_TOKEN", 403
+
+    fetch_site = request.headers.get("sec-fetch-site")
+    if fetch_site is not None and fetch_site.lower() not in {"none", "same-origin"}:
+        return "Cross-site requests require CAMOUFLARE_API_TOKEN", 403
+
+    if request.method == "POST" and request.url.path == "/v1":
+        media_type = request.headers.get("content-type", "").partition(";")[0].strip().lower()
+        if not _is_json_media_type(media_type):
+            return "Content-Type must be application/json", 415
+    return None
+
+
+def _request_origin(request: Request) -> tuple[str, str, int] | None:
+    host = request.headers.get("host")
+    if host is None or any(character in host for character in ("/", "?", "#", "@", "\\", "\x00")):
+        return None
+    try:
+        parsed = urlsplit(f"//{host}")
+        port = parsed.port
+    except ValueError:
+        return None
+    hostname = parsed.hostname
+    if hostname is None or not is_loopback_host(hostname):
+        return None
+    scheme = request.url.scheme.lower()
+    if scheme not in {"http", "https"}:
+        return None
+    return scheme, hostname.lower().rstrip("."), port or _default_port(scheme)
+
+
+def _normalized_origin(origin: str) -> tuple[str, str, int] | None:
+    try:
+        parsed = urlsplit(origin)
+        port = parsed.port
+    except ValueError:
+        return None
+    scheme = parsed.scheme.lower()
+    hostname = parsed.hostname
+    if (
+        scheme not in {"http", "https"}
+        or hostname is None
+        or not is_loopback_host(hostname)
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+    return scheme, hostname.lower().rstrip("."), port or _default_port(scheme)
+
+
+def _default_port(scheme: str) -> int:
+    return 443 if scheme == "https" else 80
+
+
+def _is_json_media_type(media_type: str) -> bool:
+    if media_type == "application/json":
+        return True
+    type_name, separator, subtype = media_type.partition("/")
+    return (
+        type_name == "application"
+        and separator == "/"
+        and len(subtype) > len("+json")
+        and subtype.endswith("+json")
+    )
 
 
 def _validation_error_message(exc: ValidationError) -> str:

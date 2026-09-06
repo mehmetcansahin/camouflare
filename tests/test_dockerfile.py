@@ -50,6 +50,7 @@ def test_dockerfile_avoids_dev_dependencies_and_build_tools_at_runtime() -> None
 
     assert "uv run " not in dockerfile
     assert "/app/.venv/bin/python scripts/fetch_camoufox.py" in dockerfile
+    assert "COPY scripts/camoufox-artifacts.json" in dockerfile
     assert "--mount=type=secret,id=camoufox_releases,required=false" in dockerfile
     assert "CAMOUFLARE_CAMOUFOX_RELEASES_FILE=/run/secrets/camoufox_releases" in dockerfile
     assert "geolite" not in dockerfile.lower()

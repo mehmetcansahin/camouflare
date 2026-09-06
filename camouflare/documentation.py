@@ -357,7 +357,12 @@ DOCUMENTATION_HTML = """
         <code>Authorization: Bearer &lt;token&gt;</code> or
         <code>X-API-Token: &lt;token&gt;</code>. When the environment variable is
         unset, Camouflare keeps the unauthenticated local-development behavior
-        and binds to loopback. A non-loopback <code>HOST</code> requires a token.
+        and binds to loopback. Tokenless mode accepts only loopback peers and
+        <code>Host</code> values, accepts only same-origin browser requests, and
+        requires a JSON content type for <code>POST /v1</code>. A non-loopback
+        <code>HOST</code> requires a token. The reusable
+        <code>camouflare.asgi:app</code> entry point also always requires a token;
+        use the <code>camouflare</code> command for tokenless local development.
       </p>
 
       <h2 id="endpoints">Endpoints</h2>
@@ -437,12 +442,12 @@ DOCUMENTATION_HTML = """
           <tr>
             <td><code>request.get</code></td>
             <td><code>url</code></td>
-            <td>Open a URL and return the browser-backed page response.</td>
+            <td>Open a URL and return its browser-backed or origin-bounded response.</td>
           </tr>
           <tr>
             <td><code>request.post</code></td>
             <td><code>url</code>, <code>postData</code></td>
-            <td>Submit form or raw JSON data and return the browser-backed page response.</td>
+            <td>Submit form or raw JSON data without following redirects.</td>
           </tr>
         </tbody>
       </table>
@@ -491,6 +496,10 @@ DOCUMENTATION_HTML = """
         best-effort network-idle wait, optionally waits
         <code>waitInSeconds</code>, then collects HTML, headers, cookies,
         user agent, and optional screenshot.
+        When non-<code>User-Agent</code> target headers are present, the request
+        instead uses stateless direct HTTP so cross-origin redirects can remove
+        those headers. That mode does not support sessions, proxies, screenshots,
+        JavaScript rendering, or browser challenge handling.
       </p>
       <pre><code>{
   "cmd": "request.get",
@@ -507,8 +516,10 @@ DOCUMENTATION_HTML = """
         URL-encoded form data. If <code>headers.Content-Type</code> is
         <code>application/json</code> or another <code>+json</code> media type,
         <code>postData</code> is sent as the raw request body.
-        The POST is performed as a browser document navigation so JavaScript,
-        waits, screenshots, and challenge handling apply to the resulting page.
+        The POST uses the browser context's request transport with automatic
+        redirects disabled; a redirect response is returned without replaying the
+        request. The buffered response is not loaded into a browser page, so
+        screenshots, JavaScript rendering, and browser challenge handling do not apply.
       </p>
       <pre><code>{
   "cmd": "request.post",
@@ -560,15 +571,27 @@ DOCUMENTATION_HTML = """
           <tr>
             <td><code>cookies</code></td>
             <td>array</td>
-            <td>Cookies to inject before navigation.</td>
+            <td>
+              Cookies to inject before navigation. Each entry needs <code>name</code>
+              and <code>value</code> plus <code>url</code> or <code>domain</code>;
+              with neither, the cookie is scoped to the target <code>url</code>.
+              <code>path</code>, <code>expires</code> (or Selenium's
+              <code>expiry</code>), <code>httpOnly</code>, <code>secure</code>,
+              <code>sameSite</code> (case-insensitive), and <code>partitionKey</code>
+              are supported; other browser-export fields are ignored. Public-suffix
+              domains and values a browser cannot store are rejected.
+            </td>
           </tr>
           <tr>
             <td><code>headers</code></td>
             <td>object</td>
             <td>
-              HTTP headers to apply before navigation. <code>User-Agent</code>
-              configures the context, and <code>Referer</code>/<code>Referrer</code>
-              is passed to navigation.
+              Origin-bound target headers. Non-<code>User-Agent</code> headers make a
+              stateless, proxyless <code>request.get</code> use direct HTTP, where they
+              are removed before cross-origin redirects. <code>request.post</code> uses
+              the browser context request transport with redirects disabled.
+              <code>User-Agent</code> is the compatibility exception: it configures
+              browser identity for the whole context.
             </td>
           </tr>
           <tr>
@@ -654,6 +677,13 @@ DOCUMENTATION_HTML = """
         limit ends the request with <code>RESOURCE_LIMIT_EXCEEDED</code> instead.
         Neither the preflight nor the transport-failure fallback runs when a
         request-level or environment proxy is set.
+      </p>
+      <p>
+        A GET with non-<code>User-Agent</code> target headers always uses the same
+        bounded direct HTTP transport, even without <code>ajax=true</code>, and never
+        falls back to browser navigation. It is rejected when a session, proxy, or
+        screenshot is requested because those features cannot preserve the header
+        boundary. A POST never follows redirects and reports its first response.
       </p>
       <pre><code>{
   "status": "error",
@@ -977,6 +1007,11 @@ DOCUMENTATION_HTML = """
           Deprecated FlareSolverr fields such as <code>download</code>,
           <code>returnRawHtml</code>, and <code>tabs_till_verify</code> are
           accepted as compatibility no-ops.
+        </li>
+        <li>
+          Origin-bound GET headers and all POST bodies use buffered HTTP transports
+          instead of a browser document navigation. JavaScript rendering, browser
+          challenge handling, and screenshots therefore do not apply to those responses.
         </li>
         <li>
           Browser behavior still depends on target-site rules, IP reputation,

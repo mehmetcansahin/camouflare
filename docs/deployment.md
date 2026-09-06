@@ -9,6 +9,15 @@ separate users, run separate container instances.
 - Keep the published port on loopback unless remote access is required.
 - `CAMOUFLARE_API_TOKEN` is mandatory for every non-loopback bind and should come from a
   secret store, not an image or Compose file.
+- The reusable `camouflare.asgi:app` import always requires a token, even if an external
+  Uvicorn command supplies a loopback bind. Use the `camouflare` command or
+  `python -m camouflare` for tokenless local development so the validated `HOST` is also
+  the address passed to Uvicorn.
+- Tokenless loopback mode requires both a loopback network peer and `Host` header,
+  rejects cross-origin or cross-site browser metadata, and accepts `POST /v1` only with an
+  `application/json` or `application/*+json` content type. These checks prevent a web
+  page from reaching the local API through cross-site requests or DNS rebinding; they
+  are not a substitute for a token on any remotely reachable deployment.
 - `/health` is intentionally unauthenticated and reports only process liveness without
   reading browser state. `/ready`, `/diagnostics`, `/metrics`, documentation, and `/v1`
   require the configured token.
@@ -49,8 +58,9 @@ launch replaces it and the next tick fills any remaining shortfall. The periodic
 (`POOL_MAINTENANCE_INTERVAL_SECONDS`, 15 seconds by default) also retires browsers that
 age out between requests. Background launches wait for closing browsers, so the tick never
 runs more than `POOL_MAX_BROWSERS` processes; a request-driven launch may still start while
-a retired browser is closing, so allow memory for one extra browser process during a
-recycle.
+a retired generation is closing. The hard physical ceiling is two complete generations,
+so allow memory and PID headroom for up to another `POOL_MAX_BROWSERS` browser processes
+during a recycle.
 
 Keep contexts isolated within each browser. The published 1.3.3
 [load evidence](benchmarks/README.md) completed 45 of 45 requests with this profile,
@@ -58,9 +68,10 @@ while sharing two concurrent contexts in one Camoufox process timed out two requ
 one of five four-client rounds of a single recorded run. Increase browser count only
 after load testing it against the memory and PID limits: run the intended load with the
 higher `POOL_MAX_BROWSERS` while sampling the container with `docker stats` for memory
-and PIDs, and keep headroom for one extra browser process during a recycle. The project
-publishes no per-browser memory or PID figures, and `scripts/benchmark_service.py`
-records service-side counters only, so container resources must be observed separately.
+and PIDs, and keep headroom for one additional complete browser generation during a
+recycle. The project publishes no per-browser memory or PID figures, and
+`scripts/benchmark_service.py` records service-side counters only, so container resources
+must be observed separately.
 
 The profile drops all Linux capabilities and enables `no-new-privileges`. Preserve those
 controls when translating the deployment to another runtime. Increase memory or PID limits
@@ -74,6 +85,12 @@ version tag is published; rolling `latest`, major, and major/minor tags are inte
 omitted to prevent a release rerun from moving an established channel backward. The official
 GHCR package is intended to be public; private mirrors require `docker login` before Compose
 or direct pulls.
+
+Docker and release jobs fetch the exact Camoufox tag declared in
+`scripts/camoufox-artifacts.json`, install only archives listed there, and verify each
+download against its reviewed SHA-256 digest before extraction. New upstream releases are
+ignored until their exact tag and independently verified platform digests are reviewed and
+updated in the manifest.
 
 ## Operational checks
 

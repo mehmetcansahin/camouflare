@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import subprocess
 import sys
@@ -41,14 +43,134 @@ def test_camoufox_release_metadata_wrapper_avoids_anonymous_api_request() -> Non
     assert calls == [("https://example.com/asset.zip", (), {"timeout": 30})]
 
 
-def test_camoufox_release_metadata_file_must_be_an_array(
+def test_camoufox_release_metadata_file_must_be_an_object_or_array(
     tmp_path: Path,
 ) -> None:
     metadata_path = tmp_path / "releases.json"
-    metadata_path.write_text('{"message":"rate limited"}', encoding="utf-8")
+    metadata_path.write_text('"rate limited"', encoding="utf-8")
 
-    with pytest.raises(ValueError, match="JSON array of objects"):
+    with pytest.raises(ValueError, match="JSON object or array of objects"):
         fetch_camoufox._load_release_metadata(metadata_path)
+
+
+def test_camoufox_release_metadata_requires_the_pinned_tag(tmp_path: Path) -> None:
+    metadata_path = tmp_path / "release.json"
+    metadata_path.write_text(
+        json.dumps({"tag_name": "v152.0.4-beta.30", "assets": []}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"v152\.0\.4-beta\.29"):
+        fetch_camoufox._load_release_metadata(
+            metadata_path,
+            expected_tag="v152.0.4-beta.29",
+        )
+
+
+def test_camoufox_release_metadata_accepts_exact_release_object(tmp_path: Path) -> None:
+    metadata_path = tmp_path / "release.json"
+    payload = {"tag_name": "v152.0.4-beta.29", "assets": []}
+    metadata_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert fetch_camoufox._load_release_metadata(
+        metadata_path,
+        expected_tag="v152.0.4-beta.29",
+    ) == [payload]
+
+
+def test_camoufox_release_wrapper_fetches_exact_tag_without_metadata() -> None:
+    calls: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
+    payload = {"tag_name": "v152.0.4-beta.29", "assets": []}
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return payload
+
+    def original_get(url: str, *args: object, **kwargs: object) -> Response:
+        calls.append((url, args, kwargs))
+        return Response()
+
+    wrapped_get = fetch_camoufox._metadata_aware_get(
+        original_get,
+        {},
+        release_tag="v152.0.4-beta.29",
+    )
+    response = wrapped_get(fetch_camoufox.CAMOUFOX_RELEASES_API, timeout=20)
+
+    assert response.json() == [payload]
+    assert calls == [
+        (
+            f"{fetch_camoufox.CAMOUFOX_RELEASE_TAGS_API}/v152.0.4-beta.29",
+            (),
+            {"timeout": 20},
+        )
+    ]
+
+
+def test_camoufox_artifact_digest_file_pins_current_release() -> None:
+    release_tag, _ = fetch_camoufox._load_artifact_manifest(
+        fetch_camoufox.DEFAULT_ARTIFACT_DIGESTS_FILE
+    )
+    digests = fetch_camoufox._load_artifact_digests(fetch_camoufox.DEFAULT_ARTIFACT_DIGESTS_FILE)
+
+    assert release_tag == "v152.0.4-beta.29"
+    assert digests["camoufox-152.0.4-beta.29-lin.x86_64.zip"] == (
+        "1bea4b55a51c88e82dc7d426d9c75093d942d2afc8c911cb8fc78ebf723d686c"
+    )
+    assert "camoufox-152.0.4-beta.30-lin.x86_64.zip" not in digests
+
+
+def test_camoufox_fetcher_selects_only_pinned_assets() -> None:
+    def original_check_asset(_fetcher: object, asset: dict[str, object]) -> str:
+        return str(asset["browser_download_url"])
+
+    checker = fetch_camoufox._pinned_asset_checker(
+        original_check_asset,
+        {"pinned.zip": "0" * 64},
+    )
+
+    assert checker(object(), {"name": "newer.zip", "browser_download_url": "newer"}) is None
+    assert checker(object(), {"name": "pinned.zip", "browser_download_url": "pinned"}) == "pinned"
+
+
+def test_camoufox_download_verifies_bytes_and_rewinds_buffer() -> None:
+    payload = b"pinned Camoufox archive"
+    expected = hashlib.sha256(payload).hexdigest()
+
+    def original_download(file: io.BytesIO, _url: str) -> io.BytesIO:
+        file.write(payload)
+        file.seek(0)
+        return file
+
+    download = fetch_camoufox._digest_verifying_download(
+        original_download,
+        {"camoufox.zip": expected},
+    )
+
+    buffer = download(
+        io.BytesIO(),
+        "https://github.com/daijro/camoufox/releases/download/pinned/camoufox.zip",
+    )
+
+    assert buffer.read() == payload
+
+
+def test_camoufox_download_rejects_digest_mismatch() -> None:
+    def original_download(file: io.BytesIO, _url: str) -> io.BytesIO:
+        file.write(b"unexpected bytes")
+        file.seek(0)
+        return file
+
+    download = fetch_camoufox._digest_verifying_download(
+        original_download,
+        {"camoufox.zip": "0" * 64},
+    )
+
+    with pytest.raises(RuntimeError, match="digest mismatch"):
+        download(io.BytesIO(), "https://example.com/camoufox.zip")
 
 
 def test_release_verifier_accepts_exact_tag_and_rejects_mismatch(
