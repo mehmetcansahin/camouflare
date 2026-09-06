@@ -9,6 +9,7 @@ from typing import Any
 from urllib.parse import SplitResult, unquote, urlsplit, urlunsplit
 
 from camouflare._version import __version__
+from camouflare.errors import CamouflareError, V1ErrorCode
 from camouflare.limits import ResourceLimits
 
 logger = logging.getLogger(__name__)
@@ -218,11 +219,11 @@ def _validate_settings(settings: Settings) -> None:
         raise ValueError("SESSION_TTL_MINUTES cannot exceed MAX_SESSION_TTL_MINUTES.")
     if settings.log_format not in {"text", "json"}:
         raise ValueError("LOG_FORMAT must be either text or json.")
-    if not settings.camouflare_api_token and not _is_loopback_host(settings.host):
+    if not settings.camouflare_api_token and not is_loopback_host(settings.host):
         raise ValueError("CAMOUFLARE_API_TOKEN is required when HOST is not a loopback address.")
 
 
-def _is_loopback_host(host: str) -> bool:
+def is_loopback_host(host: str) -> bool:
     normalized = host.strip().lower().rstrip(".")
     if normalized == "localhost":
         return True
@@ -240,7 +241,9 @@ def normalize_proxy(proxy: dict[str, Any] | None) -> dict[str, str] | None:
     server = proxy.get("server") or proxy.get("url")
     if not server:
         return None
-    normalized = _normalize_proxy_server(str(server))
+    if not isinstance(server, str):
+        raise _invalid_proxy_error()
+    normalized = _normalize_proxy_server(server)
 
     username = proxy.get("username")
     password = proxy.get("password")
@@ -248,23 +251,75 @@ def normalize_proxy(proxy: dict[str, Any] | None) -> dict[str, str] | None:
         normalized["username"] = str(username)
     if password is not None:
         normalized["password"] = str(password)
+    proxy_scheme = urlsplit(normalized["server"]).scheme.lower()
+    if proxy_scheme == "socks4" and (normalized.get("username") or normalized.get("password")):
+        raise CamouflareError(
+            "Request parameter 'proxy' cannot use authentication with SOCKS4.",
+            error_code=V1ErrorCode.INVALID_REQUEST,
+        )
+    if proxy_scheme == "socks5":
+        for credential_name in ("username", "password"):
+            credential = normalized.get(credential_name)
+            if credential is None:
+                continue
+            try:
+                credential_size = len(credential.encode("utf-8"))
+            except UnicodeEncodeError as exc:
+                raise CamouflareError(
+                    f"Request parameter 'proxy.{credential_name}' must be valid UTF-8.",
+                    error_code=V1ErrorCode.INVALID_REQUEST,
+                ) from exc
+            if credential_size > 255:
+                raise CamouflareError(
+                    f"Request parameter 'proxy.{credential_name}' must be at most 255 UTF-8 bytes "
+                    "for SOCKS5 authentication.",
+                    error_code=V1ErrorCode.INVALID_REQUEST,
+                )
     return normalized
 
 
 def _normalize_proxy_server(server: str) -> dict[str, str]:
-    parsed = urlsplit(server)
+    server = server.strip()
+    if not server or any(character.isspace() for character in server):
+        raise _invalid_proxy_error()
+    try:
+        parsed = urlsplit(server)
+    except ValueError as exc:
+        raise _invalid_proxy_error() from exc
     if not parsed.scheme or not parsed.netloc:
+        try:
+            authority = urlsplit(f"//{server}")
+            host = authority.hostname
+            _ = authority.port
+        except ValueError as exc:
+            raise _invalid_proxy_error() from exc
+        if (
+            host is None
+            or authority.path
+            or authority.query
+            or authority.fragment
+            or authority.username is not None
+            or authority.password is not None
+        ):
+            raise _invalid_proxy_error()
         return {"server": server}
 
-    scheme = "socks5" if parsed.scheme.lower() == "socks5h" else parsed.scheme
+    raw_scheme = parsed.scheme.lower()
+    if raw_scheme not in {"http", "https", "socks4", "socks5", "socks5h"}:
+        raise _invalid_proxy_error()
+    scheme = "socks5" if raw_scheme == "socks5h" else raw_scheme
     host = parsed.hostname
-    if host is None:
-        return {"server": server}
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise _invalid_proxy_error() from exc
+    if host is None or parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+        raise _invalid_proxy_error()
 
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"
-    netloc = host if parsed.port is None else f"{host}:{parsed.port}"
-    stripped = SplitResult(scheme, netloc, parsed.path, parsed.query, parsed.fragment)
+    netloc = host if port is None else f"{host}:{port}"
+    stripped = SplitResult(scheme, netloc, "", "", "")
     normalized = {"server": urlunsplit(stripped)}
 
     if parsed.username is not None:
@@ -272,3 +327,10 @@ def _normalize_proxy_server(server: str) -> dict[str, str]:
     if parsed.password is not None:
         normalized["password"] = unquote(parsed.password)
     return normalized
+
+
+def _invalid_proxy_error() -> CamouflareError:
+    return CamouflareError(
+        "Request parameter 'proxy' must contain a valid HTTP(S), SOCKS4, or SOCKS5 server.",
+        error_code=V1ErrorCode.INVALID_REQUEST,
+    )

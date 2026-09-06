@@ -31,8 +31,8 @@ its main focus is predictable operation:
   internal error. When no proxy is configured, GET can fall back to direct HTTP after a
   browser transport failure, and an `ajax=true` GET that asks for no cookies, wait time,
   or screenshot is tried over direct HTTP first; that preflight response omits
-  `fallbackUsed` because no navigation was attempted. POST is never replayed
-  automatically.
+  `fallbackUsed` because no navigation was attempted. POST uses the browser context's
+  request transport with automatic redirects disabled, so it is never replayed.
 - **Self-healing lifecycle.** Browser liveness is checked before leasing capacity;
   unhealthy, old, or overused browsers retire through bounded cleanup that survives
   caller cancellation.
@@ -45,8 +45,9 @@ its main focus is predictable operation:
   [recorded evidence](docs/benchmarks/README.md).
 - **Hardened, verifiable delivery.** The container runs as a non-root user; Compose
   binds to loopback, requires a token, drops Linux capabilities, and applies memory,
-  shared-memory, and PID limits. Multi-architecture releases include SBOM and
-  provenance evidence.
+  shared-memory, and PID limits. The Camoufox executable archive is selected from a
+  reviewed allowlist and verified by SHA-256 before extraction. Multi-architecture
+  releases include SBOM and provenance evidence.
 - **Small deployment surface.** One container and no external state service keep
   setup simple. The tradeoff is explicit: one trusted user, one worker, and no shared
   sessions across replicas.
@@ -165,6 +166,15 @@ Common request fields are `url`, `maxTimeout`, `session`, `proxy`, `cookies`,
 `headers`, `userAgent`, `postData`, `waitInSeconds`, `disableMedia`,
 `returnOnlyCookies`, and `returnScreenshot`.
 
+Caller-supplied non-`User-Agent` headers select transports with enforceable redirect
+boundaries. A `request.get` carrying them uses direct HTTP, strips them before any
+cross-origin redirect, and is supported only for stateless requests without a proxy or
+screenshots. A `request.post` uses the browser context request transport and returns a
+redirect response without following it. These transport paths return the buffered HTTP
+response rather than a JavaScript-rendered page, so browser challenge handling does not
+apply. `User-Agent` is the compatibility exception: whether supplied through `headers`
+or `userAgent`, it defines browser identity for the whole context.
+
 Other endpoints:
 
 - `GET /` returns service metadata.
@@ -179,7 +189,14 @@ Other endpoints:
 
 Send either `Authorization: Bearer <token>` or `X-API-Token: <token>` on every
 endpoint except `/health`. Binding `HOST` to a non-loopback address requires
-`CAMOUFLARE_API_TOKEN`; loopback binds may run without one.
+`CAMOUFLARE_API_TOKEN`; loopback binds may run without one. Tokenless loopback mode
+accepts only loopback peers and `Host` values, rejects cross-origin browser requests,
+and requires an `application/json` or `application/*+json` content type on `POST /v1`.
+
+Use the `camouflare` command or `python -m camouflare` for tokenless local development.
+The reusable `camouflare.asgi:app` entry point always requires
+`CAMOUFLARE_API_TOKEN`, because an external ASGI server can override the configured
+bind address.
 
 ## Configuration
 

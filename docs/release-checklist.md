@@ -27,6 +27,10 @@ change description and approve the protected `release` environment before public
 - [ ] Obtain maintainer approval for the exact changelog/release wording.
 - [ ] Confirm all CI jobs pass on Python 3.11–3.14.
 - [ ] Confirm real-browser, package-install, Docker smoke, coverage, type, and format gates pass.
+- [ ] Confirm the exact Camoufox `release_tag` and every archive in
+  `scripts/camoufox-artifacts.json` match independently verified upstream metadata and
+  SHA-256 digests; update the reviewed tag and pins together when changing the browser
+  release.
 - [ ] Review high/critical scan results and remove obsolete security exceptions.
 - [ ] Confirm every remaining exception has a specific reason and unexpired `expires_on` date.
 

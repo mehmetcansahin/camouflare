@@ -12,6 +12,7 @@ from camouflare.config import Settings, normalize_proxy
 from camouflare.errors import CamouflareError, V1ErrorCode
 from camouflare.metrics import record_session_event
 from camouflare.models import V1Request, V1Response
+from camouflare.navigation import DirectHttpExecutor, active_direct_http_executor
 from camouflare.pool import BrowserPool, PersistentCapacityError
 from camouflare.protocols import BrowserProxy, ContextOptions, PageLike
 from camouflare.proxy import open_proxy_lease
@@ -39,8 +40,15 @@ class CommandService:
     sessions: SessionManager
     captcha_provider: CaptchaProvider
     cleanup: CleanupSupervisor | None = None
+    direct_http: DirectHttpExecutor | None = None
 
     async def dispatch(self, request: V1Request, *, start_timestamp: int) -> V1Response:
+        if self.direct_http is None:
+            return await self._dispatch(request, start_timestamp=start_timestamp)
+        with active_direct_http_executor(self.direct_http):
+            return await self._dispatch(request, start_timestamp=start_timestamp)
+
+    async def _dispatch(self, request: V1Request, *, start_timestamp: int) -> V1Response:
         return await dispatch_v1(
             request,
             pool=self.pool,
@@ -70,7 +78,10 @@ async def dispatch_v1(
     if request.cmd != "sessions.destroy":
         # Keep the target alive until session_for_request can rotate it while
         # preserving its proxy and TTL.
-        await sessions.prune_expired(exclude=request.session)
+        await sessions.prune_expired(
+            exclude=request.session,
+            wait_for_cleanup=False,
+        )
 
     if request.cmd == "sessions.create":
         return await sessions_create(
@@ -222,22 +233,56 @@ async def execute_request(
                 if sessions.get(request.session) is not session:
                     raise RuntimeError("The session was closed by a concurrent request.")
                 session.touch()
-                page = await session.context.new_page()
+                existing_page_ids = _context_page_ids(session.context)
+                page: PageLike | None = None
                 try:
+                    try:
+                        page = await session.context.new_page()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        # A failed page creation gives us no evidence that this
+                        # persistent context can serve another request. Quarantine
+                        # it even when the driver introduces an unfamiliar error
+                        # string; only the public error classification remains
+                        # marker-based.
+                        await sessions.evict_if_current(session)
+                        if is_best_effort_browser_error(exc):
+                            raise CamouflareError(
+                                "Browser transport closed before a session page could be created.",
+                                error_code=V1ErrorCode.BROWSER_TRANSPORT_CLOSED,
+                                retryable=request.cmd == "request.get",
+                                # No target request can have been sent before
+                                # BrowserContext.new_page() returns.
+                                request_outcome_unknown=False,
+                            ) from exc
+                        raise
                     response = await solve_request(
                         request,
                         context=session.context,
                         page=page,
                         captcha_provider=captcha_provider,
                         limits=settings.resource_limits,
-                        allow_direct_http_fallback=session.proxy is None,
+                        # A direct client cannot faithfully reproduce all
+                        # persistent browser-context state (notably cookies),
+                        # so a failed session navigation must stay a browser
+                        # transport error instead of making an unauthenticated
+                        # fallback request.
+                        allow_direct_http_fallback=False,
                         allow_direct_http_first=False,
                         cleanup_supervisor=cleanup,
                         cleanup_timeout_seconds=settings.cleanup_timeout_seconds,
                     )
+                    if response.error_code is V1ErrorCode.BROWSER_TRANSPORT_CLOSED:
+                        await _evict_session_if_context_unusable(
+                            session,
+                            sessions=sessions,
+                        )
                 finally:
-                    await close_page(
+                    await close_request_pages(
+                        session.context,
                         page,
+                        existing_page_ids=existing_page_ids,
                         cleanup_supervisor=cleanup,
                         timeout_seconds=settings.cleanup_timeout_seconds,
                     )
@@ -252,8 +297,10 @@ async def execute_request(
                 async with pool.lease_context(
                     **context_options(proxy_lease.browser_proxy, request)
                 ) as lease:
-                    page = await lease.context.new_page()
+                    existing_page_ids = _context_page_ids(lease.context)
+                    page = None
                     try:
+                        page = await lease.context.new_page()
                         response = await solve_request(
                             request,
                             context=lease.context,
@@ -266,8 +313,10 @@ async def execute_request(
                             cleanup_timeout_seconds=settings.cleanup_timeout_seconds,
                         )
                     finally:
-                        await close_page(
+                        await close_request_pages(
+                            lease.context,
                             page,
+                            existing_page_ids=existing_page_ids,
                             cleanup_supervisor=cleanup,
                             timeout_seconds=settings.cleanup_timeout_seconds,
                         )
@@ -409,6 +458,81 @@ async def close_page(
             logger.warning("Page cleanup exceeded %.3f seconds.", timeout_seconds)
         else:
             logger.warning("Ignoring page close error after a completed solve.", exc_info=True)
+
+
+def _context_page_ids(context: Any) -> set[int]:
+    try:
+        return {id(page) for page in context.pages}
+    except Exception:
+        return set()
+
+
+async def _evict_session_if_context_unusable(
+    session: Session,
+    *,
+    sessions: SessionManager,
+) -> None:
+    """Probe a session after a transport error and quarantine only a dead context.
+
+    A renderer crash is reported with the same public error code as a browser or
+    context disconnect. Successfully opening a fresh page proves the persistent
+    context is still usable; the normal request-page cleanup closes that probe page.
+    Any probe failure leaves usability unproven, so the exact session is quarantined
+    even if the driver error text is new to the public classifier.
+    """
+
+    try:
+        await session.context.new_page()
+    except asyncio.CancelledError:
+        # The original solve already proved a transport failure, and cancellation
+        # leaves this follow-up probe inconclusive. Do not return an unproven
+        # persistent context to future callers.
+        await sessions.evict_if_current(session)
+        raise
+    except Exception as exc:
+        if not is_best_effort_browser_error(exc):
+            logger.warning(
+                "Session context probe failed with an unrecognized error after "
+                "a browser transport failure; evicting the session.",
+                exc_info=True,
+            )
+        await sessions.evict_if_current(session)
+
+
+async def close_request_pages(
+    context: Any,
+    primary_page: PageLike | None,
+    *,
+    existing_page_ids: set[int],
+    cleanup_supervisor: CleanupSupervisor | None = None,
+    timeout_seconds: float = 10,
+) -> None:
+    """Close the primary page and every popup created during this request."""
+    pages: list[PageLike] = []
+    seen: set[int] = set()
+    try:
+        candidates = list(context.pages)
+    except Exception:
+        candidates = []
+    if primary_page is not None:
+        candidates.append(primary_page)
+    for page in candidates:
+        identity = id(page)
+        if identity in existing_page_ids or identity in seen:
+            continue
+        seen.add(identity)
+        pages.append(page)
+
+    await asyncio.gather(
+        *(
+            close_page(
+                page,
+                cleanup_supervisor=cleanup_supervisor,
+                timeout_seconds=timeout_seconds,
+            )
+            for page in pages
+        )
+    )
 
 
 async def _close_proxy_best_effort(

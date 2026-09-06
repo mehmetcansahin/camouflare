@@ -118,7 +118,6 @@ class FakePage:
         self.extra_http_headers_calls: list[dict[str, str]] = []
         self.init_scripts: list[str] = []
         self.screenshot_value = b"png-bytes"
-        self.posted_form: dict[str, str] | None = None
         self.goto_failures: dict[str, Exception] = {}
         self.goto_response: FakeResponse | None = None
         self.closed = False
@@ -181,9 +180,6 @@ class FakePage:
 
     async def screenshot(self, *, type: str = "png") -> bytes:
         return self.screenshot_value
-
-    async def set_content(self, html: str) -> None:
-        self.content_value = html
 
     async def set_extra_http_headers(self, headers: dict[str, str]) -> None:
         self.events.append("headers")

@@ -6,6 +6,7 @@ import pytest
 
 import camouflare.config as config_module
 from camouflare.config import Settings, normalize_proxy
+from camouflare.errors import CamouflareError, V1ErrorCode
 from camouflare.limits import (
     MAX_COOKIE_BYTES,
     MAX_SESSION_ID_LENGTH,
@@ -79,6 +80,29 @@ def test_v1_request_user_agent_header_is_context_only() -> None:
     assert req.target_user_agent() == "HeaderBrowser/1.0"
 
 
+@pytest.mark.parametrize(
+    "request_fields",
+    [
+        {"headers": {"Bad Header": "value"}},
+        {"headers": {"X-Test": "safe\r\nInjected: true"}},
+        {"headers": {"X-Test": "safe\x00unsafe"}},
+        {"userAgent": "Browser/1.0\nInjected: true"},
+        {"userAgent": "Browser/1.0\x7f"},
+    ],
+)
+def test_v1_request_rejects_invalid_header_syntax(
+    request_fields: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError, match="invalid"):
+        V1Request.model_validate(
+            {
+                "cmd": "request.get",
+                "url": "https://example.com",
+                **request_fields,
+            }
+        )
+
+
 def test_normalize_proxy_extracts_socks5h_url_credentials_for_playwright() -> None:
     proxy = normalize_proxy({"url": "socks5h://user:pass@185.184.26.78:1080"})
 
@@ -87,6 +111,160 @@ def test_normalize_proxy_extracts_socks5h_url_credentials_for_playwright() -> No
         "username": "user",
         "password": "pass",
     }
+
+
+def test_normalize_proxy_accepts_flaresolverr_socks4_proxy() -> None:
+    assert normalize_proxy({"url": "socks4://proxy.example:1080"}) == {
+        "server": "socks4://proxy.example:1080"
+    }
+
+
+@pytest.mark.parametrize(
+    "proxy",
+    [
+        {"url": "socks4://user:pass@proxy.example:1080"},
+        {
+            "url": "socks4://proxy.example:1080",
+            "username": "user",
+            "password": "pass",
+        },
+    ],
+)
+def test_normalize_proxy_rejects_socks4_authentication(proxy: dict[str, str]) -> None:
+    with pytest.raises(CamouflareError) as raised:
+        normalize_proxy(proxy)
+
+    assert raised.value.error_code is V1ErrorCode.INVALID_REQUEST
+    assert "SOCKS4" in str(raised.value)
+
+
+def test_normalize_proxy_accepts_socks5_authentication_at_255_byte_boundary() -> None:
+    proxy = normalize_proxy(
+        {
+            "url": "socks5://proxy.example:1080",
+            "username": "u" * 255,
+            "password": "p" * 255,
+        }
+    )
+
+    assert proxy is not None
+    assert len(proxy["username"].encode("utf-8")) == 255
+    assert len(proxy["password"].encode("utf-8")) == 255
+
+
+@pytest.mark.parametrize(
+    ("credential_name", "credential"),
+    [
+        ("username", "u" * 256),
+        ("password", "ü" * 128),
+    ],
+)
+def test_normalize_proxy_rejects_oversized_socks5_authentication(
+    credential_name: str,
+    credential: str,
+) -> None:
+    with pytest.raises(CamouflareError) as raised:
+        normalize_proxy(
+            {
+                "url": "socks5://proxy.example:1080",
+                credential_name: credential,
+            }
+        )
+
+    assert raised.value.error_code is V1ErrorCode.INVALID_REQUEST
+    assert credential_name in str(raised.value)
+    assert "255 UTF-8 bytes" in str(raised.value)
+
+
+def test_v1_request_scopes_name_value_cookie_to_target_and_maps_expiry() -> None:
+    request = V1Request.model_validate(
+        {
+            "cmd": "request.get",
+            "url": "https://example.com/account",
+            "cookies": [
+                {
+                    "name": "session",
+                    "value": "secret",
+                    "expiry": 1_900_000_000,
+                    "httpOnly": True,
+                    "size": 13,
+                    "session": False,
+                }
+            ],
+        }
+    )
+
+    assert request.cookies == [
+        {
+            "name": "session",
+            "value": "secret",
+            "url": "https://example.com/account",
+            "expires": 1_900_000_000,
+            "httpOnly": True,
+        }
+    ]
+
+
+@pytest.mark.parametrize("domain", ["com", ".co.uk", "github.io"])
+def test_v1_request_rejects_public_suffix_cookie_domains(domain: str) -> None:
+    with pytest.raises(ValueError, match="public suffix"):
+        V1Request(
+            cmd="request.get",
+            url="https://example.com",
+            cookies=[{"name": "session", "value": "secret", "domain": domain}],
+        )
+
+
+def test_v1_request_cookie_accepts_browser_values_and_drops_unknown_export_fields() -> None:
+    request = V1Request.model_validate(
+        {
+            "cmd": "request.get",
+            "url": "https://example.com",
+            "cookies": [
+                {
+                    "name": "prefs",
+                    "value": '{"a": 1, "b": "two words"}',
+                    "domain": ".example.com",
+                    "path": "/",
+                    "sameSite": "lax",
+                    "hostOnly": False,
+                    "storeId": "0",
+                    "id": 7,
+                }
+            ],
+        }
+    )
+
+    assert request.cookies == [
+        {
+            "name": "prefs",
+            "value": '{"a": 1, "b": "two words"}',
+            "domain": ".example.com",
+            "path": "/",
+            "sameSite": "Lax",
+        }
+    ]
+
+
+@pytest.mark.parametrize("value", ["a;b", "line\nbreak", "tab\there", "\x7f"])
+def test_v1_request_rejects_cookie_values_browsers_cannot_store(value: str) -> None:
+    with pytest.raises(ValueError, match=r"cookies\[0\]\.value"):
+        V1Request(
+            cmd="request.get",
+            url="https://example.com",
+            cookies=[{"name": "session", "value": value, "domain": "example.com"}],
+        )
+
+
+def test_v1_request_rejects_unknown_same_site_spelling() -> None:
+    with pytest.raises(ValueError, match=r"cookies\[0\]\.sameSite"):
+        V1Request(
+            cmd="request.get",
+            url="https://example.com",
+            cookies=[
+                {"name": "session", "value": "secret", "domain": "example.com", "sameSite": "no"}
+            ],
+        )
 
 
 def test_normalize_proxy_preserves_explicit_credentials_over_url_credentials() -> None:
@@ -293,12 +471,21 @@ def test_diagnostics_response_rejects_unknown_capacity_state() -> None:
 
 
 def test_v1_request_accepts_structural_limit_boundaries() -> None:
+    url_prefix = "https://example.com/"
     request = V1Request(
         cmd="request.get",
-        url="h" * MAX_URL_LENGTH,
+        url=url_prefix + "h" * (MAX_URL_LENGTH - len(url_prefix)),
         session="s" * MAX_SESSION_ID_LENGTH,
         headers={f"X-{index}": "v" for index in range(128)},
-        cookies=[{"name": f"c{index}", "value": "v"} for index in range(300)],
+        cookies=[
+            {
+                "name": f"c{index}",
+                "value": "v",
+                "domain": "example.com",
+                "path": "/",
+            }
+            for index in range(300)
+        ],
     )
 
     assert len(request.url or "") == MAX_URL_LENGTH
@@ -323,12 +510,13 @@ def test_v1_request_rejects_structural_limit_plus_one(payload: dict[str, object]
 
 def test_header_and_cookie_byte_limits_accept_exact_boundary() -> None:
     header_overhead = json_size({"X": ""})
-    cookie_overhead = json_size([{"name": "x", "value": ""}])
+    cookie = {"name": "x", "value": "", "domain": "example.com", "path": "/"}
+    cookie_overhead = json_size([cookie])
 
     request = V1Request(
         cmd="request.get",
         headers={"X": "v" * (MAX_TARGET_HEADER_BYTES - header_overhead)},
-        cookies=[{"name": "x", "value": "v" * (MAX_COOKIE_BYTES - cookie_overhead)}],
+        cookies=[cookie | {"value": "v" * (MAX_COOKIE_BYTES - cookie_overhead)}],
     )
 
     assert json_size(request.headers) == MAX_TARGET_HEADER_BYTES
@@ -337,7 +525,7 @@ def test_header_and_cookie_byte_limits_accept_exact_boundary() -> None:
 
 def test_header_and_cookie_byte_limits_reject_boundary_plus_one() -> None:
     header_overhead = json_size({"X": ""})
-    cookie_overhead = json_size([{"name": "x", "value": ""}])
+    cookie_overhead = json_size([{"name": "x", "value": "", "domain": "example.com", "path": "/"}])
 
     with pytest.raises(ValueError, match="headers"):
         V1Request(
@@ -351,6 +539,8 @@ def test_header_and_cookie_byte_limits_reject_boundary_plus_one() -> None:
                 {
                     "name": "x",
                     "value": "v" * (MAX_COOKIE_BYTES - cookie_overhead + 1),
+                    "domain": "example.com",
+                    "path": "/",
                 }
             ],
         )

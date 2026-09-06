@@ -70,7 +70,7 @@ async def browser_client(browser_app: FastAPI) -> AsyncIterator[AsyncClient]:
         await browser_app.state.pool.start()
         async with AsyncClient(
             transport=ASGITransport(app=browser_app, raise_app_exceptions=False),
-            base_url="http://camouflare.test",
+            base_url="http://127.0.0.1",
         ) as client:
             yield client
     finally:

@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import math
+import re
 import time
 from collections.abc import Mapping
+from ipaddress import ip_address
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from camouflare._version import __version__
-from camouflare.errors import V1ErrorCode
+from camouflare.config import normalize_proxy
+from camouflare.cookie_policy import is_public_suffix
+from camouflare.errors import CamouflareError, V1ErrorCode
 from camouflare.limits import (
     MAX_COOKIE_BYTES,
     MAX_COOKIES,
@@ -16,6 +22,32 @@ from camouflare.limits import (
     MAX_TARGET_HEADERS,
     MAX_URL_LENGTH,
     json_size,
+)
+
+_COOKIE_NAME = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+# Browsers store any printable ASCII value except the pair separator, which is
+# looser than the RFC 6265 cookie-octet grammar. Cookies that Camouflare itself
+# collected must round-trip, so accept what the browser accepts.
+_COOKIE_VALUE = re.compile(r"^[\x20-\x3A\x3C-\x7E]*$")
+_HTTP_FIELD_NAME = _COOKIE_NAME
+_COOKIE_SAME_SITE_VALUES = {"strict": "Strict", "lax": "Lax", "none": "None"}
+# Unknown fields (Puppeteer's ``session``/``priority``, Chrome exports'
+# ``hostOnly``/``storeId``, ...) are dropped like every other unknown request
+# field; only the fields below reach the browser.
+_COOKIE_FIELDS = frozenset(
+    {
+        "name",
+        "value",
+        "url",
+        "domain",
+        "path",
+        "expires",
+        "expiry",
+        "httpOnly",
+        "secure",
+        "sameSite",
+        "partitionKey",
+    }
 )
 
 
@@ -136,8 +168,11 @@ class V1Request(BaseModel):
         default=None,
         max_length=MAX_TARGET_HEADERS,
         description=(
-            "HTTP headers to apply to the target page request. Header names and "
-            "values are coerced to strings."
+            "Origin-bound target headers. Non-User-Agent headers make request.get use "
+            "stateless direct HTTP without a proxy and make request.post use the browser "
+            "context request transport with redirects disabled. Header names and values "
+            "are coerced to strings. User-Agent is the exception: it configures browser "
+            "identity for the whole context."
         ),
     )
     user_agent: str | None = Field(
@@ -158,6 +193,49 @@ class V1Request(BaseModel):
         validation_alias=AliasChoices("returnRawHtml", "return_raw_html"),
     )
 
+    @field_validator("url")
+    @classmethod
+    def validate_target_url(cls, value: str | None) -> str | None:
+        if value:
+            _validate_absolute_http_url(value.replace('"', "").strip(), parameter="url")
+        return value
+
+    @field_validator("proxy")
+    @classmethod
+    def validate_proxy(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        if value is not None:
+            try:
+                normalized = normalize_proxy(value)
+            except CamouflareError as exc:
+                raise ValueError(str(exc)) from exc
+            if normalized is None:
+                raise ValueError("Request parameter 'proxy' must include a server.")
+        return value
+
+    @field_validator("headers")
+    @classmethod
+    def validate_target_headers(
+        cls,
+        value: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if value is None:
+            return None
+        for name, raw_value in value.items():
+            if not _HTTP_FIELD_NAME.fullmatch(name):
+                raise ValueError(f"Request parameter 'headers' contains invalid name '{name}'.")
+            if raw_value is not None and _has_forbidden_header_control(str(raw_value)):
+                raise ValueError(
+                    f"Request parameter 'headers[{name}]' contains invalid control characters."
+                )
+        return value
+
+    @field_validator("user_agent")
+    @classmethod
+    def validate_user_agent(cls, value: str | None) -> str | None:
+        if value is not None and _has_forbidden_header_control(value):
+            raise ValueError("Request parameter 'userAgent' contains invalid control characters.")
+        return value
+
     @model_validator(mode="after")
     def validate_structural_sizes(self) -> V1Request:
         if self.headers is not None and json_size(self.headers) > MAX_TARGET_HEADER_BYTES:
@@ -168,6 +246,18 @@ class V1Request(BaseModel):
             raise ValueError(
                 f"Request parameter 'cookies' exceeds the {MAX_COOKIE_BYTES}-byte limit."
             )
+        if self.cookies is not None:
+            normalized_cookies: list[dict[str, Any]] = []
+            for index, cookie in enumerate(self.cookies):
+                normalized_cookies.append(
+                    _validate_cookie(cookie, index=index, target_url=self.url)
+                )
+            if json_size(normalized_cookies) > MAX_COOKIE_BYTES:
+                raise ValueError(
+                    f"Request parameter 'cookies' exceeds the {MAX_COOKIE_BYTES}-byte limit "
+                    "after applying target URL cookie scope."
+                )
+            self.cookies = normalized_cookies
         return self
 
     def target_headers(self) -> dict[str, str]:
@@ -208,6 +298,178 @@ class V1Request(BaseModel):
             if str(name).lower() == "user-agent" and value is not None:
                 return str(value)
         return None
+
+
+def _validate_absolute_http_url(value: str, *, parameter: str) -> None:
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ValueError(
+            f"Request parameter '{parameter}' must be a valid absolute http or https URL."
+        )
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname
+        _ = parsed.port
+    except ValueError as exc:
+        raise ValueError(
+            f"Request parameter '{parameter}' must be a valid absolute http or https URL."
+        ) from exc
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or hostname is None
+        or any(character.isspace() for character in hostname)
+    ):
+        raise ValueError(
+            f"Request parameter '{parameter}' must be a valid absolute http or https URL."
+        )
+
+
+def _has_forbidden_header_control(value: str) -> bool:
+    return any(
+        (ord(character) < 32 and character != "\t") or ord(character) == 127 for character in value
+    )
+
+
+def _validate_cookie(
+    cookie: dict[str, Any],
+    *,
+    index: int,
+    target_url: str | None,
+) -> dict[str, Any]:
+    name = cookie.get("name")
+    value = cookie.get("value")
+    if not isinstance(name, str) or not _COOKIE_NAME.fullmatch(name):
+        raise ValueError(f"Request parameter 'cookies[{index}].name' is invalid.")
+    if not isinstance(value, str) or not _COOKIE_VALUE.fullmatch(value):
+        raise ValueError(f"Request parameter 'cookies[{index}].value' is invalid.")
+
+    normalized_input = {
+        field_name: field_value
+        for field_name, field_value in cookie.items()
+        if field_name in _COOKIE_FIELDS
+    }
+    if "expiry" in normalized_input:
+        if (
+            "expires" in normalized_input
+            and normalized_input["expires"] != normalized_input["expiry"]
+        ):
+            raise ValueError(
+                f"Request parameter 'cookies[{index}]' cannot contain conflicting "
+                "'expiry' and 'expires' values."
+            )
+        normalized_input["expires"] = normalized_input.pop("expiry")
+    if "sameSite" in normalized_input:
+        same_site = normalized_input["sameSite"]
+        canonical_same_site = (
+            _COOKIE_SAME_SITE_VALUES.get(same_site.casefold())
+            if isinstance(same_site, str)
+            else None
+        )
+        if canonical_same_site is None:
+            raise ValueError(f"Request parameter 'cookies[{index}].sameSite' is invalid.")
+        normalized_input["sameSite"] = canonical_same_site
+
+    cookie_url = normalized_input.get("url")
+    domain = normalized_input.get("domain")
+    if cookie_url is not None and domain is not None:
+        raise ValueError(
+            f"Request parameter 'cookies[{index}]' cannot include both 'url' and 'domain'."
+        )
+    if cookie_url is not None:
+        if not isinstance(cookie_url, str):
+            raise ValueError(f"Request parameter 'cookies[{index}].url' is invalid.")
+        _validate_absolute_http_url(cookie_url, parameter=f"cookies[{index}].url")
+    elif domain is not None:
+        if not isinstance(domain, str) or not _valid_cookie_domain(domain):
+            raise ValueError(f"Request parameter 'cookies[{index}].domain' is invalid.")
+        if is_public_suffix(domain):
+            raise ValueError(
+                f"Request parameter 'cookies[{index}].domain' cannot be a public suffix."
+            )
+    elif target_url:
+        cookie_url = target_url.replace('"', "").strip()
+        normalized_input["url"] = cookie_url
+    else:
+        raise ValueError(
+            f"Request parameter 'cookies[{index}]' must include either 'url' or 'domain' "
+            "when no target URL is available."
+        )
+
+    normalized = {key: value for key, value in normalized_input.items() if value is not None}
+    if domain is not None or "path" in normalized_input:
+        path = normalized_input.get("path") if "path" in normalized_input else "/"
+        if not isinstance(path, str) or not path.startswith("/"):
+            raise ValueError(f"Request parameter 'cookies[{index}].path' is invalid.")
+        if any(ord(character) < 32 or ord(character) == 127 for character in path):
+            raise ValueError(f"Request parameter 'cookies[{index}].path' is invalid.")
+        normalized["path"] = path
+    for field_name in ("secure", "httpOnly"):
+        if field_name in normalized_input and not isinstance(normalized_input[field_name], bool):
+            raise ValueError(f"Request parameter 'cookies[{index}].{field_name}' is invalid.")
+    if "expires" in normalized_input:
+        expires = normalized_input["expires"]
+        if (
+            isinstance(expires, bool)
+            or not isinstance(expires, (int, float))
+            or not math.isfinite(float(expires))
+        ):
+            raise ValueError(f"Request parameter 'cookies[{index}].expires' is invalid.")
+    if "partitionKey" in normalized_input:
+        partition_key = normalized_input["partitionKey"]
+        if not isinstance(partition_key, str):
+            raise ValueError(f"Request parameter 'cookies[{index}].partitionKey' is invalid.")
+        _validate_absolute_http_url(
+            partition_key,
+            parameter=f"cookies[{index}].partitionKey",
+        )
+        if not normalized_input.get("secure"):
+            raise ValueError(
+                f"Request parameter 'cookies[{index}].partitionKey' requires 'secure' to be true."
+            )
+    if normalized_input.get("sameSite") == "None" and not normalized_input.get("secure"):
+        raise ValueError(
+            f"Request parameter 'cookies[{index}].sameSite' = 'None' requires 'secure' to be true."
+        )
+    if name.startswith("__Secure-") and not normalized_input.get("secure"):
+        raise ValueError(
+            f"Request parameter 'cookies[{index}]' uses the __Secure- prefix without 'secure'."
+        )
+    if name.startswith("__Host-") and (
+        not normalized_input.get("secure")
+        or cookie_url is None
+        or normalized.get("path", "/") != "/"
+    ):
+        raise ValueError(f"Request parameter 'cookies[{index}]' has invalid __Host- cookie scope.")
+    return normalized
+
+
+def _valid_cookie_domain(domain: str) -> bool:
+    if (
+        not domain
+        or domain.startswith("..")
+        or domain.endswith(".")
+        or any(character.isspace() for character in domain)
+        or any(character in domain for character in "/@?#:")
+    ):
+        return False
+    host = domain.lstrip(".")
+    try:
+        ip_address(host)
+        return True
+    except ValueError:
+        pass
+    try:
+        ascii_host = host.encode("idna").decode("ascii")
+    except UnicodeError:
+        return False
+    if len(ascii_host) > 253:
+        return False
+    return all(
+        0 < len(label) <= 63
+        and label[0].isalnum()
+        and label[-1].isalnum()
+        and all(character.isalnum() or character == "-" for character in label)
+        for label in ascii_host.split(".")
+    )
 
 
 class Solution(BaseModel):

@@ -91,6 +91,7 @@ class _PersistentReservation:
 
 @dataclass
 class _StartupRegistration:
+    tasks: tuple[asyncio.Task[BrowserSlot], ...]
     cancelled: bool = False
 
 
@@ -162,6 +163,12 @@ class BrowserPool:
         # third-party launch cannot pin capacity forever. A second full generation
         # opens the circuit and bounds cancellation-resistant launch tasks.
         self._max_abandoned_creations = max(1, max_browsers * 2)
+        # Usable capacity may temporarily overlap a retiring generation so a
+        # request does not always pay for browser cleanup. Count every live or
+        # quarantined generation against a separate hard ceiling, though: slow or
+        # failed closes must not let repeated requests grow browser processes
+        # without bound.
+        self._max_physical_generations = max(1, max_browsers * 2)
         total_capacity = max_browsers * max_contexts_per_browser
         self._max_persistent_contexts = max(0, total_capacity - reserved_transient_contexts)
         self._slots: list[BrowserSlot] = []
@@ -182,6 +189,8 @@ class BrowserPool:
         self._waiting_requests = 0
         self._condition = asyncio.Condition()
         self._close_lock = asyncio.Lock()
+        self._startup_task: asyncio.Task[None] | None = None
+        self._startup_waiters = 0
         self._started = False
         self._starting = False
         self._closed = False
@@ -199,11 +208,51 @@ class BrowserPool:
 
     async def start(self) -> None:
         async with self._condition:
+            if self._closed:
+                raise RuntimeError("Browser pool is closed")
+            if self._started and not self._starting:
+                return
+            startup = self._startup_task
+            if startup is None:
+                startup = asyncio.create_task(
+                    self._start_once(),
+                    name="camouflare-pool-start",
+                )
+                startup.add_done_callback(self._startup_task_done)
+                self._startup_task = startup
+            self._startup_waiters += 1
+
+        waiter_released = False
+        try:
+            await asyncio.shield(startup)
+        except asyncio.CancelledError:
+            self._startup_waiters -= 1
+            waiter_released = True
+            if self._startup_waiters == 0 and not startup.done():
+                startup.cancel()
+                # The startup task owns launch reconciliation. Waiting for its
+                # bounded unwind preserves the old single-caller cancellation
+                # guarantee without allowing one of several callers to sabotage
+                # the initialization they are still awaiting.
+                with suppress(BaseException):
+                    await asyncio.shield(startup)
+            raise
+        finally:
+            if not waiter_released:
+                self._startup_waiters -= 1
+            if self._startup_waiters < 0:
+                raise RuntimeError("Browser-pool startup waiter accounting underflow")
+
+    async def _start_once(self) -> None:
+        async with self._condition:
             if self._started:
                 return
             if self._closed:
                 raise RuntimeError("Browser pool is closed")
-            if len(self._create_watchers) + self._min_browsers > self._max_abandoned_creations:
+            if (
+                self._physical_generations_unlocked() + self._min_browsers
+                > self._max_physical_generations
+            ):
                 raise PoolAcquireTimeout(
                     "Browser startup launch quarantine is at its bounded limit."
                 )
@@ -242,21 +291,25 @@ class BrowserPool:
                 errors.append(exc)
 
         if pending or errors:
-            async with self._condition:
-                for task in done:
-                    self._finish_create_task_unlocked(task)
-                for task in pending:
-                    self._abandon_create_task_unlocked(task)
-                close_tasks = [
-                    self._schedule_close_unlocked(slot, reason="error") for slot in slots
-                ]
-                if not self._closed:
-                    self._started = False
-                self._starting = False
-                if pending:
-                    self._log_acquire_timeout_unlocked("browser_launch")
-                self._publish_metrics_unlocked()
-                self._condition.notify_all()
+            try:
+                async with self._condition:
+                    for task in done:
+                        self._finish_create_task_unlocked(task)
+                    for task in pending:
+                        self._abandon_create_task_unlocked(task)
+                    close_tasks = [
+                        self._schedule_close_unlocked(slot, reason="error") for slot in slots
+                    ]
+                    if not self._closed:
+                        self._started = False
+                    self._starting = False
+                    if pending:
+                        self._log_acquire_timeout_unlocked("browser_launch")
+                    self._publish_metrics_unlocked()
+                    self._condition.notify_all()
+            except BaseException:
+                await self._abort_startup_tasks(tasks)
+                raise
             await asyncio.gather(
                 *(asyncio.shield(task) for task in close_tasks if task is not None),
                 return_exceptions=True,
@@ -265,13 +318,11 @@ class BrowserPool:
                 raise errors[0]
             raise PoolAcquireTimeout("Timed out while starting browser pool capacity.")
 
-        async with self._condition:
-            for task in tasks:
-                self._finish_create_task_unlocked(task)
-            self._publish_metrics_unlocked()
-            self._condition.notify_all()
-
-        registration_state = _StartupRegistration()
+        # Keep successful factory tasks registered until their browser slots are
+        # appended under the same condition lock. Otherwise there is a handoff
+        # window where neither ``_create_tasks`` nor ``_slots`` accounts for the
+        # live browsers, allowing concurrent demand to exceed both capacity gates.
+        registration_state = _StartupRegistration(tasks=tuple(tasks))
         registration = asyncio.create_task(
             self._register_started_slots(slots, registration_state),
             name="camouflare-pool-register-started-browsers",
@@ -284,7 +335,7 @@ class BrowserPool:
             self._started = False
             self._starting = False
             recovery = asyncio.create_task(
-                self._recover_cancelled_start(registration, slots),
+                self._recover_cancelled_start(registration, slots, registration_state),
                 name="camouflare-pool-recover-cancelled-start",
             )
             recovery.add_done_callback(self._background_task_done)
@@ -294,6 +345,24 @@ class BrowserPool:
         self._starting = False
         if not registered:
             raise RuntimeError("Browser pool is closed")
+
+    async def _abort_startup_tasks(
+        self,
+        tasks: list[asyncio.Task[BrowserSlot]],
+    ) -> None:
+        async with self._condition:
+            for task in tasks:
+                self._abandon_create_task_unlocked(task)
+            if not self._closed:
+                self._started = False
+            self._starting = False
+            self._publish_metrics_unlocked()
+            self._condition.notify_all()
+
+    def _startup_task_done(self, task: asyncio.Task[None]) -> None:
+        self._background_task_done(task)
+        if self._startup_task is task:
+            self._startup_task = None
 
     def is_full_and_serving(self) -> bool:
         """Report a pool whose every context slot is held by a browser that can serve.
@@ -372,7 +441,10 @@ class BrowserPool:
         # Serializing close calls makes shutdown idempotent while still allowing
         # releases to acquire the pool condition and drain active leases.
         async with self._close_lock:
+            startup: asyncio.Task[None] | None = None
             async with self._condition:
+                startup = self._startup_task
+                startup_in_flight = startup is not None and not startup.done()
                 if self._closed and not (
                     self._slots
                     or self._create_tasks
@@ -380,10 +452,19 @@ class BrowserPool:
                     or self._close_tasks
                     or self._failed_close_slots
                     or self._accounting_tasks
+                    or startup_in_flight
                 ):
                     return
 
                 self._closed = True
+                if startup is not None and not startup.done():
+                    # A completed factory result is handed to a separate
+                    # registration task before it appears in ``_slots``. Cancel
+                    # the startup owner so that its recovery path marks that
+                    # hand-off for shutdown instead of letting close() observe an
+                    # empty pool and return while a live browser is still local to
+                    # the startup coroutine.
+                    startup.cancel()
                 for task in list(self._create_tasks):
                     self._abandon_create_task_unlocked(task)
                 for slot in list(self._failed_close_slots):
@@ -398,6 +479,15 @@ class BrowserPool:
                 self._publish_metrics_unlocked()
                 self._condition.notify_all()
 
+            if startup is not None and not startup.done():
+                # asyncio.wait does not propagate this caller's cancellation to
+                # the already-owned startup task. If close itself is cancelled,
+                # startup recovery therefore keeps ownership of every browser;
+                # otherwise we do not declare shutdown complete until the
+                # registration hand-off has reconciled.
+                await asyncio.wait({startup})
+
+            async with self._condition:
                 # Active browsers stay open until their final context is released.
                 # This avoids closing a browser out from under an in-flight request.
                 while (
@@ -774,6 +864,7 @@ class BrowserPool:
                 if (
                     not launched
                     and len(self._slots) + len(self._create_tasks) < self._max_browsers
+                    and self._physical_generations_unlocked() < self._max_physical_generations
                     and len(self._create_watchers) < self._max_abandoned_creations
                 ):
                     self._start_create_task_unlocked(supervise=True)
@@ -919,6 +1010,15 @@ class BrowserPool:
             "idle_recyclable_slots": snapshot.idle_recyclable_slots,
         }
 
+    def _physical_generations_unlocked(self) -> int:
+        return (
+            len(self._slots)
+            + len(self._create_tasks)
+            + len(self._create_watchers)
+            + len(self._close_tasks)
+            + len(self._failed_close_slots)
+        )
+
     def _publish_metrics_unlocked(self) -> None:
         snapshot = self._snapshot_unlocked()
         self._publish_snapshot_metrics(snapshot)
@@ -1023,6 +1123,7 @@ class BrowserPool:
         occupied = (
             len(self._slots)
             + len(self._create_tasks)
+            + len(self._create_watchers)
             + len(self._close_tasks)
             + len(self._failed_close_slots)
         )
@@ -1310,6 +1411,8 @@ class BrowserPool:
         registration: _StartupRegistration,
     ) -> bool:
         async with self._condition:
+            for task in registration.tasks:
+                self._finish_create_task_unlocked(task)
             if self._closed or registration.cancelled:
                 for slot in slots:
                     self._schedule_close_unlocked(
@@ -1328,15 +1431,24 @@ class BrowserPool:
         self,
         registration_task: asyncio.Task[bool],
         slots: list[BrowserSlot],
+        registration: _StartupRegistration,
     ) -> None:
         with suppress(BaseException):
             await registration_task
         async with self._condition:
+            # A substituted or failing registration implementation may never
+            # perform the normal atomic handoff. Recovery still owns the completed
+            # startup tasks and must release their capacity reservations.
+            for task in registration.tasks:
+                self._finish_create_task_unlocked(task)
             for slot in slots:
-                if slot in self._slots:
-                    self._mark_retiring_unlocked(slot, "error")
-                    if slot.active_contexts == 0:
-                        self._schedule_close_unlocked(slot, reason="error")
+                # Registration may have failed before appending the completed
+                # factory result to ``_slots``. The recovery task owns every
+                # result passed to it, including those never made visible to the
+                # pool, so close them from either state.
+                self._mark_retiring_unlocked(slot, "error")
+                if slot.active_contexts == 0:
+                    self._schedule_close_unlocked(slot, reason="error")
             self._publish_metrics_unlocked()
             self._condition.notify_all()
 

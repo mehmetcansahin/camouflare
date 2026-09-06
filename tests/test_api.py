@@ -73,7 +73,7 @@ async def test_documentation_endpoint_serves_advanced_html() -> None:
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
-        base_url="http://test",
+        base_url="http://127.0.0.1",
     ) as client:
         response = await client.get("/documentation")
 
@@ -98,7 +98,7 @@ async def test_documentation_endpoint_includes_command_examples_and_error_refere
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
-        base_url="http://test",
+        base_url="http://127.0.0.1",
     ) as client:
         response = await client.get("/documentation")
 
@@ -120,7 +120,7 @@ async def test_documentation_endpoint_does_not_touch_browser_pool() -> None:
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
-        base_url="http://test",
+        base_url="http://127.0.0.1",
     ) as client:
         response = await client.get("/documentation")
 
@@ -134,7 +134,7 @@ async def test_openapi_documents_v1_request_schema_and_error_responses() -> None
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
-        base_url="http://test",
+        base_url="http://127.0.0.1",
     ) as client:
         response = await client.get("/openapi.json")
 
@@ -163,7 +163,7 @@ async def test_v1_request_get_matches_flaresolverr_response_shape() -> None:
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
-        base_url="http://test",
+        base_url="http://127.0.0.1",
     ) as client:
         response = await client.post(
             "/v1",
@@ -195,7 +195,7 @@ async def test_api_token_protects_non_health_endpoints() -> None:
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
-        base_url="http://test",
+        base_url="http://127.0.0.1",
     ) as client:
         v1_response = await client.post(
             "/v1",
@@ -230,7 +230,7 @@ async def test_api_token_accepts_authorization_bearer_header() -> None:
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
-        base_url="http://test",
+        base_url="http://127.0.0.1",
     ) as client:
         response = await client.post(
             "/v1",
@@ -254,12 +254,132 @@ async def test_api_token_accepts_x_api_token_header() -> None:
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
-        base_url="http://test",
+        base_url="http://127.0.0.1",
     ) as client:
         response = await client.get("/documentation", headers={"X-API-Token": "secret-token"})
 
     assert response.status_code == 200
     assert "<title>Camouflare API Documentation</title>" in response.text
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("headers", "expected_status", "expected_detail"),
+    [
+        (
+            {"host": "attacker.example", "content-type": "application/json"},
+            400,
+            "Invalid Host header",
+        ),
+        (
+            {"origin": "https://attacker.example", "content-type": "application/json"},
+            403,
+            "Cross-origin requests require CAMOUFLARE_API_TOKEN",
+        ),
+        (
+            {"sec-fetch-site": "cross-site", "content-type": "application/json"},
+            403,
+            "Cross-site requests require CAMOUFLARE_API_TOKEN",
+        ),
+        (
+            {"sec-fetch-site": "same-site", "content-type": "application/json"},
+            403,
+            "Cross-site requests require CAMOUFLARE_API_TOKEN",
+        ),
+        (
+            {"content-type": "text/plain"},
+            415,
+            "Content-Type must be application/json",
+        ),
+    ],
+)
+async def test_tokenless_loopback_rejects_browser_reachable_requests(
+    headers: dict[str, str],
+    expected_status: int,
+    expected_detail: str,
+) -> None:
+    app = create_app(browser_factory=FakeBrowserFactory(), lifespan_enabled=False)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://127.0.0.1:8191",
+    ) as client:
+        response = await client.post(
+            "/v1",
+            headers=headers,
+            content='{"cmd":"sessions.list"}',
+        )
+
+    assert response.status_code == expected_status
+    assert response.json() == {"detail": expected_detail}
+
+
+@pytest.mark.anyio
+async def test_tokenless_loopback_accepts_same_origin_json_requests() -> None:
+    app = create_app(browser_factory=FakeBrowserFactory(), lifespan_enabled=False)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://127.0.0.1:8191",
+    ) as client:
+        response = await client.post(
+            "/v1",
+            headers={
+                "origin": "http://127.0.0.1:8191",
+                "sec-fetch-site": "same-origin",
+                "content-type": "application/problem+json; charset=utf-8",
+            },
+            content='{"cmd":"sessions.list"}',
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+
+
+@pytest.mark.anyio
+async def test_tokenless_factory_rejects_remote_peer_with_spoofed_loopback_host() -> None:
+    app = create_app(browser_factory=FakeBrowserFactory(), lifespan_enabled=False)
+    transport = ASGITransport(app=app, client=("203.0.113.10", 49152))
+
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://127.0.0.1:8191",
+    ) as client:
+        response = await client.post(
+            "/v1",
+            headers={"host": "127.0.0.1:8191"},
+            json={"cmd": "sessions.list"},
+        )
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Tokenless requests require a loopback client"}
+
+
+@pytest.mark.anyio
+async def test_authenticated_mode_preserves_external_asgi_client_compatibility() -> None:
+    app = create_app(
+        settings=Settings(camouflare_api_token="secret-token"),
+        browser_factory=FakeBrowserFactory(),
+        lifespan_enabled=False,
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://service.internal",
+    ) as client:
+        response = await client.post(
+            "/v1",
+            headers={
+                "x-api-token": "secret-token",
+                "origin": "https://client.example",
+                "sec-fetch-site": "cross-site",
+                "content-type": "text/plain",
+            },
+            content='{"cmd":"sessions.list"}',
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
 
 
 @pytest.mark.anyio
@@ -279,7 +399,7 @@ async def test_diagnostics_is_token_protected_passive_and_reports_capacity() -> 
     try:
         async with AsyncClient(
             transport=ASGITransport(app=app),
-            base_url="http://test",
+            base_url="http://127.0.0.1",
         ) as client:
             response = await client.get(
                 "/diagnostics",
@@ -370,7 +490,7 @@ async def test_diagnostics_classifies_capacity_without_leasing_browser(
     try:
         async with AsyncClient(
             transport=ASGITransport(app=app),
-            base_url="http://test",
+            base_url="http://127.0.0.1",
         ) as client:
             response = await client.get("/diagnostics")
     finally:
@@ -391,7 +511,7 @@ async def test_diagnostics_falls_back_to_http_200_when_snapshot_reader_fails(
         raise RuntimeError("corrupt capacity state")
 
     monkeypatch.setattr(app.state.pool, "snapshot", fail_snapshot)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1") as client:
         response = await client.get("/diagnostics")
 
     assert response.status_code == 200
@@ -414,7 +534,7 @@ async def test_diagnostics_sanitizes_non_finite_cleanup_age(
         },
     )
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1") as client:
         response = await client.get("/diagnostics")
 
     assert response.status_code == 200
@@ -447,7 +567,7 @@ async def test_diagnostics_sanitizes_non_finite_integer_fields(
         },
     )
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1") as client:
         response = await client.get("/diagnostics")
 
     assert response.status_code == 200
@@ -475,7 +595,7 @@ async def test_diagnostics_never_exposes_session_or_proxy_secrets() -> None:
     try:
         async with AsyncClient(
             transport=ASGITransport(app=app),
-            base_url="http://test",
+            base_url="http://127.0.0.1",
         ) as client:
             response = await client.get("/diagnostics")
     finally:
@@ -501,7 +621,7 @@ async def test_api_token_rejects_wrong_token() -> None:
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
-        base_url="http://test",
+        base_url="http://127.0.0.1",
     ) as client:
         response = await client.get("/documentation", headers={"X-API-Token": "wrong-token"})
 
@@ -517,7 +637,7 @@ async def test_sessions_commands_and_session_request() -> None:
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
-        base_url="http://test",
+        base_url="http://127.0.0.1",
     ) as client:
         create_response = await client.post(
             "/v1",
@@ -559,7 +679,7 @@ async def test_sessions_create_enforces_max_sessions() -> None:
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
-        base_url="http://test",
+        base_url="http://127.0.0.1",
     ) as client:
         first_response = await client.post(
             "/v1",
@@ -575,8 +695,10 @@ async def test_sessions_create_enforces_max_sessions() -> None:
     await app.state.pool.close()
 
     assert first_response.status_code == 200
-    assert second_response.status_code == 500
+    assert second_response.status_code == 503
     assert "Maximum sessions reached" in second_response.json()["message"]
+    assert second_response.json()["errorCode"] == "POOL_UNAVAILABLE"
+    assert second_response.json()["retryable"] is True
     assert list_response.json()["sessions"] == ["a"]
 
 
@@ -588,7 +710,7 @@ async def test_session_request_closes_page_but_keeps_context() -> None:
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
-        base_url="http://test",
+        base_url="http://127.0.0.1",
     ) as client:
         await client.post("/v1", json={"cmd": "sessions.create", "session": "abc"})
         response = await client.post(
@@ -611,6 +733,127 @@ async def test_session_request_closes_page_but_keeps_context() -> None:
 
 
 @pytest.mark.anyio
+async def test_session_request_closes_popups_created_by_target() -> None:
+    class PopupOpeningPage(FakePage):
+        async def goto(self, url: str, **kwargs: Any):  # type: ignore[no-untyped-def]
+            response = await super().goto(url, **kwargs)
+            self.context.pages.append(FakePage(self.context))
+            return response
+
+    class PopupContext(FakeContext):
+        async def new_page(self) -> PopupOpeningPage:
+            page = PopupOpeningPage(self)
+            self.pages.append(page)
+            return page
+
+    class PopupBrowser(FakeBrowser):
+        context_class = PopupContext
+
+    class PopupBrowserFactory:
+        def __init__(self) -> None:
+            self.created: list[PopupBrowser] = []
+
+        async def __call__(self) -> PopupBrowser:
+            browser = PopupBrowser()
+            self.created.append(browser)
+            return browser
+
+    factory = PopupBrowserFactory()
+    app = create_app(browser_factory=factory, lifespan_enabled=False)
+    await app.state.pool.start()
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://127.0.0.1",
+    ) as client:
+        await client.post("/v1", json={"cmd": "sessions.create", "session": "abc"})
+        response = await client.post(
+            "/v1",
+            json={
+                "cmd": "request.get",
+                "url": "https://example.com",
+                "session": "abc",
+            },
+        )
+
+    session = app.state.sessions.get("abc")
+    assert response.status_code == 200
+    assert session is not None
+    assert session.context.closed is False
+    assert len(session.context.pages) == 2
+    assert all(page.closed for page in session.context.pages)
+
+    await app.state.sessions.close()
+    await app.state.pool.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("session_id", ["abc", None], ids=["session", "transient"])
+async def test_request_closes_page_registered_before_new_page_is_cancelled(
+    session_id: str | None,
+) -> None:
+    class InterruptedNewPageContext(FakeContext):
+        async def new_page(self) -> FakePage:
+            page = FakePage(self)
+            self.pages.append(page)
+            await asyncio.Future()
+            raise AssertionError("unreachable")
+
+    class InterruptedNewPageBrowser(FakeBrowser):
+        context_class = InterruptedNewPageContext
+
+    class InterruptedNewPageFactory:
+        def __init__(self) -> None:
+            self.created: list[InterruptedNewPageBrowser] = []
+
+        async def __call__(self) -> InterruptedNewPageBrowser:
+            browser = InterruptedNewPageBrowser()
+            self.created.append(browser)
+            return browser
+
+    factory = InterruptedNewPageFactory()
+    app = create_app(browser_factory=factory, lifespan_enabled=False)
+    await app.state.pool.start()
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://127.0.0.1",
+        ) as client:
+            if session_id is not None:
+                await client.post(
+                    "/v1",
+                    json={"cmd": "sessions.create", "session": session_id},
+                )
+            payload = {
+                "cmd": "request.get",
+                "url": "https://example.com",
+                "maxTimeout": 20,
+            }
+            if session_id is not None:
+                payload["session"] = session_id
+            response = await client.post(
+                "/v1",
+                json=payload,
+            )
+
+        context = factory.created[0].contexts[0]
+        assert response.status_code == 500
+        assert response.json()["errorCode"] == "REQUEST_TIMEOUT"
+        assert len(context.pages) == 1
+        for _ in range(40):
+            if context.pages[0].closed and context.closed is (session_id is None):
+                break
+            await asyncio.sleep(0)
+        assert context.pages[0].closed is True
+        assert context.closed is (session_id is None)
+    finally:
+        await app.state.sessions.close()
+        await app.state.pool.close()
+        await app.state.cleanup.close()
+
+
+@pytest.mark.anyio
 async def test_v1_returns_503_when_pool_is_saturated() -> None:
     factory = FakeBrowserFactory()
     settings = Settings(
@@ -626,7 +869,7 @@ async def test_v1_returns_503_when_pool_is_saturated() -> None:
     try:
         async with AsyncClient(
             transport=ASGITransport(app=app),
-            base_url="http://test",
+            base_url="http://127.0.0.1",
         ) as client:
             response = await client.post(
                 "/v1",
@@ -662,7 +905,7 @@ async def test_max_timeout_bounds_pool_wait() -> None:
     try:
         async with AsyncClient(
             transport=ASGITransport(app=app),
-            base_url="http://test",
+            base_url="http://127.0.0.1",
         ) as client:
             response = await asyncio.wait_for(
                 client.post(
@@ -713,7 +956,7 @@ async def test_max_timeout_cancels_dedicated_dispatch_task(
     try:
         async with AsyncClient(
             transport=ASGITransport(app=app),
-            base_url="http://test",
+            base_url="http://127.0.0.1",
         ) as client:
             response = await client.post(
                 "/v1",
@@ -763,7 +1006,7 @@ async def test_max_timeout_does_not_wait_for_stuck_cancellation_cleanup(
     try:
         async with AsyncClient(
             transport=ASGITransport(app=app),
-            base_url="http://test",
+            base_url="http://127.0.0.1",
         ) as client:
             started = time.monotonic()
             response = await client.post(
@@ -800,7 +1043,7 @@ async def test_invalid_command_returns_flaresolverr_error_envelope() -> None:
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
-        base_url="http://test",
+        base_url="http://127.0.0.1",
     ) as client:
         response = await client.post("/v1", json={"cmd": "nope"})
 
@@ -819,7 +1062,7 @@ async def test_destroying_missing_session_has_stable_not_found_code() -> None:
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
-        base_url="http://test",
+        base_url="http://127.0.0.1",
     ) as client:
         response = await client.post(
             "/v1",
@@ -863,7 +1106,7 @@ async def test_v1_maps_every_bounded_domain_error_to_compatible_status(
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
-        base_url="http://test",
+        base_url="http://127.0.0.1",
     ) as client:
         response = await client.post("/v1", json={"cmd": "sessions.list"})
 
@@ -925,7 +1168,7 @@ async def test_v1_emits_one_safe_structured_completion_event(
     with caplog.at_level(logging.INFO, logger="camouflare.app"):
         async with AsyncClient(
             transport=ASGITransport(app=app),
-            base_url="http://test",
+            base_url="http://127.0.0.1",
         ) as client:
             response = await client.post(
                 "/v1",
@@ -963,7 +1206,7 @@ async def test_v1_malformed_json_is_invalid_request_without_traceback(
     with caplog.at_level(logging.INFO, logger="camouflare.app"):
         async with AsyncClient(
             transport=ASGITransport(app=app),
-            base_url="http://test",
+            base_url="http://127.0.0.1",
         ) as client:
             response = await client.post(
                 "/v1",
@@ -993,7 +1236,7 @@ async def test_v1_expected_error_has_completion_without_traceback(
     with caplog.at_level(logging.INFO, logger="camouflare.app"):
         async with AsyncClient(
             transport=ASGITransport(app=app),
-            base_url="http://test",
+            base_url="http://127.0.0.1",
         ) as client:
             response = await client.post("/v1", json={"cmd": "nope"})
 
@@ -1020,7 +1263,7 @@ async def test_v1_unexpected_error_logs_traceback_and_internal_code(
     with caplog.at_level(logging.INFO, logger="camouflare.app"):
         async with AsyncClient(
             transport=ASGITransport(app=app),
-            base_url="http://test",
+            base_url="http://127.0.0.1",
         ) as client:
             response = await client.post("/v1", json={"cmd": "sessions.list"})
 
@@ -1083,7 +1326,7 @@ async def test_v1_exposes_browser_to_direct_get_fallback(
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
-        base_url="http://test",
+        base_url="http://127.0.0.1",
     ) as client:
         response = await client.post(
             "/v1",
@@ -1095,6 +1338,253 @@ async def test_v1_exposes_browser_to_direct_get_fallback(
     assert response.status_code == 200
     assert body["status"] == "ok"
     assert body["fallbackUsed"] is True
+
+
+@pytest.mark.anyio
+async def test_session_transport_failure_does_not_make_stateless_direct_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class TransportFailureContext(FakeContext):
+        async def new_page(self) -> FakePage:
+            browser = self.browser
+            if browser is not None and not getattr(browser, "connected", True):
+                raise RuntimeError(
+                    "BrowserContext.new_page: Connection closed while reading from the driver"
+                )
+            page = FakePage(self)
+            page.goto_failures["domcontentloaded"] = RuntimeError(
+                "Page.goto: Connection closed while reading from the driver"
+            )
+
+            original_goto = page.goto
+
+            async def disconnecting_goto(url: str, **kwargs: Any):  # type: ignore[no-untyped-def]
+                assert browser is not None
+                browser.connected = False  # type: ignore[attr-defined]
+                return await original_goto(url, **kwargs)
+
+            page.goto = disconnecting_goto  # type: ignore[method-assign]
+            self.pages.append(page)
+            return page
+
+    class TransportFailureBrowser(FakeBrowser):
+        def __init__(self) -> None:
+            super().__init__()
+            self.connected = True
+
+        def is_connected(self) -> bool:
+            return self.connected
+
+        async def new_context(self, **options: Any) -> FakeContext:
+            if not self.connected:
+                raise RuntimeError(
+                    "Browser.new_context: Target page, context or browser has been closed"
+                )
+            context = TransportFailureContext(self, options)
+            self.contexts.append(context)
+            self.context_options.append(options)
+            return context
+
+    class TransportFailureFactory(FakeBrowserFactory):
+        async def __call__(self) -> FakeBrowser:
+            browser = TransportFailureBrowser()
+            self.created.append(browser)
+            return browser
+
+    async def forbidden_direct_get(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("persistent session state must not use stateless direct HTTP")
+
+    monkeypatch.setattr("camouflare.solver._direct_http_get", forbidden_direct_get)
+    factory = TransportFailureFactory()
+    settings = Settings(
+        pool_min_browsers=1,
+        pool_max_browsers=1,
+        pool_max_contexts_per_browser=2,
+        pool_reserved_transient_contexts=1,
+        pool_acquire_timeout_ms=500,
+    )
+    app = create_app(
+        settings=settings,
+        browser_factory=factory,
+        lifespan_enabled=False,
+    )
+    await app.state.pool.start()
+    replacement = None
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://127.0.0.1",
+        ) as client:
+            created = await client.post(
+                "/v1",
+                json={"cmd": "sessions.create", "session": "authenticated"},
+            )
+            dead_session = app.state.sessions.get("authenticated")
+            assert dead_session is not None
+            response = await client.post(
+                "/v1",
+                json={
+                    "cmd": "request.get",
+                    "url": "https://example.com/account",
+                    "session": "authenticated",
+                },
+            )
+
+            for _ in range(200):
+                if (
+                    app.state.sessions.snapshot().closing == 0
+                    and app.state.pool.snapshot().persistent_contexts == 0
+                ):
+                    break
+                await asyncio.sleep(0.005)
+
+            replacement = await client.post(
+                "/v1",
+                json={"cmd": "sessions.create", "session": "replacement"},
+            )
+
+            assert app.state.sessions.get("authenticated") is None
+            assert dead_session.context.closed is True
+            assert app.state.sessions.snapshot().closing == 0
+            assert app.state.pool.snapshot().persistent_contexts == 1
+    finally:
+        await app.state.sessions.close()
+        await app.state.pool.close()
+        await app.state.direct_http.close()
+
+    assert created.status_code == 200
+    assert response.status_code == 500
+    assert response.json()["errorCode"] == "BROWSER_TRANSPORT_CLOSED"
+    assert response.json()["retryable"] is True
+    assert replacement is not None
+    assert replacement.status_code == 200
+    assert len(factory.created) >= 2
+
+
+@pytest.mark.anyio
+async def test_session_page_crash_preserves_healthy_persistent_context() -> None:
+    class CrashingContext(FakeContext):
+        async def new_page(self) -> FakePage:
+            page = FakePage(self)
+            if not self.pages:
+                page.goto_failures["domcontentloaded"] = RuntimeError("Page.goto: Page crashed")
+            self.pages.append(page)
+            return page
+
+    class CrashingBrowser(FakeBrowser):
+        async def new_context(self, **options: Any) -> FakeContext:
+            context = CrashingContext(self, options)
+            self.contexts.append(context)
+            self.context_options.append(options)
+            return context
+
+    class CrashingFactory(FakeBrowserFactory):
+        async def __call__(self) -> FakeBrowser:
+            browser = CrashingBrowser()
+            self.created.append(browser)
+            return browser
+
+    app = create_app(browser_factory=CrashingFactory(), lifespan_enabled=False)
+    await app.state.pool.start()
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://127.0.0.1",
+        ) as client:
+            await client.post(
+                "/v1",
+                json={"cmd": "sessions.create", "session": "healthy"},
+            )
+            session = app.state.sessions.get("healthy")
+            assert session is not None
+
+            response = await client.post(
+                "/v1",
+                json={
+                    "cmd": "request.get",
+                    "url": "https://example.com/account",
+                    "session": "healthy",
+                },
+            )
+
+            assert response.status_code == 500
+            assert response.json()["errorCode"] == "BROWSER_TRANSPORT_CLOSED"
+            assert app.state.sessions.get("healthy") is session
+            assert session.context.closed is False
+            assert len(session.context.pages) == 2
+            assert all(page.closed for page in session.context.pages)
+    finally:
+        await app.state.sessions.close()
+        await app.state.pool.close()
+        await app.state.direct_http.close()
+
+
+@pytest.mark.anyio
+async def test_session_new_page_disconnect_evicts_session_and_releases_capacity() -> None:
+    factory = DisconnectingFakeBrowserFactory()
+    settings = Settings(
+        pool_min_browsers=1,
+        pool_max_browsers=1,
+        pool_max_contexts_per_browser=2,
+        pool_reserved_transient_contexts=1,
+        pool_acquire_timeout_ms=500,
+    )
+    app = create_app(settings=settings, browser_factory=factory, lifespan_enabled=False)
+    await app.state.pool.start()
+
+    replacement = None
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://127.0.0.1",
+        ) as client:
+            created = await client.post(
+                "/v1",
+                json={"cmd": "sessions.create", "session": "dead"},
+            )
+            dead_session = app.state.sessions.get("dead")
+            assert dead_session is not None
+            factory.created[0].connected = False  # type: ignore[attr-defined]
+
+            failed = await client.post(
+                "/v1",
+                json={
+                    "cmd": "request.get",
+                    "url": "https://example.com/account",
+                    "session": "dead",
+                },
+            )
+
+            for _ in range(200):
+                if (
+                    app.state.sessions.snapshot().closing == 0
+                    and app.state.pool.snapshot().persistent_contexts == 0
+                ):
+                    break
+                await asyncio.sleep(0.005)
+
+            assert created.status_code == 200
+            assert failed.status_code == 500
+            assert failed.json()["errorCode"] == "BROWSER_TRANSPORT_CLOSED"
+            assert failed.json()["retryable"] is True
+            assert failed.json()["requestOutcomeUnknown"] is False
+            assert app.state.sessions.get("dead") is None
+            assert dead_session.context.closed is True
+            assert app.state.sessions.snapshot().closing == 0
+            assert app.state.pool.snapshot().persistent_contexts == 0
+
+            replacement = await client.post(
+                "/v1",
+                json={"cmd": "sessions.create", "session": "replacement"},
+            )
+    finally:
+        await app.state.sessions.close()
+        await app.state.pool.close()
+        await app.state.direct_http.close()
+
+    assert replacement is not None
+    assert replacement.status_code == 200
+    assert len(factory.created) >= 2
 
 
 @pytest.mark.anyio
@@ -1144,7 +1634,7 @@ async def test_v1_preserves_browser_to_direct_fallback_on_error(
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
-        base_url="http://test",
+        base_url="http://127.0.0.1",
     ) as client:
         response = await client.post(
             "/v1",
@@ -1163,14 +1653,14 @@ async def test_v1_preserves_browser_to_direct_fallback_on_error(
 async def test_v1_post_transport_failure_is_not_retried_or_sent_direct(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    class FailingApiRequest:
+        async def post(self, url: str, **kwargs: Any) -> Any:
+            raise RuntimeError("APIRequestContext.post: Connection closed while reading")
+
     class TransportFailureContext(FakeContext):
-        async def new_page(self) -> FakePage:
-            page = FakePage(self)
-            page.goto_failures["domcontentloaded"] = RuntimeError(
-                "Page.goto: Connection closed while reading from the driver"
-            )
-            self.pages.append(page)
-            return page
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self.request = FailingApiRequest()  # type: ignore[attr-defined]
 
     class TransportFailureBrowser(FakeBrowser):
         async def new_context(self, **options: Any) -> FakeContext:
@@ -1195,7 +1685,7 @@ async def test_v1_post_transport_failure_is_not_retried_or_sent_direct(
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
-        base_url="http://test",
+        base_url="http://127.0.0.1",
     ) as client:
         response = await client.post(
             "/v1",
@@ -1212,7 +1702,7 @@ async def test_v1_post_transport_failure_is_not_retried_or_sent_direct(
     assert body["errorCode"] == "BROWSER_TRANSPORT_CLOSED"
     assert body["retryable"] is False
     assert body["requestOutcomeUnknown"] is True
-    assert len(factory.created[0].contexts[0].pages[0].goto_calls) == 1
+    assert factory.created[0].contexts[0].pages[0].goto_calls == []
 
 
 @pytest.mark.anyio
@@ -1222,7 +1712,7 @@ async def test_health_reports_liveness_without_creating_request_browser() -> Non
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
-        base_url="http://test",
+        base_url="http://127.0.0.1",
     ) as client:
         response = await client.get("/health")
 
@@ -1242,7 +1732,7 @@ async def test_health_does_not_expose_current_browser_pool_state() -> None:
         app.state.pool.lease_context(),
         AsyncClient(
             transport=ASGITransport(app=app),
-            base_url="http://test",
+            base_url="http://127.0.0.1",
         ) as client,
     ):
         response = await client.get("/health")
@@ -1263,7 +1753,7 @@ async def test_ready_reports_browser_pool_readiness() -> None:
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
-        base_url="http://test",
+        base_url="http://127.0.0.1",
     ) as client:
         response = await client.get("/ready")
 
@@ -1295,7 +1785,7 @@ async def test_ready_reports_saturated_without_leasing_when_every_slot_is_busy()
             started = time.monotonic()
             async with AsyncClient(
                 transport=ASGITransport(app=app),
-                base_url="http://test",
+                base_url="http://127.0.0.1",
             ) as client:
                 response = await client.get("/ready")
             elapsed = time.monotonic() - started
@@ -1336,7 +1826,7 @@ async def test_ready_reports_saturated_while_a_busy_browser_past_its_limit_serve
             started = time.monotonic()
             async with AsyncClient(
                 transport=ASGITransport(app=app),
-                base_url="http://test",
+                base_url="http://127.0.0.1",
             ) as client:
                 response = await client.get("/ready")
             elapsed = time.monotonic() - started
@@ -1360,7 +1850,7 @@ async def test_ready_maps_a_failing_pool_refresh_to_503() -> None:
     try:
         async with AsyncClient(
             transport=ASGITransport(app=app),
-            base_url="http://test",
+            base_url="http://127.0.0.1",
         ) as client:
             response = await client.get("/ready")
     finally:
@@ -1395,7 +1885,7 @@ async def test_ready_probes_a_dead_busy_browser_instead_of_calling_it_saturated(
             factory.created[0].connected = False
             async with AsyncClient(
                 transport=ASGITransport(app=app),
-                base_url="http://test",
+                base_url="http://127.0.0.1",
             ) as client:
                 response = await client.get("/ready")
     finally:
@@ -1423,7 +1913,7 @@ async def test_metrics_scrape_refreshes_idle_max_age_capacity_gauges() -> None:
     try:
         async with AsyncClient(
             transport=ASGITransport(app=app),
-            base_url="http://test",
+            base_url="http://127.0.0.1",
         ) as client:
             response = await client.get("/metrics")
     finally:
@@ -1444,7 +1934,7 @@ async def test_health_stays_ok_when_browser_pool_is_unavailable() -> None:
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
-        base_url="http://test",
+        base_url="http://127.0.0.1",
     ) as client:
         response = await client.get("/health")
 
@@ -1462,7 +1952,7 @@ async def test_health_stays_ok_when_pool_snapshot_reader_fails(
         raise RuntimeError("corrupt capacity state")
 
     monkeypatch.setattr(app.state.pool, "snapshot", fail_snapshot)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1") as client:
         response = await client.get("/health")
 
     assert response.status_code == 200
@@ -1478,7 +1968,7 @@ async def test_ready_returns_503_when_browser_pool_is_unavailable() -> None:
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
-        base_url="http://test",
+        base_url="http://127.0.0.1",
     ) as client:
         response = await client.get("/ready")
 
@@ -1525,7 +2015,7 @@ async def test_ready_hard_deadline_does_not_wait_for_stuck_probe_cleanup() -> No
     try:
         async with AsyncClient(
             transport=ASGITransport(app=app),
-            base_url="http://test",
+            base_url="http://127.0.0.1",
         ) as client:
             started = time.monotonic()
             response = await client.get("/ready")
@@ -1647,7 +2137,7 @@ async def test_v1_request_user_agent_configures_new_context() -> None:
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
-        base_url="http://test",
+        base_url="http://127.0.0.1",
     ) as client:
         response = await client.post(
             "/v1",
@@ -1675,7 +2165,7 @@ async def test_v1_request_user_agent_header_configures_new_context() -> None:
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
-        base_url="http://test",
+        base_url="http://127.0.0.1",
     ) as client:
         response = await client.post(
             "/v1",
@@ -1712,7 +2202,7 @@ async def test_request_with_malformed_proxy_is_rejected() -> None:
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
-        base_url="http://test",
+        base_url="http://127.0.0.1",
     ) as client:
         response = await client.post(
             "/v1",
@@ -1737,7 +2227,7 @@ async def test_request_level_proxy_is_applied_to_new_context() -> None:
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
-        base_url="http://test",
+        base_url="http://127.0.0.1",
     ) as client:
         response = await client.post(
             "/v1",
@@ -1770,7 +2260,7 @@ async def test_authenticated_socks5h_proxy_url_uses_local_authless_bridge() -> N
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
-        base_url="http://test",
+        base_url="http://127.0.0.1",
     ) as client:
         response = await client.post(
             "/v1",
@@ -1797,7 +2287,7 @@ async def test_unknown_cmd_does_not_create_unbounded_metric_label() -> None:
     bogus = "totally-unknown-command-xyz"
     async with AsyncClient(
         transport=ASGITransport(app=app),
-        base_url="http://test",
+        base_url="http://127.0.0.1",
     ) as client:
         await client.post("/v1", json={"cmd": bogus})
 
@@ -1872,7 +2362,7 @@ async def test_session_request_recreates_context_after_expiry() -> None:
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
-        base_url="http://test",
+        base_url="http://127.0.0.1",
     ) as client:
         await client.post("/v1", json={"cmd": "sessions.create", "session": "abc"})
         first = app.state.sessions.get("abc")
@@ -1900,7 +2390,7 @@ async def test_session_request_stores_custom_ttl_for_pruning() -> None:
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
-        base_url="http://test",
+        base_url="http://127.0.0.1",
     ) as client:
         await client.post(
             "/v1",
@@ -1927,7 +2417,7 @@ async def test_request_post_requires_url() -> None:
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
-        base_url="http://test",
+        base_url="http://127.0.0.1",
     ) as client:
         response = await client.post("/v1", json={"cmd": "request.post", "postData": "a=b"})
 
@@ -1939,13 +2429,97 @@ async def test_request_post_requires_url() -> None:
 
 
 @pytest.mark.anyio
+async def test_socks4_proxy_authentication_is_invalid_request() -> None:
+    app = create_app(browser_factory=FakeBrowserFactory(), lifespan_enabled=False)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://127.0.0.1",
+    ) as client:
+        response = await client.post(
+            "/v1",
+            json={
+                "cmd": "request.get",
+                "url": "https://example.com",
+                "proxy": {
+                    "url": "socks4://proxy.example:1080",
+                    "username": "user",
+                    "password": "pass",
+                },
+            },
+        )
+
+    assert response.status_code == 500
+    assert response.json()["errorCode"] == "INVALID_REQUEST"
+    assert "SOCKS4" in response.json()["message"]
+
+
+@pytest.mark.anyio
+async def test_oversized_socks5_authentication_is_invalid_request() -> None:
+    app = create_app(browser_factory=FakeBrowserFactory(), lifespan_enabled=False)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://127.0.0.1",
+    ) as client:
+        response = await client.post(
+            "/v1",
+            json={
+                "cmd": "request.get",
+                "url": "https://example.com",
+                "proxy": {
+                    "url": "socks5://proxy.example:1080",
+                    "username": "u" * 256,
+                    "password": "pass",
+                },
+            },
+        )
+
+    assert response.status_code == 500
+    assert response.json()["errorCode"] == "INVALID_REQUEST"
+    assert "255 UTF-8 bytes" in response.json()["message"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "invalid_fields",
+    [
+        {"headers": {"Bad Header": "value"}},
+        {"headers": {"X-Test": "safe\r\nInjected: true"}},
+        {"userAgent": "Browser/1.0\nInjected: true"},
+    ],
+)
+async def test_invalid_header_syntax_is_invalid_request(
+    invalid_fields: dict[str, object],
+) -> None:
+    app = create_app(browser_factory=FakeBrowserFactory(), lifespan_enabled=False)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://127.0.0.1",
+    ) as client:
+        response = await client.post(
+            "/v1",
+            json={
+                "cmd": "request.get",
+                "url": "https://example.com",
+                **invalid_fields,
+            },
+        )
+
+    assert response.status_code == 500
+    assert response.json()["errorCode"] == "INVALID_REQUEST"
+    assert "invalid" in response.json()["message"].lower()
+
+
+@pytest.mark.anyio
 async def test_non_positive_max_timeout_returns_concise_error() -> None:
     app = create_app(browser_factory=FakeBrowserFactory(), lifespan_enabled=False)
     await app.state.pool.start()
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
-        base_url="http://test",
+        base_url="http://127.0.0.1",
     ) as client:
         response = await client.post(
             "/v1",
@@ -1969,7 +2543,7 @@ async def test_sessions_create_reports_request_start_before_end() -> None:
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
-        base_url="http://test",
+        base_url="http://127.0.0.1",
     ) as client:
         response = await client.post("/v1", json={"cmd": "sessions.create", "session": "abc"})
 
@@ -1994,7 +2568,7 @@ async def test_persistent_capacity_exhaustion_returns_503_and_keeps_stateless_se
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
-        base_url="http://test",
+        base_url="http://127.0.0.1",
     ) as client:
         first = await client.post("/v1", json={"cmd": "sessions.create", "session": "a"})
         second = await client.post("/v1", json={"cmd": "sessions.create", "session": "b"})
@@ -2040,7 +2614,7 @@ async def test_no_session_context_close_failure_still_returns_solution() -> None
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
-        base_url="http://test",
+        base_url="http://127.0.0.1",
     ) as client:
         response = await client.post(
             "/v1", json={"cmd": "request.get", "url": "https://example.com"}
@@ -2081,7 +2655,7 @@ async def test_dispatch_prune_preserves_targeted_session_proxy_on_rotation() -> 
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
-        base_url="http://test",
+        base_url="http://127.0.0.1",
     ) as client:
         await client.post(
             "/v1",
@@ -2108,13 +2682,51 @@ async def test_dispatch_prune_preserves_targeted_session_proxy_on_rotation() -> 
 
 
 @pytest.mark.anyio
+async def test_dispatch_does_not_wait_for_expired_session_cleanup() -> None:
+    close_started = asyncio.Event()
+    finish_close = asyncio.Event()
+
+    async def stubborn_close() -> None:
+        close_started.set()
+        await finish_close.wait()
+
+    app = create_app(browser_factory=FakeBrowserFactory(), lifespan_enabled=False)
+    app.state.sessions.register_existing(
+        "expired",
+        FakeContext(),
+        on_close=stubborn_close,
+        ttl_seconds=0,
+    )
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://127.0.0.1",
+        ) as client:
+            response = await client.post(
+                "/v1",
+                json={"cmd": "sessions.list", "maxTimeout": 50},
+            )
+
+        await asyncio.wait_for(close_started.wait(), timeout=1)
+        assert response.status_code == 200
+        assert response.json()["sessions"] == []
+        assert app.state.sessions.is_closing("expired") is True
+    finally:
+        finish_close.set()
+        await app.state.sessions.close()
+        await app.state.pool.close()
+        await app.state.direct_http.close()
+
+
+@pytest.mark.anyio
 async def test_session_rotation_preserves_custom_ttl() -> None:
     app = create_app(browser_factory=FakeBrowserFactory(), lifespan_enabled=False)
     await app.state.pool.start()
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
-        base_url="http://test",
+        base_url="http://127.0.0.1",
     ) as client:
         await client.post(
             "/v1",
@@ -2149,7 +2761,7 @@ async def test_concurrent_sessions_create_same_id_never_returns_503() -> None:
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
-        base_url="http://test",
+        base_url="http://127.0.0.1",
     ) as client:
         first, second = await asyncio.gather(
             client.post("/v1", json={"cmd": "sessions.create", "session": "abc"}),
@@ -2234,6 +2846,34 @@ async def test_fake_browser_factory_defaults_to_no_captcha_provider() -> None:
 
 
 @pytest.mark.anyio
+async def test_default_provider_reports_persistent_challenge_before_hard_deadline() -> None:
+    app = create_app(
+        browser_factory=_ChallengeBrowserFactory(),
+        lifespan_enabled=False,
+    )
+    await app.state.pool.start()
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://127.0.0.1",
+    ) as client:
+        response = await client.post(
+            "/v1",
+            json={
+                "cmd": "request.get",
+                "url": "https://example.com",
+                "maxTimeout": 30,
+            },
+        )
+
+    await app.state.sessions.close()
+    await app.state.pool.close()
+
+    assert response.status_code == 500
+    assert response.json()["errorCode"] == "CHALLENGE_FAILED"
+
+
+@pytest.mark.anyio
 async def test_real_factory_defaults_to_no_captcha_provider() -> None:
     from camouflare.captcha import NoCaptchaProvider
 
@@ -2264,7 +2904,7 @@ async def test_injected_provider_is_wired_through_to_solve_request() -> None:
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
-        base_url="http://test",
+        base_url="http://127.0.0.1",
     ) as client:
         response = await client.post(
             "/v1",
@@ -2311,7 +2951,7 @@ async def test_v1_rejects_request_body_limit_with_flaresolverr_envelope() -> Non
     )
     await app.state.pool.start()
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1") as client:
         response = await client.post(
             "/v1",
             json={"cmd": "request.post", "url": "https://example.com", "postData": "x" * 128},
@@ -2339,7 +2979,7 @@ async def test_v1_rejects_timeout_and_ttl_above_configured_ceilings() -> None:
     )
     await app.state.pool.start()
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1") as client:
         timeout_boundary = await client.post(
             "/v1",
             json={"cmd": "sessions.list", "maxTimeout": 1000},
@@ -2388,7 +3028,7 @@ async def test_response_limit_error_closes_transient_context() -> None:
     app = create_app(settings=settings, browser_factory=factory, lifespan_enabled=False)
     await app.state.pool.start()
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1") as client:
         response = await client.post(
             "/v1",
             json={"cmd": "request.get", "url": "https://example.com"},
@@ -2412,7 +3052,7 @@ async def test_screenshot_limit_error_closes_page_and_returns_no_partial_solutio
     )
     await app.state.pool.start()
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1") as client:
         response = await client.post(
             "/v1",
             json={
@@ -2443,7 +3083,7 @@ async def test_solution_limit_accepts_exact_boundary_and_rejects_plus_one() -> N
         try:
             async with AsyncClient(
                 transport=ASGITransport(app=app),
-                base_url="http://test",
+                base_url="http://127.0.0.1",
             ) as client:
                 return await client.post(
                     "/v1",
@@ -2490,7 +3130,7 @@ async def test_session_reaper_skips_in_use_then_closes_idle_expired_session() ->
 async def test_request_id_is_validated_and_echoed_on_success() -> None:
     app = create_app(browser_factory=FakeBrowserFactory(), lifespan_enabled=False)
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1") as client:
         supplied = await client.get("/health", headers={"X-Request-ID": "caller-request-42"})
         generated = await client.get("/health", headers={"X-Request-ID": "x" * 129})
 
@@ -2506,7 +3146,7 @@ async def test_request_id_is_returned_on_authentication_failure() -> None:
         lifespan_enabled=False,
     )
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1") as client:
         response = await client.get("/ready", headers={"X-Request-ID": "unauthorized-42"})
 
     assert response.status_code == 401
@@ -2521,7 +3161,7 @@ async def test_request_id_is_returned_on_unhandled_endpoint_error() -> None:
     async def boom() -> None:
         raise RuntimeError("boom")
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1") as client:
         response = await client.get("/boom", headers={"X-Request-ID": "failed-request-42"})
 
     assert response.status_code == 500
@@ -2538,7 +3178,7 @@ async def test_ready_schema_declares_the_saturated_fields_and_omits_them_when_un
     try:
         async with AsyncClient(
             transport=ASGITransport(app=app),
-            base_url="http://test",
+            base_url="http://127.0.0.1",
         ) as client:
             openapi = (await client.get("/openapi.json")).json()
             probed = await client.get("/ready")

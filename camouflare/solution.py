@@ -8,6 +8,7 @@ from collections.abc import Awaitable, Callable
 from html import unescape
 from http import HTTPStatus
 from typing import Any, cast
+from urllib.parse import urlsplit
 
 from camouflare.limits import (
     MAX_COOKIE_BYTES,
@@ -56,16 +57,26 @@ async def collect_solution(
     turnstile_token: str | None,
     limits: ResourceLimits,
 ) -> Solution:
-    ensure_text_size(content, limits.response_body_bytes, label="Response body")
-    observe_payload_size("response", utf8_size(content))
-    cookies = await safe_context_cookies(context)
+    context_cookies = await safe_context_cookies(context)
+    response_cookies = getattr(page_response, "solution_cookies", None)
+    if not isinstance(response_cookies, list):
+        response_cookies = getattr(page_response, "cookies", None)
+    cookies = _merge_solution_cookies(
+        context_cookies,
+        response_cookies if isinstance(response_cookies, list) else [],
+    )
     if len(cookies) > MAX_COOKIES:
         raise ResourceLimitError(
             f"Response cookies exceed the configured {MAX_COOKIES}-item limit."
         )
     ensure_json_size(cookies, MAX_COOKIE_BYTES, label="Response cookies")
     status = getattr(page_response, "status", 0 if page_response is None else HTTPStatus.OK)
-    user_agent = await safe_user_agent(page, request)
+    response_user_agent = getattr(page_response, "user_agent", None)
+    user_agent = (
+        str(response_user_agent)
+        if getattr(page_response, "raw_body", False) and response_user_agent
+        else await safe_user_agent(page, request)
+    )
     current_page_url = page_url(page)
     url = (
         current_page_url
@@ -81,6 +92,9 @@ async def collect_solution(
             user_agent=user_agent,
             turnstile_token=turnstile_token,
         )
+
+    ensure_text_size(content, limits.response_body_bytes, label="Response body")
+    observe_payload_size("response", utf8_size(content))
 
     screenshot = None
     if request.return_screenshot:
@@ -108,6 +122,52 @@ async def collect_solution(
         screenshot=screenshot,
         turnstile_token=turnstile_token,
     )
+
+
+def _solution_cookie(cookie: dict[str, Any]) -> dict[str, Any]:
+    """Return FlareSolverr/Selenium-shaped cookie output.
+
+    Playwright accepts a host-only cookie in an import-only ``url`` form, but
+    FlareSolverr clients expect collected cookies to expose ``domain`` and
+    ``path``. Keep Playwright's ``expires`` field for existing Camouflare
+    clients and add Selenium's ``expiry`` spelling for compatibility.
+    """
+
+    normalized = dict(cookie)
+    cookie_url = normalized.pop("url", None)
+    if cookie_url and not normalized.get("domain"):
+        parts = urlsplit(str(cookie_url))
+        if parts.hostname:
+            normalized["domain"] = parts.hostname
+        if not normalized.get("path"):
+            parent_path = parts.path.rsplit("/", 1)[0]
+            normalized["path"] = parent_path or "/"
+
+    normalized.setdefault("path", "/")
+    expires = normalized.get("expires")
+    if expires is not None and expires != -1 and "expiry" not in normalized:
+        normalized["expiry"] = expires
+    return normalized
+
+
+def _merge_solution_cookies(
+    context_cookies: list[dict[str, Any]],
+    response_cookies: list[Any],
+) -> list[dict[str, Any]]:
+    """Merge response-owned cookies over any still-readable context state."""
+
+    merged: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for cookie in (*context_cookies, *response_cookies):
+        if not isinstance(cookie, dict):
+            continue
+        normalized = _solution_cookie(cookie)
+        key = (
+            str(normalized.get("domain", "")).casefold(),
+            str(normalized.get("path", "/")),
+            str(normalized.get("name", "")),
+        )
+        merged[key] = normalized
+    return list(merged.values())
 
 
 async def safe_context_cookies(context: BrowserContextLike) -> list[dict[str, Any]]:

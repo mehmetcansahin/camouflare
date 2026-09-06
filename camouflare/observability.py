@@ -19,7 +19,7 @@ REDACTED = "<redacted>"
 REDACTED_URL = "<redacted-url>"
 
 _REQUEST_ID: ContextVar[str | None] = ContextVar("camouflare_request_id", default=None)
-_URL_PATTERN = re.compile(r"(?i)\b(?:https?|socks5h?|ftp)://[^\s<>\"']+")
+_URL_PATTERN = re.compile(r"(?i)\b(?:https?|socks(?:4|5h?)|ftp)://[^\s<>\"']+")
 _REQUEST_TARGET_PATTERN = re.compile(
     r"(?i)(\b(?:GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS|TRACE|CONNECT)\s+)(\S+)"
 )

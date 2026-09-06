@@ -211,7 +211,14 @@ def test_github_actions_avoid_anonymous_camoufox_release_api_calls() -> None:
     for workflow_name in ("ci.yml", "nightly.yml", "release.yml"):
         workflow = workflows[workflow_name]
         assert "camoufox fetch" not in workflow
-        assert "gh api repos/daijro/camoufox/releases" in workflow
+        camoufox_api_calls = [
+            line
+            for line in workflow.splitlines()
+            if "gh api" in line and "repos/daijro/camoufox/releases" in line
+        ]
+        assert camoufox_api_calls
+        assert all("releases/tags/${camoufox_tag}" in line for line in camoufox_api_calls)
+        assert 'camoufox-artifacts.json"))["release_tag"]' in workflow
         assert "P3TERX/GeoLite.mmdb" not in workflow
         assert "geolite_releases" not in workflow
         assert "scripts/fetch_camoufox.py" in workflow
