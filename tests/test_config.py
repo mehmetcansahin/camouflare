@@ -24,10 +24,10 @@ def test_settings_reads_env_at_instantiation(monkeypatch: pytest.MonkeyPatch) ->
     assert settings.camouflare_api_token == "secret-token"
 
 
-def test_version_uses_the_single_package_source(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_environment_cannot_override_release_version(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("VERSION", "9.9.9")
 
-    assert Settings().version == __version__ == "2.0.0"
+    assert Settings().version == __version__
 
 
 def test_settings_ignores_non_integer_env(monkeypatch: pytest.MonkeyPatch) -> None:

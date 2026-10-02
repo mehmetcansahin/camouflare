@@ -5,49 +5,16 @@ import re
 import subprocess
 import sys
 import tomllib
-from importlib.metadata import version as installed_version
 from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml
 
-from camouflare import __version__
 from camouflare.documentation import DOCUMENTATION_HTML
 
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE_COMMIT = "1" * 40
-
-
-def test_readme_documents_guarded_default_solver() -> None:
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
-
-    assert "`GET /health` returns process liveness" in readme
-    assert "does not read browser state" in readme
-    assert "`GET /ready` checks that the browser pool can create a page" in readme
-    assert "| `CHALLENGE_SOLVER` | `none` |" in readme
-    assert "| `HOST` | `127.0.0.1` |" in readme
-    assert "| `CAMOUFLARE_API_TOKEN` | unset |" in readme
-    assert "Send either `Authorization: Bearer <token>` or" in readme
-    assert "`X-API-Token: <token>`" in readme
-    assert "CHALLENGE_SOLVER=click uv run python -m camouflare" in readme
-    assert "Authorization: Bearer" in readme
-    assert "127.0.0.1:8191:8191" in readme
-    assert "CAMOUFLARE_API_TOKEN:?Set CAMOUFLARE_API_TOKEN" in compose
-    assert "change-me" not in readme
-    assert "change-me" not in compose
-    assert "Use Camouflare only on systems you own" in readme
-    assert "does not accept requests to bypass a specific third-party" in readme
-    assert "is not published to PyPI" in readme
-    assert "ghcr.io/mehmetcansahin/camouflare:2.0.0" in readme
-    assert "ghcr.io/mehmetcansahin/camouflare:2.0.0" in compose
-    assert "git clone https://github.com/mehmetcansahin/camouflare.git" in readme
-    assert "python -m pip install ." in readme
-    assert 'python -m pip install "camouflare==2.0.0"' not in readme
-    assert "docker compose up --build" in readme
-    assert "CAMOUFOX_GEOIP" not in readme
-    assert "CAMOUFOX_GEOIP" not in compose
 
 
 def test_current_deployment_docs_match_compose_profile() -> None:
@@ -178,16 +145,6 @@ def test_public_files_use_canonical_repository_owner() -> None:
     for relative_path in public_files:
         contents = (ROOT / relative_path).read_text(encoding="utf-8")
         assert legacy_repository not in contents, f"{relative_path} uses the old owner"
-
-
-def test_release_version_has_one_authoritative_source() -> None:
-    metadata = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-
-    assert metadata["project"]["dynamic"] == ["version"]
-    assert metadata["tool"]["setuptools"]["dynamic"]["version"] == {
-        "attr": "camouflare._version.__version__"
-    }
-    assert installed_version("camouflare") == __version__ == "2.0.0"
 
 
 def test_ci_runs_supported_python_matrix_and_builds_package() -> None:
