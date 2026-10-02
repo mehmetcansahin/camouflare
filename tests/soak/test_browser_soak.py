@@ -648,7 +648,7 @@ async def test_real_browser_memory_and_contexts_stay_bounded() -> None:
     try:
         async with AsyncClient(
             transport=ASGITransport(app=app, raise_app_exceptions=False),
-            base_url="http://camouflare.test",
+            base_url="http://127.0.0.1",
         ) as client:
             payload = {
                 "cmd": "request.get",

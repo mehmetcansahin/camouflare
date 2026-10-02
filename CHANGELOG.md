@@ -5,8 +5,17 @@ All notable changes to Camouflare are documented here. The project follows
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-10-02
+
+### Changed
+
+- Scheduled browser validation runs weekly on Sundays at 01:17 UTC instead of daily;
+  pull-request, push, and manual triggers are unchanged.
+
 ### Fixed
 
+- The real-browser soak uses a loopback API Host in tokenless mode, avoiding an
+  immediate HTTP 400 rejection before exercising the browser workload.
 - Session cleanup timeouts now return a retryable error envelope instead of leaking
   cancellation. Requests queued behind a closed session receive a retryable
   `SESSION_NOT_FOUND`, and GET page-opening disconnects are classified before a target
@@ -274,7 +283,8 @@ All notable changes to Camouflare are documented here. The project follows
 - High and critical dependency or container findings block releases unless covered by a
   reasoned, time-bounded exception.
 
-[Unreleased]: https://github.com/mehmetcansahin/camouflare/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/mehmetcansahin/camouflare/compare/v2.0.1...HEAD
+[2.0.1]: https://github.com/mehmetcansahin/camouflare/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/mehmetcansahin/camouflare/compare/v1.4.0...v2.0.0
 [1.4.0]: https://github.com/mehmetcansahin/camouflare/compare/v1.3.3...v1.4.0
 [1.3.3]: https://github.com/mehmetcansahin/camouflare/compare/v1.3.2...v1.3.3

@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 from camoufox.addons import DefaultAddons
 
+from camouflare import __version__
 from scripts import (
     check_image_size,
     check_release_destinations,
@@ -321,10 +322,11 @@ def test_camoufox_download_rejects_digest_mismatch() -> None:
 def test_release_verifier_accepts_exact_tag_and_rejects_mismatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(sys, "argv", ["verify_release.py", "v2.0.0"])
+    monkeypatch.setattr(sys, "argv", ["verify_release.py", f"v{__version__}"])
     assert verify_release.main() == 0
 
-    monkeypatch.setattr(sys, "argv", ["verify_release.py", "v2.0.1"])
+    major, minor, patch = (int(part) for part in __version__.split("."))
+    monkeypatch.setattr(sys, "argv", ["verify_release.py", f"v{major}.{minor}.{patch + 1}"])
     assert verify_release.main() == 1
 
 
