@@ -1075,6 +1075,56 @@ async def test_destroying_missing_session_has_stable_not_found_code() -> None:
 
 
 @pytest.mark.anyio
+async def test_destroy_cleanup_timeout_is_retryable_envelope_after_physical_close() -> None:
+    physical_close_started = asyncio.Event()
+    finish_physical_close = asyncio.Event()
+    app = create_app(
+        settings=Settings(cleanup_timeout_seconds=0.01),
+        browser_factory=FakeBrowserFactory(),
+        lifespan_enabled=False,
+    )
+
+    async def stubborn_physical_close() -> None:
+        physical_close_started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            await finish_physical_close.wait()
+
+    async def close_session() -> None:
+        # The session close honours its deadline; the browser close it handed to
+        # the cleanup supervisor does not.
+        await app.state.cleanup.run(stubborn_physical_close(), kind="browser")
+
+    app.state.sessions.register_existing("abc", FakeContext(), on_close=close_session)
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://127.0.0.1",
+        ) as client:
+            destroy = asyncio.create_task(
+                client.post("/v1", json={"cmd": "sessions.destroy", "session": "abc"})
+            )
+            await physical_close_started.wait()
+            await asyncio.sleep(0.05)
+            # The id stays reserved while the physical close is still running.
+            assert destroy.done() is False
+            assert app.state.sessions.is_closing("abc") is True
+
+            finish_physical_close.set()
+            response = await destroy
+    finally:
+        finish_physical_close.set()
+
+    body = response.json()
+    assert response.status_code == 500
+    assert body["errorCode"] == "REQUEST_TIMEOUT"
+    assert body["retryable"] is True
+    assert body["requestOutcomeUnknown"] is False
+    assert app.state.sessions.is_closing("abc") is False
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("error_code", "expected_status"),
     [
@@ -1588,6 +1638,100 @@ async def test_session_new_page_disconnect_evicts_session_and_releases_capacity(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("command", "retryable"),
+    [
+        ({"cmd": "request.get", "url": "https://example.com"}, True),
+        ({"cmd": "request.post", "url": "https://example.com/form", "postData": "a=1"}, False),
+    ],
+)
+async def test_stateless_new_page_disconnect_is_classified_before_send(
+    command: dict[str, str],
+    retryable: bool,
+) -> None:
+    class DyingContext(FakeContext):
+        async def new_page(self) -> FakePage:
+            raise RuntimeError(
+                "BrowserContext.new_page: Target page, context or browser has been closed"
+            )
+
+    class DyingBrowser(FakeBrowser):
+        context_class = DyingContext
+
+    class DyingFactory(FakeBrowserFactory):
+        async def __call__(self) -> FakeBrowser:
+            browser = DyingBrowser()
+            self.created.append(browser)
+            return browser
+
+    app = create_app(browser_factory=DyingFactory(), lifespan_enabled=False)
+    await app.state.pool.start()
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://127.0.0.1",
+        ) as client:
+            response = await client.post("/v1", json=command)
+        snapshot = app.state.pool.snapshot()
+    finally:
+        await app.state.pool.close()
+        await app.state.direct_http.close()
+
+    body = response.json()
+    assert response.status_code == 500
+    assert body["errorCode"] == "BROWSER_TRANSPORT_CLOSED"
+    assert body["retryable"] is retryable
+    assert body["requestOutcomeUnknown"] is False
+    assert snapshot.active_contexts == 0
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "command",
+    [
+        {"cmd": "request.get", "url": "https://example.com"},
+        {"cmd": "request.post", "url": "https://example.com/form", "postData": "a=1"},
+    ],
+)
+async def test_request_queued_behind_evicted_session_is_retryable_before_send(
+    command: dict[str, str],
+) -> None:
+    app = create_app(browser_factory=FakeBrowserFactory(), lifespan_enabled=False)
+    await app.state.pool.start()
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://127.0.0.1",
+        ) as client:
+            await client.post("/v1", json={"cmd": "sessions.create", "session": "abc"})
+            session = app.state.sessions.get("abc")
+            assert session is not None
+            await session.lock.acquire()  # an in-flight request owns the session
+            queued = asyncio.create_task(client.post("/v1", json={**command, "session": "abc"}))
+            for _ in range(200):
+                if session.in_use:
+                    break
+                await asyncio.sleep(0)
+            assert session.in_use == 1
+
+            # The in-flight request quarantines the session and releases it.
+            await app.state.sessions.evict_if_current(session)
+            session.lock.release()
+            response = await queued
+    finally:
+        await app.state.sessions.close()
+        await app.state.pool.close()
+        await app.state.direct_http.close()
+
+    body = response.json()
+    assert response.status_code == 500
+    assert body["errorCode"] == "SESSION_NOT_FOUND"
+    assert body["retryable"] is True
+    assert body["requestOutcomeUnknown"] is False
+    assert session.context.pages == []
+
+
+@pytest.mark.anyio
 async def test_v1_preserves_browser_to_direct_fallback_on_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1891,8 +2035,9 @@ async def test_ready_probes_a_dead_busy_browser_instead_of_calling_it_saturated(
     finally:
         await app.state.pool.close()
 
-    assert response.status_code == 503
-    assert response.json()["status"] == "error"
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+    assert len(factory.created) == 2
 
 
 @pytest.mark.anyio
@@ -2778,6 +2923,65 @@ async def test_concurrent_sessions_create_same_id_never_returns_503() -> None:
     assert session_ids == ["abc"]
 
 
+@pytest.mark.anyio
+async def test_same_id_create_waits_for_slow_winner_while_other_ids_are_rejected() -> None:
+    build_started = asyncio.Event()
+    finish_build = asyncio.Event()
+
+    class SlowContextBrowser(FakeBrowser):
+        async def new_context(self, **options: Any) -> FakeContext:
+            build_started.set()
+            await finish_build.wait()
+            return await super().new_context(**options)
+
+    class SlowContextFactory(FakeBrowserFactory):
+        async def __call__(self) -> FakeBrowser:
+            browser = SlowContextBrowser()
+            self.created.append(browser)
+            return browser
+
+    # Two context slots with one reserved for stateless work: one session fits.
+    settings = Settings(pool_max_browsers=1, pool_max_contexts_per_browser=2)
+    app = create_app(
+        settings=settings, browser_factory=SlowContextFactory(), lifespan_enabled=False
+    )
+    await app.state.pool.start()
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://127.0.0.1",
+        ) as client:
+            winner = asyncio.create_task(
+                client.post("/v1", json={"cmd": "sessions.create", "session": "abc"})
+            )
+            await build_started.wait()
+            other = await client.post("/v1", json={"cmd": "sessions.create", "session": "other"})
+            same = asyncio.create_task(
+                client.post("/v1", json={"cmd": "sessions.create", "session": "abc"})
+            )
+            # Far longer than any fixed number of event-loop ticks.
+            await asyncio.sleep(0.05)
+            assert same.done() is False
+
+            finish_build.set()
+            first, second = await asyncio.gather(winner, same)
+            session_ids = app.state.sessions.list_ids()
+            persistent_contexts = app.state.pool.snapshot().persistent_contexts
+    finally:
+        finish_build.set()
+        await app.state.sessions.close()
+        await app.state.pool.close()
+        await app.state.direct_http.close()
+
+    assert other.status_code == 503
+    assert other.json()["errorCode"] == "POOL_UNAVAILABLE"
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert second.json()["session"] == "abc"
+    assert session_ids == ["abc"]
+    assert persistent_contexts == 1
+
+
 class _ChallengePage(FakePage):
     def __init__(self, context: FakeContext) -> None:
         super().__init__(context)
@@ -2871,6 +3075,52 @@ async def test_default_provider_reports_persistent_challenge_before_hard_deadlin
 
     assert response.status_code == 500
     assert response.json()["errorCode"] == "CHALLENGE_FAILED"
+
+
+@pytest.mark.anyio
+async def test_challenge_budget_includes_time_spent_before_the_solve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("camouflare.challenge.CHALLENGE_RESULT_RESERVE_MS", 250)
+
+    class SlowPageContext(_ChallengeContext):
+        async def new_page(self) -> _ChallengePage:
+            await asyncio.sleep(0.4)
+            return await super().new_page()
+
+    class SlowPageBrowser(_ChallengeBrowser):
+        async def new_context(self, **options: Any) -> _ChallengeContext:
+            context = SlowPageContext(self, options)
+            self.contexts.append(context)
+            return context
+
+    class SlowPageFactory(_ChallengeBrowserFactory):
+        async def __call__(self) -> _ChallengeBrowser:
+            browser = SlowPageBrowser()
+            self.created.append(browser)
+            return browser
+
+    app = create_app(browser_factory=SlowPageFactory(), lifespan_enabled=False)
+    await app.state.pool.start()
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://127.0.0.1",
+        ) as client:
+            response = await client.post(
+                "/v1",
+                json={"cmd": "request.get", "url": "https://example.com", "maxTimeout": 800},
+            )
+    finally:
+        await app.state.pool.close()
+        await app.state.direct_http.close()
+
+    # A solve budget restarted after page creation would poll past the /v1
+    # supervisor and lose the partial solution to a bare request timeout.
+    body = response.json()
+    assert response.status_code == 500
+    assert body["errorCode"] == "CHALLENGE_FAILED"
+    assert body["solution"]["url"] == "https://example.com"
 
 
 @pytest.mark.anyio

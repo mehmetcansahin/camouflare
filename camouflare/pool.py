@@ -863,7 +863,7 @@ class BrowserPool:
                 # max_browsers and consume a whole abandoned-launch generation.
                 if (
                     not launched
-                    and len(self._slots) + len(self._create_tasks) < self._max_browsers
+                    and self._usable_generations_unlocked() < self._max_browsers
                     and self._physical_generations_unlocked() < self._max_physical_generations
                     and len(self._create_watchers) < self._max_abandoned_creations
                 ):
@@ -1010,6 +1010,13 @@ class BrowserPool:
             "idle_recyclable_slots": snapshot.idle_recyclable_slots,
         }
 
+    def _usable_generations_unlocked(self) -> int:
+        # A retiring browser takes no new work once its spare capacity is gone, and
+        # a persistent context can pin it for a whole session lifetime. Counting it
+        # here would let one long session block every replacement launch; it stays
+        # counted against the physical ceiling instead.
+        return sum(1 for slot in self._slots if slot.state == "ready") + len(self._create_tasks)
+
     def _physical_generations_unlocked(self) -> int:
         return (
             len(self._slots)
@@ -1110,10 +1117,10 @@ class BrowserPool:
         # waiting: a waiting request launches for itself, and it must keep doing so
         # rather than trust a background launch that may hang. Launches in flight
         # count as capacity. Unlike the acquire path, a browser that is still
-        # closing (or wedged after a failed close) also counts, so background work
-        # never runs more than max_browsers processes at once. A factory that
-        # keeps failing is retried on every tick and every close completion; the
-        # maintenance interval is the backoff.
+        # retiring, closing, or wedged after a failed close also counts, so
+        # background work never runs more than max_browsers processes at once. A
+        # factory that keeps failing is retried on every tick and every close
+        # completion; the maintenance interval is the backoff.
         if self._starting or not self._started or self._closed or self._waiting_requests > 0:
             return
         healthy = sum(

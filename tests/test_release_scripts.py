@@ -5,10 +5,14 @@ import io
 import json
 import subprocess
 import sys
+import zipfile
+from collections.abc import Callable
 from datetime import date, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
+from camoufox.addons import DefaultAddons
 
 from scripts import (
     check_image_size,
@@ -111,16 +115,157 @@ def test_camoufox_release_wrapper_fetches_exact_tag_without_metadata() -> None:
 
 
 def test_camoufox_artifact_digest_file_pins_current_release() -> None:
-    release_tag, _ = fetch_camoufox._load_artifact_manifest(
-        fetch_camoufox.DEFAULT_ARTIFACT_DIGESTS_FILE
-    )
-    digests = fetch_camoufox._load_artifact_digests(fetch_camoufox.DEFAULT_ARTIFACT_DIGESTS_FILE)
+    manifest = fetch_camoufox._load_artifact_manifest(fetch_camoufox.DEFAULT_ARTIFACT_DIGESTS_FILE)
 
-    assert release_tag == "v152.0.4-beta.29"
-    assert digests["camoufox-152.0.4-beta.29-lin.x86_64.zip"] == (
+    assert manifest.release_tag == "v152.0.4-beta.29"
+    assert manifest.artifacts["camoufox-152.0.4-beta.29-lin.x86_64.zip"] == (
         "1bea4b55a51c88e82dc7d426d9c75093d942d2afc8c911cb8fc78ebf723d686c"
     )
-    assert "camoufox-152.0.4-beta.30-lin.x86_64.zip" not in digests
+    assert "camoufox-152.0.4-beta.30-lin.x86_64.zip" not in manifest.artifacts
+    fetch_camoufox._require_pinned_default_addons(
+        manifest.addons,
+        (addon.name for addon in DefaultAddons),
+    )
+
+
+def test_camoufox_fetch_rejects_unpinned_default_addon() -> None:
+    with pytest.raises(ValueError, match="UBO"):
+        fetch_camoufox._require_pinned_default_addons({}, ["UBO"])
+
+
+@pytest.mark.parametrize(
+    ("pin", "message"),
+    [
+        pytest.param(
+            {
+                "version": "1.75.0",
+                "url": DefaultAddons.UBO.value,
+                "digest": f"sha256:{'0' * 64}",
+            },
+            "naming version 1.75.0",
+            id="floating-latest-url",
+        ),
+        pytest.param(
+            {"version": "1.75.0", "url": "https://example.com/ublock_origin-1.75.0.xpi"},
+            "sha256 digest",
+            id="missing-digest",
+        ),
+    ],
+)
+def test_camoufox_addon_pin_rejects_floating_or_unverified_download(
+    tmp_path: Path,
+    pin: dict[str, str],
+    message: str,
+) -> None:
+    manifest = json.loads(fetch_camoufox.DEFAULT_ARTIFACT_DIGESTS_FILE.read_text(encoding="utf-8"))
+    manifest["addons"]["UBO"] = pin
+    manifest_path = tmp_path / "camoufox-artifacts.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        fetch_camoufox._load_artifact_manifest(manifest_path)
+
+
+def _xpi(manifest: dict[str, str] | None) -> bytes:
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as xpi:
+        if manifest is not None:
+            xpi.writestr("manifest.json", json.dumps(manifest))
+        xpi.writestr("background.js", "")
+    return archive.getvalue()
+
+
+def _serving(payload: bytes) -> Callable[[str, Any], None]:
+    def download(_url: str, file: Any) -> None:
+        file.write(payload)
+
+    return download
+
+
+def _addon_pin(reviewed: bytes) -> fetch_camoufox._AddonPin:
+    return fetch_camoufox._AddonPin(
+        version="1.75.0",
+        url="https://example.com/ublock_origin-1.75.0.xpi",
+        sha256=hashlib.sha256(reviewed).hexdigest(),
+    )
+
+
+def test_camoufox_addon_install_replaces_stale_path_with_verified_archive(
+    tmp_path: Path,
+) -> None:
+    payload = _xpi({"version": "1.75.0"})
+    destination = tmp_path / "addons" / "UBO"
+    # Upstream `camoufox fetch` leaves this directory empty when the download fails.
+    destination.mkdir(parents=True)
+
+    fetch_camoufox._install_pinned_addon(_addon_pin(payload), destination, _serving(payload))
+
+    manifest = json.loads((destination / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["version"] == "1.75.0"
+    assert [path.name for path in destination.parent.iterdir()] == ["UBO"]
+
+
+@pytest.mark.parametrize(
+    ("served", "reviewed", "message"),
+    [
+        pytest.param(
+            _xpi({"version": "1.75.0"}),
+            b"reviewed archive",
+            "digest mismatch",
+            id="digest-mismatch",
+        ),
+        pytest.param(_xpi(None), None, "no readable manifest.json", id="missing-manifest"),
+        pytest.param(
+            _xpi({"version": "1.76.0"}),
+            None,
+            "different version",
+            id="different-version",
+        ),
+    ],
+)
+def test_camoufox_addon_install_failure_leaves_no_addon_path(
+    tmp_path: Path,
+    served: bytes,
+    reviewed: bytes | None,
+    message: str,
+) -> None:
+    destination = tmp_path / "addons" / "UBO"
+    pin = _addon_pin(served if reviewed is None else reviewed)
+
+    with pytest.raises(RuntimeError, match=message):
+        fetch_camoufox._install_pinned_addon(pin, destination, _serving(served))
+
+    assert list(destination.parent.iterdir()) == []
+
+
+def test_camoufox_fetch_fails_when_pinned_addon_download_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import camoufox.__main__ as camoufox_cli
+    from camoufox import addons, pkgman
+
+    manifest = fetch_camoufox._load_artifact_manifest(fetch_camoufox.DEFAULT_ARTIFACT_DIGESTS_FILE)
+    requested: list[str] = []
+
+    class PinnedBrowserUpdate:
+        def update(self) -> None:
+            return None
+
+    def unreachable(url: str, **_kwargs: object) -> None:
+        requested.append(url)
+        raise OSError(f"cannot reach {url}")
+
+    monkeypatch.delenv("CAMOUFLARE_CAMOUFOX_RELEASES_FILE", raising=False)
+    monkeypatch.setattr(camoufox_cli, "CamoufoxUpdate", PinnedBrowserUpdate)
+    monkeypatch.setattr(addons, "get_addon_path", lambda name: str(tmp_path / "addons" / name))
+    monkeypatch.setattr(pkgman, "webdl", unreachable)
+
+    with pytest.raises(OSError, match="cannot reach"):
+        fetch_camoufox.main()
+
+    assert requested == [manifest.addons["UBO"].url]
+    assert list((tmp_path / "addons").iterdir()) == []
 
 
 def test_camoufox_fetcher_selects_only_pinned_assets() -> None:

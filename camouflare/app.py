@@ -74,6 +74,7 @@ from camouflare.pool import BrowserPool, PersistentCapacityError, PoolAcquireTim
 from camouflare.protocols import BrowserFactory
 from camouflare.runtime import make_runtime_lifespan, session_reaper, shutdown_runtime
 from camouflare.sessions import SessionManager
+from camouflare.timer import TimeoutTimer
 
 logger = logging.getLogger(__name__)
 
@@ -437,10 +438,16 @@ def create_app(
             _validate_request_runtime_limits(v1_request, settings)
             command = v1_request.cmd if v1_request.cmd in KNOWN_COMMANDS else "invalid"
             target_host = _safe_target_host(v1_request.url)
+            # Start the command's maxTimeout budget before the supervisor below
+            # starts its own. Solve-side waits then never outlive the supervisor,
+            # and the challenge result reserve leaves time to return a partial
+            # solution instead of a bare request timeout.
+            timer = TimeoutTimer(v1_request.max_timeout)
             dispatch_task = asyncio.create_task(
                 command_service.dispatch(
                     v1_request,
                     start_timestamp=start_timestamp,
+                    timer=timer,
                 ),
                 name=f"camouflare-command-{command}",
             )

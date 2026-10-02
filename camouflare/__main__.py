@@ -9,6 +9,11 @@ from camouflare.app import create_app
 from camouflare.config import Settings
 from camouflare.observability import configure_logging
 
+# Uvicorn otherwise waits indefinitely for in-flight requests (up to MAX_TIMEOUT_MS)
+# before running lifespan shutdown. Bounding the drain keeps it plus the default
+# SHUTDOWN_TIMEOUT_SECONDS cleanup inside the Compose 45-second stop grace period.
+_GRACEFUL_REQUEST_DRAIN_SECONDS = 10
+
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -28,6 +33,7 @@ def main() -> None:
         host=settings.host,
         port=settings.port,
         log_config=None,
+        timeout_graceful_shutdown=_GRACEFUL_REQUEST_DRAIN_SECONDS,
     )
 
 

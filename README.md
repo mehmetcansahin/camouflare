@@ -45,9 +45,9 @@ its main focus is predictable operation:
   [recorded evidence](docs/benchmarks/README.md).
 - **Hardened, verifiable delivery.** The container runs as a non-root user; Compose
   binds to loopback, requires a token, drops Linux capabilities, and applies memory,
-  shared-memory, and PID limits. The Camoufox executable archive is selected from a
-  reviewed allowlist and verified by SHA-256 before extraction. Multi-architecture
-  releases include SBOM and provenance evidence.
+  shared-memory, and PID limits. The Camoufox browser archive and its default uBlock
+  Origin add-on are pinned in a reviewed manifest and verified by SHA-256 before
+  extraction. Multi-architecture releases include SBOM and provenance evidence.
 - **Small deployment surface.** One container and no external state service keep
   setup simple. The tradeoff is explicit: one trusted user, one worker, and no shared
   sessions across replicas.
@@ -130,7 +130,9 @@ repeating the
 
 ## Install from source
 
-Camouflare requires Python 3.11-3.14. It is not published to PyPI.
+Camouflare requires Python 3.11-3.14 and a git checkout: the browser fetch script and
+its pins (`scripts/fetch_camoufox.py` and `scripts/camoufox-artifacts.json`) are not part
+of the installed package. It is not published to PyPI.
 
 ```bash
 git clone https://github.com/mehmetcansahin/camouflare.git
@@ -138,19 +140,41 @@ cd camouflare
 python -m venv .venv
 . .venv/bin/activate
 python -m pip install .
-camoufox fetch
+python scripts/fetch_camoufox.py
 playwright install-deps firefox  # Linux only
 camouflare
 ```
 
-For development with `uv`:
+For development with the locked dependency set that CI uses (`pip install .` resolves
+the ranges in `pyproject.toml` instead):
 
 ```bash
-uv sync --group dev
-uv run camoufox fetch
+uv sync --frozen --group dev
+uv run python scripts/fetch_camoufox.py
 uv run playwright install-deps firefox  # Linux only
 uv run python -m camouflare
 ```
+
+`scripts/fetch_camoufox.py` installs the Camoufox release and uBlock Origin add-on
+pinned in `scripts/camoufox-artifacts.json`, the same ones CI and the container image
+use, verifies every download by SHA-256 before extracting it, and exits non-zero on any
+failure. Pinned browser archives exist for Linux and macOS on x86_64 and arm64, and for
+Windows on x86_64 and i686. The script needs HTTPS access to `api.github.com`,
+`github.com`, `release-assets.githubusercontent.com`, and `addons.mozilla.org`. It reads
+the pinned release's metadata from the GitHub API anonymously, which is rate limited; to
+avoid that, save the metadata with the GitHub CLI and pass it in:
+
+```bash
+tag="$(python -c 'import json; print(json.load(open("scripts/camoufox-artifacts.json"))["release_tag"])')"
+gh api "repos/daijro/camoufox/releases/tags/${tag}" > camoufox-release.json
+CAMOUFLARE_CAMOUFOX_RELEASES_FILE=camoufox-release.json python scripts/fetch_camoufox.py
+```
+
+Camouflare never downloads the browser or its add-ons when it launches a browser: if
+either is missing, the launch fails with an error that points to this script. Do not use
+`camoufox fetch`: it installs the newest browser release the `camoufox` library supports
+and the latest add-on without verifying either, and a failed add-on download leaves an
+empty add-on directory.
 
 ## API
 

@@ -31,8 +31,8 @@ publication, rotate affected credentials, and verify all prior attestations befo
 
 ## Interrupted publication recovery
 
-If publication stops after a temporary candidate is pushed, preserve the uploaded release
-evidence and re-run the same tag-push workflow event. The workflow reuses an existing GHCR
-version only after both platform manifests pass smoke, security, and source-revision checks.
-A mismatch is an incident: do not overwrite the destination; investigate and publish a new
-patch version if recovery cannot be proven safe.
+If publication stops after the untagged candidate digest is pushed, preserve the uploaded
+release evidence and re-run the same tag-push workflow event. The workflow reuses an
+existing GHCR version only after both platform manifests pass smoke, security, and
+source-revision checks. A mismatch is an incident: do not overwrite the destination;
+investigate and publish a new patch version if recovery cannot be proven safe.

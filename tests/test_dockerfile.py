@@ -1,9 +1,39 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+
+import pytest
+import yaml
+
+import camouflare.__main__ as cli
+from camouflare.config import Settings
 
 DOCKERFILE = Path(__file__).resolve().parents[1] / "Dockerfile"
 COMPOSE = Path(__file__).resolve().parents[1] / "compose.yaml"
+
+
+def _instructions() -> list[tuple[str, str]]:
+    """Return Dockerfile instructions with line continuations joined."""
+
+    instructions: list[tuple[str, str]] = []
+    pending = ""
+    for line in DOCKERFILE.read_text().splitlines():
+        stripped = line.strip()
+        # Docker drops blank and comment lines, including inside a continuation.
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.endswith("\\"):
+            pending += stripped.removesuffix("\\") + " "
+            continue
+        keyword, _, argument = (pending + stripped).partition(" ")
+        pending = ""
+        instructions.append((keyword.upper(), argument.strip()))
+    return instructions
+
+
+def _arguments(keyword: str) -> list[str]:
+    return [argument for name, argument in _instructions() if name == keyword]
 
 
 def test_dockerfile_uses_pinned_lts_base_image() -> None:
@@ -35,14 +65,35 @@ def test_dockerfile_healthcheck_uses_ipv4_loopback_and_configured_port() -> None
     assert "http://localhost:" not in dockerfile
 
 
-def test_dockerfile_has_runtime_process_and_healthcheck_tools() -> None:
-    dockerfile = DOCKERFILE.read_text()
+def test_stop_signal_reaches_only_the_python_process() -> None:
+    # Docker uses the last ENTRYPOINT/CMD; both must be exec form so no shell sits
+    # between dumb-init and the app and absorbs the forwarded signal.
+    entrypoint = json.loads(_arguments("ENTRYPOINT")[-1])
+    command = json.loads(_arguments("CMD")[-1])
+    init, *init_arguments = entrypoint
+    separator = init_arguments.index("--") if "--" in init_arguments else len(init_arguments)
+    init_options = init_arguments[:separator]
+    child = init_arguments[separator + 1 :] + command
 
-    assert "dumb-init" in dockerfile
-    assert "curl -fsS" not in dockerfile
-    assert "/app/.venv/bin/python -c" in dockerfile
-    assert 'ENTRYPOINT ["/usr/bin/dumb-init", "--"]' in dockerfile
-    assert 'CMD ["/app/.venv/bin/python", "-m", "camouflare"]' in dockerfile
+    assert Path(init).name == "dumb-init"
+    # Without single-child mode dumb-init signals the child's whole process group,
+    # stopping the Playwright driver and Xvfb while the app is still draining.
+    assert "--single-child" in init_options or "-c" in init_options
+    assert child == ["/app/.venv/bin/python", "-m", "camouflare"]
+
+
+def test_compose_stop_grace_outlasts_request_drain_and_shutdown_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = yaml.safe_load(COMPOSE.read_text())["services"]["camouflare"]
+    monkeypatch.delenv("SHUTDOWN_TIMEOUT_SECONDS", raising=False)
+    default_shutdown = Settings().shutdown_timeout_seconds
+    shutdown_timeout = int(service["environment"].get("SHUTDOWN_TIMEOUT_SECONDS", default_shutdown))
+    stop_grace = int(service["stop_grace_period"].removesuffix("s"))
+
+    # Uvicorn drains requests before lifespan cleanup starts; Compose must not
+    # SIGKILL the container before both have finished.
+    assert stop_grace > cli._GRACEFUL_REQUEST_DRAIN_SECONDS + shutdown_timeout
 
 
 def test_dockerfile_avoids_dev_dependencies_and_build_tools_at_runtime() -> None:
@@ -61,13 +112,16 @@ def test_dockerfile_avoids_dev_dependencies_and_build_tools_at_runtime() -> None
 
 def test_dockerfile_runs_non_root_with_writable_runtime_paths() -> None:
     dockerfile = DOCKERFILE.read_text()
+    runs = _arguments("RUN")
+    venv_layer = next(index for index, run in enumerate(runs) if "uv sync" in run)
 
-    assert "USER 1000" in dockerfile
+    assert _arguments("USER")[-1] == "1000"
     assert "useradd" not in dockerfile
     assert "XDG_CACHE_HOME=/cache" in dockerfile
-    assert "chown -R 1000:1000 /app" in dockerfile
-    assert "chown -R 1000:1000 /cache /tmp" in dockerfile
-    assert "chmod -R a+rwX /cache" in dockerfile
+    assert "chown -R 1000:1000 /app /cache /tmp" in runs[venv_layer]
+    assert "chmod -R a+rwX /cache /tmp" in runs[venv_layer]
+    # Changing ownership in a later layer would copy the whole virtualenv into it.
+    assert not any("chown" in run or "chmod" in run for run in runs[venv_layer + 1 :])
 
 
 def test_dockerfile_keeps_managed_python_out_of_ephemeral_tmp() -> None:

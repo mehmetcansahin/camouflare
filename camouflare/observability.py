@@ -127,20 +127,37 @@ def request_id_context(candidate: str | None) -> Iterator[str]:
 
 
 def redact_url(value: str) -> str:
-    """Remove userinfo, query, and fragment components from a URL."""
+    """Reduce URLs with an authority to ``scheme://host[:port]`` for logging.
+
+    Absolute paths can carry one-time tokens (password resets, signed links) and
+    appear verbatim in browser error text, so only the origin is retained. Relative
+    request targets are this service's own routes and keep their path.
+    """
 
     try:
         parsed = urlsplit(value)
+        hostname = parsed.hostname
+        port = parsed.port
     except ValueError:
+        # Includes non-numeric "ports": raw credentials containing "/", "?" or "#"
+        # (``https://user:pa/ss@host``) end the authority inside the password.
         return REDACTED_URL
-    if not parsed.scheme or not parsed.netloc:
+    if not parsed.netloc:
         if value.startswith(("/", "*")):
             return urlunsplit(("", "", parsed.path, "", ""))
         # A query-like value without a safely identifiable path is not useful
         # enough to justify retaining potentially sensitive text.
         return REDACTED_URL if "?" in value or "@" in value else value
-    netloc = parsed.netloc.rsplit("@", 1)[-1]
-    return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+    if not hostname or (
+        "@" in parsed.path + parsed.query + parsed.fragment
+        and (port is not None or parsed.username is not None or parsed.netloc.endswith(":"))
+    ):
+        # Raw "/", "?" or "#" can move credential text beyond the authority,
+        # including when an earlier "@" makes a password fragment look like a host.
+        return REDACTED_URL
+    host = f"[{hostname}]" if ":" in hostname else hostname
+    authority = host if port is None else f"{host}:{port}"
+    return urlunsplit((parsed.scheme, authority, "", "", ""))
 
 
 def redact_text(value: str) -> str:
@@ -205,6 +222,9 @@ class TextLogFormatter(logging.Formatter):
         safe_record = copy.copy(record)
         safe_record.msg = redact_text(record.getMessage())
         safe_record.args = ()
+        # Another handler's stock formatter may already have cached an
+        # unredacted traceback on the shared record; never emit it verbatim.
+        safe_record.exc_text = redact_text(record.exc_text) if record.exc_text else None
         safe_record.request_id = getattr(record, "request_id", get_request_id() or "-")
         return super().format(safe_record)
 

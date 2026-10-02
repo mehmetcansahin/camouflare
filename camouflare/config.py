@@ -221,6 +221,11 @@ def _validate_settings(settings: Settings) -> None:
         raise ValueError("LOG_FORMAT must be either text or json.")
     if not settings.camouflare_api_token and not is_loopback_host(settings.host):
         raise ValueError("CAMOUFLARE_API_TOKEN is required when HOST is not a loopback address.")
+    if settings.proxy_url:
+        try:
+            normalize_proxy(settings.env_proxy)
+        except CamouflareError as exc:
+            raise ValueError(f"PROXY_URL/PROXY_SERVER is invalid: {exc}") from exc
 
 
 def is_loopback_host(host: str) -> bool:

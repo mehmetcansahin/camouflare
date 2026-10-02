@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import threading
 import time
 from email.message import Message
@@ -13,6 +15,7 @@ import camouflare.navigation as navigation
 from camouflare.app import create_app
 from camouflare.limits import ResourceLimits
 from camouflare.models import V1Request
+from camouflare.observability import JsonLogFormatter
 from camouflare.timer import TimeoutTimer
 from tests.fakes import FakeBrowserFactory, FakeContext
 
@@ -448,6 +451,62 @@ async def test_direct_ajax_candidates_reject_non_2xx_responses(
 
     assert result is None
     assert context.cookies_added == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (403, "forbidden"),
+        (200, "<html><title>Just a moment...</title></html>"),
+    ],
+)
+async def test_ajax_preflight_fallback_json_log_identifies_only_target_origin(
+    caplog: pytest.LogCaptureFixture,
+    status: int,
+    body: str,
+) -> None:
+    target = (
+        "https://log-user:log-pass@example.com:8443/reset/one-time-path-token/confirm"
+        "?ajax=true&sig=query-secret#fragment-secret"
+    )
+
+    async def direct_get(
+        url: str,
+        request: V1Request,
+        timer: TimeoutTimer,
+    ) -> navigation.RawResponse:
+        return navigation.RawResponse(url=url, status=status, headers={}, body=body)
+
+    context = FakeContext()
+    page = await context.new_page()
+    with caplog.at_level(logging.INFO, logger="camouflare.navigation"):
+        await navigation.navigate_get(
+            page,
+            V1Request(cmd="request.get", url=target),
+            TimeoutTimer(1000),
+            ResourceLimits(),
+            direct_http_get=direct_get,
+        )
+
+    assert len(page.goto_calls) == 1
+    preflight = [
+        record
+        for record in caplog.records
+        if record.getMessage().startswith("Direct HTTP GET preflight returned")
+    ]
+    assert len(preflight) == 1
+    emitted = JsonLogFormatter().format(preflight[0])
+    for secret in (
+        "/reset",
+        "one-time-path-token",
+        "query-secret",
+        "fragment-secret",
+        "log-user",
+        "log-pass",
+    ):
+        assert secret not in emitted
+    assert json.loads(emitted)["fields"]["target"] == "https://example.com:8443"
 
 
 @pytest.mark.anyio

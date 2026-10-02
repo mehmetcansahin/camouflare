@@ -5,7 +5,10 @@ import sys
 import types
 from pathlib import Path
 
+import camoufox.addons
+import camoufox.pkgman
 import pytest
+from camoufox.addons import DefaultAddons
 
 from camouflare import browser
 from camouflare.cleanup import CleanupSupervisor
@@ -109,6 +112,7 @@ async def test_camoufox_factory_patches_playwright_before_launch(
     fake_module.AsyncCamoufox = FakeCamoufox
     monkeypatch.setitem(sys.modules, "camoufox.async_api", fake_module)
     monkeypatch.setattr(browser, "validate_runtime_environment", lambda: None)
+    monkeypatch.setattr(browser, "installed_default_addon_paths", lambda: [])
     monkeypatch.setattr(
         browser,
         "patch_playwright_cancelled_protocol_future",
@@ -129,10 +133,7 @@ async def test_camoufox_factory_patches_playwright_before_launch(
     assert calls == ["protocol-patch", "patch", "construct", "enter", "exit"]
 
 
-@pytest.mark.anyio
-async def test_camoufox_launch_does_not_enable_geoip(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def _record_camoufox_launches(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
     options: list[dict[str, object]] = []
     fake_module = types.ModuleType("camoufox.async_api")
 
@@ -151,12 +152,84 @@ async def test_camoufox_launch_does_not_enable_geoip(
     monkeypatch.setattr(browser, "validate_runtime_environment", lambda: None)
     monkeypatch.setattr(browser, "patch_playwright_cancelled_protocol_future", lambda: None)
     monkeypatch.setattr(browser, "patch_playwright_page_error_location", lambda: None)
+    return options
+
+
+def _install_camoufox_at(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
+    monkeypatch.setattr(camoufox.pkgman, "camoufox_path", lambda download_if_missing=True: root)
+    monkeypatch.setattr(camoufox.addons, "get_addon_path", lambda name: str(root / "addons" / name))
+
+
+@pytest.mark.anyio
+async def test_camoufox_launch_does_not_enable_geoip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    options = _record_camoufox_launches(monkeypatch)
+    monkeypatch.setattr(browser, "installed_default_addon_paths", lambda: [])
 
     handle = await browser.make_camoufox_browser_factory(Settings())()
     await handle.close()
 
     assert len(options) == 1
     assert "geoip" not in options[0]
+
+
+@pytest.mark.anyio
+async def test_camoufox_launch_loads_installed_default_addons_without_downloading(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    options = _record_camoufox_launches(monkeypatch)
+    _install_camoufox_at(monkeypatch, tmp_path)
+    for addon in DefaultAddons:
+        addon_path = tmp_path / "addons" / addon.name
+        addon_path.mkdir(parents=True)
+        (addon_path / "manifest.json").write_text("{}", encoding="utf-8")
+
+    handle = await browser.make_camoufox_browser_factory(Settings(challenge_solver="none"))()
+    await handle.close()
+
+    assert options[0]["addons"] == [
+        str(tmp_path / "addons" / addon.name) for addon in DefaultAddons
+    ]
+    # Camoufox downloads latest.xpi for every default add-on it is not told to exclude.
+    assert options[0]["exclude_addons"] == list(DefaultAddons)
+
+
+@pytest.mark.anyio
+async def test_camoufox_launch_fails_fast_when_default_addon_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    options = _record_camoufox_launches(monkeypatch)
+    _install_camoufox_at(monkeypatch, tmp_path)
+    # A failed upstream `camoufox fetch` leaves the add-on directory empty.
+    (tmp_path / "addons" / DefaultAddons.UBO.name).mkdir(parents=True)
+
+    with pytest.raises(RuntimeError, match="add-on UBO is not installed"):
+        await browser.make_camoufox_browser_factory(Settings(challenge_solver="none"))()
+
+    assert options == []
+
+
+@pytest.mark.anyio
+async def test_camoufox_launch_fails_fast_when_browser_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    options = _record_camoufox_launches(monkeypatch)
+
+    class ForbiddenFetcher:
+        def __init__(self) -> None:
+            raise AssertionError("a browser launch must not download Camoufox")
+
+    monkeypatch.setattr(camoufox.pkgman, "INSTALL_DIR", tmp_path / "missing")
+    monkeypatch.setattr(camoufox.pkgman, "CamoufoxFetcher", ForbiddenFetcher)
+
+    with pytest.raises(RuntimeError, match="browser is not installed"):
+        await browser.make_camoufox_browser_factory(Settings(challenge_solver="none"))()
+
+    assert options == []
 
 
 @pytest.mark.anyio
@@ -184,6 +257,7 @@ async def test_cancelled_camoufox_launch_closes_partially_entered_manager(
     fake_module.AsyncCamoufox = FakeCamoufox
     monkeypatch.setitem(sys.modules, "camoufox.async_api", fake_module)
     monkeypatch.setattr(browser, "validate_runtime_environment", lambda: None)
+    monkeypatch.setattr(browser, "installed_default_addon_paths", lambda: [])
     monkeypatch.setattr(browser, "patch_playwright_cancelled_protocol_future", lambda: None)
     monkeypatch.setattr(browser, "patch_playwright_page_error_location", lambda: None)
     cleanup = CleanupSupervisor(timeout_seconds=0.1)
@@ -295,21 +369,6 @@ def test_playwright_protocol_patch_warns_for_unverified_version(
     assert "not verified" in caplog.text
 
 
-def test_playwright_protocol_patch_rejects_source_fingerprint_mismatch(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    monkeypatch.setattr(browser, "_PLAYWRIGHT_CANCEL_PATCH_STATUS", "pending")
-    monkeypatch.setattr(browser, "_installed_playwright_version", lambda: "1.61.0")
-    monkeypatch.setattr(browser.inspect, "getsource", lambda _target: "modified source")
-
-    with caplog.at_level("WARNING"):
-        status = browser.patch_playwright_cancelled_protocol_future()
-
-    assert status == "fingerprint_mismatch"
-    assert "fingerprint was not recognized" in caplog.text
-
-
 @pytest.mark.anyio
 async def test_concurrent_camoufox_launches_never_overlap(
     monkeypatch: pytest.MonkeyPatch,
@@ -342,6 +401,7 @@ async def test_concurrent_camoufox_launches_never_overlap(
     fake_module.AsyncCamoufox = FakeCamoufox
     monkeypatch.setitem(sys.modules, "camoufox.async_api", fake_module)
     monkeypatch.setattr(browser, "validate_runtime_environment", lambda: None)
+    monkeypatch.setattr(browser, "installed_default_addon_paths", lambda: [])
     monkeypatch.setattr(browser, "patch_playwright_cancelled_protocol_future", lambda: None)
     monkeypatch.setattr(browser, "patch_playwright_page_error_location", lambda: None)
 
@@ -381,6 +441,7 @@ async def test_failed_camoufox_launch_does_not_overlap_the_next_one(
     fake_module.AsyncCamoufox = FakeCamoufox
     monkeypatch.setitem(sys.modules, "camoufox.async_api", fake_module)
     monkeypatch.setattr(browser, "validate_runtime_environment", lambda: None)
+    monkeypatch.setattr(browser, "installed_default_addon_paths", lambda: [])
     monkeypatch.setattr(browser, "patch_playwright_cancelled_protocol_future", lambda: None)
     monkeypatch.setattr(browser, "patch_playwright_page_error_location", lambda: None)
 

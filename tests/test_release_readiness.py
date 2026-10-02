@@ -1,14 +1,22 @@
 from __future__ import annotations
 
+import os
 import re
+import subprocess
+import sys
 import tomllib
 from importlib.metadata import version as installed_version
 from pathlib import Path
+from typing import Any
+
+import pytest
+import yaml
 
 from camouflare import __version__
 from camouflare.documentation import DOCUMENTATION_HTML
 
 ROOT = Path(__file__).resolve().parents[1]
+RELEASE_COMMIT = "1" * 40
 
 
 def test_readme_documents_guarded_default_solver() -> None:
@@ -317,6 +325,157 @@ def test_release_is_immutable_approval_gated_and_multi_arch() -> None:
     assert "sbom" in release.lower()
     assert "gh-action-pypi-publish" not in release
     assert "pypi_complete" not in release
+
+
+def _publish_steps() -> list[dict[str, Any]]:
+    workflow = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8"))
+    return workflow["jobs"]["publish"]["steps"]
+
+
+def _promotion_index(steps: list[dict[str, Any]]) -> int:
+    promotions = [
+        index
+        for index, step in enumerate(steps)
+        if "imagetools create" in step.get("run", "")
+        or (
+            step.get("uses", "").startswith("docker/build-push-action@")
+            and "tags" in step.get("with", {})
+        )
+    ]
+    assert len(promotions) == 1, "exactly one publish step may create a registry tag"
+    return promotions[0]
+
+
+def test_release_candidate_is_digest_only_and_tagged_after_every_gate() -> None:
+    steps = _publish_steps()
+    candidate = next(step for step in steps if step.get("id") == "candidate")
+    manifests = next(step for step in steps if step.get("id") == "manifests")
+    promotion_index = _promotion_index(steps)
+    promotion = steps[promotion_index]
+    outputs = dict(option.split("=", 1) for option in candidate["with"]["outputs"].split(","))
+    gates: dict[str, int] = {}
+    for index, step in enumerate(steps):
+        run = step.get("run", "")
+        action = step.get("uses", "")
+        if "org.opencontainers.image.revision" in run:
+            gates["revision check"] = index
+        if action.startswith("actions/upload-artifact@"):
+            gates["evidence upload"] = index
+        for platform in ("amd64", "arm64"):
+            digest = f"${{{{ steps.manifests.outputs.{platform}_digest }}}}"
+            if "container_smoke.sh" in run and digest in run:
+                gates[f"{platform} smoke"] = index
+            if action.startswith("aquasecurity/trivy-action@") and step["with"].get(
+                "image-ref", ""
+            ).endswith(f"@{digest}"):
+                gates[f"{platform} scan"] = index
+
+    assert sorted(gates) == [
+        "amd64 scan",
+        "amd64 smoke",
+        "arm64 scan",
+        "arm64 smoke",
+        "evidence upload",
+        "revision check",
+    ]
+
+    # The candidate is pushed without any tag, so a failed gate never leaves a public name.
+    assert outputs["type"] == "image"
+    assert outputs["push-by-digest"] == "true"
+    assert outputs["push"] == "true"
+    assert "tags" not in candidate["with"]
+    # Every gate precedes the tag and runs unconditionally, so a rerun that reuses an
+    # already published image re-validates it before attestation.
+    assert [name for name, index in gates.items() if index > promotion_index] == []
+    assert [name for name, index in gates.items() if "if" in steps[index]] == []
+    # The gates inspect the platform manifests of the same index that promotion tags.
+    assert "${{ steps.image.outputs.digest }}" in manifests["run"]
+    assert promotion["env"]["SOURCE_IMAGE"].endswith("@${{ steps.image.outputs.digest }}")
+    assert candidate["if"] == promotion["if"] == "steps.destinations.outputs.image_exists != 'true'"
+
+
+def _run_promotion_step(tmp_path: Path, *, tag_commit: str | None) -> tuple[int, list[str]]:
+    steps = _publish_steps()
+    promotion = steps[_promotion_index(steps)]
+    script = promotion["run"]
+    assert promotion["shell"] == "bash"
+    assert "${{" not in script, "the step must read inputs only from its environment"
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    docker_calls = tmp_path / "docker-calls"
+    stubs = {
+        # Behaves like the GitHub API: only an authenticated request for the release tag's
+        # commit succeeds, and it reports whatever commit the tag currently names.
+        "curl": """#!/usr/bin/env bash
+authorized=0
+for argument in "$@"; do
+  [[ "${argument}" == "Authorization: Bearer ${GH_TOKEN}" ]] && authorized=1
+done
+url="${!#}"
+expected="https://api.github.com/repos/${GITHUB_REPOSITORY}/commits/${RELEASE_TAG}"
+if [[ "${authorized}" != 1 || "${url}" != "${expected}" || -z "${STUB_TAG_COMMIT}" ]]; then
+  echo "curl: (22) The requested URL returned error: 404" >&2
+  exit 22
+fi
+printf '{"sha": "%s"}\\n' "${STUB_TAG_COMMIT}"
+""",
+        "docker": '#!/usr/bin/env bash\nprintf \'%s\\n\' "$*" >>"${STUB_DOCKER_CALLS}"\n',
+        "python3": f'#!/usr/bin/env bash\nexec "{sys.executable}" "$@"\n',
+    }
+    for name, content in stubs.items():
+        stub = bin_dir / name
+        stub.write_text(content, encoding="utf-8")
+        stub.chmod(0o755)
+    script_path = tmp_path / "promote.sh"
+    script_path.write_text(script, encoding="utf-8")
+    environment = {
+        **os.environ,
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "GH_TOKEN": "release-token",
+        "GITHUB_REPOSITORY": "mehmetcansahin/camouflare",
+        "GITHUB_SHA": RELEASE_COMMIT,
+        "RELEASE_TAG": "v9.9.9",
+        "IMAGE_TAG": "ghcr.io/mehmetcansahin/camouflare:9.9.9",
+        "SOURCE_IMAGE": f"ghcr.io/mehmetcansahin/camouflare@sha256:{'a' * 64}",
+        "STUB_TAG_COMMIT": tag_commit or "",
+        "STUB_DOCKER_CALLS": str(docker_calls),
+    }
+    # GitHub runs `shell: bash` steps as `bash --noprofile --norc -eo pipefail {0}`.
+    completed = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-eo", "pipefail", str(script_path)],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    calls = docker_calls.read_text(encoding="utf-8").splitlines() if docker_calls.exists() else []
+    return completed.returncode, calls
+
+
+def test_promotion_tags_the_scanned_digest_when_the_tag_still_names_the_commit(
+    tmp_path: Path,
+) -> None:
+    returncode, docker_calls = _run_promotion_step(tmp_path, tag_commit=RELEASE_COMMIT)
+
+    assert returncode == 0
+    assert docker_calls == [
+        "buildx imagetools create --tag ghcr.io/mehmetcansahin/camouflare:9.9.9 "
+        f"ghcr.io/mehmetcansahin/camouflare@sha256:{'a' * 64}"
+    ]
+
+
+@pytest.mark.parametrize(
+    "tag_commit",
+    [pytest.param("2" * 40, id="tag-moved"), pytest.param(None, id="tag-lookup-failed")],
+)
+def test_promotion_refuses_to_tag_unless_the_tag_still_names_the_commit(
+    tmp_path: Path, tag_commit: str | None
+) -> None:
+    returncode, docker_calls = _run_promotion_step(tmp_path, tag_commit=tag_commit)
+
+    assert returncode != 0
+    assert docker_calls == []
 
 
 def test_container_smoke_forwards_bounded_startup_timeouts() -> None:

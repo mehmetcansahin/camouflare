@@ -360,15 +360,16 @@ jobs:
         run: |
           camoufox_tag="$(python3 -c 'import json; print(json.load(open("scripts/camoufox-artifacts.json"))["release_tag"])')"
           gh api "repos/daijro/camoufox/releases/tags/${camoufox_tag}" > "${RUNNER_TEMP}/camoufox-releases.json"
-      - name: Build and push a temporary multi-arch candidate
+      - name: Push the multi-arch candidate by digest only
         if: steps.destinations.outputs.image_exists != 'true'
         id: candidate
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ env.IMAGE_NAME }}:build-${{ github.run_id }}-${{ github.run_attempt }}
+          # No tag exists until promotion, so a run that fails a gate leaves only an
+          # untagged digest rather than a public candidate tag.
+          outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
           labels: ${{ steps.metadata.outputs.labels }}
           provenance: mode=max
           sbom: true
@@ -461,13 +462,25 @@ jobs:
             dist/
           if-no-files-found: error
           retention-days: 90
-      - name: Promote the scanned index to the immutable release tag
+      - name: Re-confirm the tag and promote the scanned index to the immutable release tag
         if: steps.destinations.outputs.image_exists != 'true'
         shell: bash
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IMAGE_TAG: ${{ steps.metadata.outputs.tags }}
           SOURCE_IMAGE: ${{ env.IMAGE_NAME }}@${{ steps.image.outputs.digest }}
-        run: docker buildx imagetools create --tag "${IMAGE_TAG}" "${SOURCE_IMAGE}"
+        run: |
+          # The gates above take long enough for the tag to move; re-check it in the
+          # same step so no other step can run between the verdict and the promotion.
+          remote_commit="$({
+            curl --fail --silent --show-error \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/commits/${RELEASE_TAG}"
+          } | python3 -c 'import json, sys; print(json.load(sys.stdin)["sha"])')"
+          test "${remote_commit}" = "${GITHUB_SHA}"
+          docker buildx imagetools create --tag "${IMAGE_TAG}" "${SOURCE_IMAGE}"
       - name: Attest published image provenance
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:

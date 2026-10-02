@@ -135,8 +135,14 @@ async def solve_request(
     sleep: Sleep = asyncio.sleep,
     cleanup_supervisor: CleanupSupervisor | None = None,
     cleanup_timeout_seconds: float = 10,
+    timer: TimeoutTimer | None = None,
 ) -> V1Response:
-    """Solve one FlareSolverr-compatible request using an existing page/context."""
+    """Solve one FlareSolverr-compatible request using an existing page/context.
+
+    ``timer`` carries a caller's absolute ``maxTimeout`` deadline, such as a /v1
+    command's, so the challenge reserve returns a partial solution before that
+    caller's own supervisor fires. Without one, the budget starts here.
+    """
     provider = captcha_provider or NoCaptchaProvider()
     active_limits = limits or ResourceLimits()
     supervisor = cleanup_supervisor or CleanupSupervisor(timeout_seconds=cleanup_timeout_seconds)
@@ -156,6 +162,7 @@ async def solve_request(
                 allow_direct_http_fallback=allow_direct_http_fallback,
                 allow_direct_http_first=allow_direct_http_first,
                 sleep=sleep,
+                timer=timer,
             )
         except BaseException:
             body_failed = True
@@ -189,6 +196,7 @@ async def _run_solve(
     allow_direct_http_fallback: bool = True,
     allow_direct_http_first: bool = True,
     sleep: Sleep = asyncio.sleep,
+    timer: TimeoutTimer | None = None,
 ) -> V1Response:
     post_state = _PostRequestState()
     try:
@@ -202,6 +210,7 @@ async def _run_solve(
             allow_direct_http_fallback=allow_direct_http_fallback,
             allow_direct_http_first=allow_direct_http_first,
             sleep=sleep,
+            timer=timer,
         )
     except asyncio.CancelledError:
         raise
@@ -258,8 +267,9 @@ async def _run_solve_inner(
     allow_direct_http_fallback: bool = True,
     allow_direct_http_first: bool = True,
     sleep: Sleep = asyncio.sleep,
+    timer: TimeoutTimer | None = None,
 ) -> V1Response:
-    timer = TimeoutTimer(request.max_timeout)
+    timer = timer if timer is not None else TimeoutTimer(request.max_timeout)
     inspect_response_content = not request.return_only_cookies
     response: Any = None
     final_response: MainFrameResponseHolder = {"value": None}
