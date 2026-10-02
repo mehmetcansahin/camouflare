@@ -832,6 +832,37 @@ async def test_aged_persistent_browser_keeps_transient_headroom_until_drain() ->
 
 
 @pytest.mark.anyio
+async def test_session_pinned_retiring_browser_does_not_block_replacement_launch() -> None:
+    factory = FakeBrowserFactory()
+    pool = BrowserPool(
+        browser_factory=factory,
+        min_browsers=1,
+        max_browsers=1,
+        max_contexts_per_browser=1,
+        browser_max_uses=1,
+        acquire_timeout_seconds=0.05,
+    )
+    await pool.start()
+    original = factory.created[0]
+    # The session's single use retires its browser, but the session keeps it open
+    # for as long as it lives.
+    persistent = await pool.create_persistent_context()
+    assert pool.snapshot().retiring_browser_slots == 1
+
+    async with pool.lease_context() as lease:
+        assert lease.browser is not original
+        # Both live generations still count against the physical ceiling.
+        with pytest.raises(PoolAcquireTimeout):
+            async with pool.lease_context():
+                pass
+    assert len(factory.created) == 2
+
+    await persistent.close()
+    await pool.close()
+    assert original.closed is True
+
+
+@pytest.mark.anyio
 async def test_concurrent_acquires_replace_all_idle_aged_slots_once() -> None:
     factory = FakeBrowserFactory()
     pool = BrowserPool(

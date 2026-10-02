@@ -35,6 +35,7 @@ from camouflare.limits import (
 )
 from camouflare.metrics import record_browser_transport_error
 from camouflare.models import V1Request
+from camouflare.observability import redact_url
 from camouflare.protocols import BrowserContextLike, PageLike, ResponseLike
 from camouflare.solution import is_best_effort_browser_error, response_charset
 from camouflare.timer import TimeoutTimer
@@ -304,7 +305,7 @@ async def navigate_get(
         if is_timeout_error(exc):
             logger.info(
                 "Navigation timed out before domcontentloaded; waiting for commit.",
-                extra={"target": safe_log_url(url), "error": type(exc).__name__},
+                extra={"target": redact_url(url), "error": type(exc).__name__},
             )
             try:
                 await page.wait_for_url(
@@ -324,7 +325,7 @@ async def navigate_get(
                     logger.info(
                         "Navigation timed out before commit; trying direct HTTP fallback.",
                         extra={
-                            "target": safe_log_url(url),
+                            "target": redact_url(url),
                             "error": type(commit_exc).__name__,
                         },
                     )
@@ -343,7 +344,7 @@ async def navigate_get(
                             "Browser transport closed during GET navigation; "
                             "falling back to direct HTTP.",
                             extra={
-                                "target": safe_log_url(url),
+                                "target": redact_url(url),
                                 "error": type(commit_exc).__name__,
                             },
                         )
@@ -361,7 +362,7 @@ async def navigate_get(
             if allow_direct_http_fallback:
                 logger.info(
                     "Browser transport closed during GET navigation; falling back to direct HTTP.",
-                    extra={"target": safe_log_url(url), "error": type(exc).__name__},
+                    extra={"target": redact_url(url), "error": type(exc).__name__},
                 )
                 return await _fallback_after_browser_transport(
                     url,
@@ -414,7 +415,7 @@ async def _fallback_after_browser_transport(
         logger.info(
             "Direct HTTP fallback after browser transport failure failed; "
             "preserving browser transport error.",
-            extra={"target": safe_log_url(url), "error": type(fallback_error).__name__},
+            extra={"target": redact_url(url), "error": type(fallback_error).__name__},
         )
         _emit_browser_transport_error(browser_error, fallback_used=False)
         raise browser_error from fallback_error
@@ -426,7 +427,7 @@ async def _fallback_after_browser_transport(
         # to the response's cookie jar when the context remains unavailable.
         logger.info(
             "Could not import direct HTTP cookies into the failed browser context.",
-            extra={"target": safe_log_url(url), "error": type(cookie_error).__name__},
+            extra={"target": redact_url(url), "error": type(cookie_error).__name__},
         )
     _emit_browser_transport_error(browser_error, fallback_used=True)
     return _mark_direct_http_fallback(response)
@@ -448,7 +449,7 @@ async def try_direct_http_get_first(
     except Exception as exc:
         logger.info(
             "Direct HTTP GET preflight failed; falling back to browser navigation.",
-            extra={"target": safe_log_url(url), "error": type(exc).__name__},
+            extra={"target": redact_url(url), "error": type(exc).__name__},
         )
         return None
 
@@ -456,7 +457,7 @@ async def try_direct_http_get_first(
         logger.info(
             "Direct HTTP GET preflight returned a non-2xx response; "
             "falling back to browser navigation.",
-            extra={"target": safe_log_url(url), "status": response.status},
+            extra={"target": redact_url(url), "status": response.status},
         )
         return None
     body = await response.text()
@@ -464,7 +465,7 @@ async def try_direct_http_get_first(
         logger.info(
             "Direct HTTP GET preflight returned challenge HTML; "
             "falling back to browser navigation.",
-            extra={"target": safe_log_url(url), "status": response.status},
+            extra={"target": redact_url(url), "status": response.status},
         )
         return None
     try:
@@ -472,7 +473,7 @@ async def try_direct_http_get_first(
     except Exception as exc:
         logger.info(
             "Direct HTTP GET cookie import failed; falling back to browser navigation.",
-            extra={"target": safe_log_url(url), "error": type(exc).__name__},
+            extra={"target": redact_url(url), "error": type(exc).__name__},
         )
         return None
     return response
@@ -495,7 +496,7 @@ async def try_direct_http_get_after_navigation_timeout(
         logger.info(
             "Direct HTTP GET fallback after navigation timeout failed; "
             "preserving browser navigation error.",
-            extra={"target": safe_log_url(url), "error": type(exc).__name__},
+            extra={"target": redact_url(url), "error": type(exc).__name__},
         )
         return None
 
@@ -503,7 +504,7 @@ async def try_direct_http_get_after_navigation_timeout(
         logger.info(
             "Direct HTTP GET fallback after navigation timeout returned a non-2xx response; "
             "preserving browser navigation error.",
-            extra={"target": safe_log_url(url), "status": response.status},
+            extra={"target": redact_url(url), "status": response.status},
         )
         return None
     body = await response.text()
@@ -511,7 +512,7 @@ async def try_direct_http_get_after_navigation_timeout(
         logger.info(
             "Direct HTTP GET fallback after navigation timeout returned challenge HTML; "
             "preserving browser navigation error.",
-            extra={"target": safe_log_url(url), "status": response.status},
+            extra={"target": redact_url(url), "status": response.status},
         )
         return None
     try:
@@ -520,7 +521,7 @@ async def try_direct_http_get_after_navigation_timeout(
         logger.info(
             "Direct HTTP GET cookie import after navigation timeout failed; "
             "preserving browser navigation error.",
-            extra={"target": safe_log_url(url), "error": type(exc).__name__},
+            extra={"target": redact_url(url), "error": type(exc).__name__},
         )
         return None
     return _mark_direct_http_fallback(response)
@@ -1103,16 +1104,6 @@ def clean_url(url: str | None) -> str:
             error_code=V1ErrorCode.INVALID_REQUEST,
         )
     return cleaned
-
-
-def safe_log_url(url: str) -> str:
-    parts = urlsplit(url)
-    host = parts.hostname or ""
-    try:
-        port = f":{parts.port}" if parts.port is not None else ""
-    except ValueError:
-        port = ""
-    return urlunsplit((parts.scheme, host + port, parts.path, "", ""))
 
 
 def quote_url_for_http(url: str) -> str:

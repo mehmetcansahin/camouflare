@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, cast
 from uuid import uuid4
@@ -16,9 +17,10 @@ from camouflare.navigation import DirectHttpExecutor, active_direct_http_executo
 from camouflare.pool import BrowserPool, PersistentCapacityError
 from camouflare.protocols import BrowserProxy, ContextOptions, PageLike
 from camouflare.proxy import open_proxy_lease
-from camouflare.sessions import Session, SessionManager
+from camouflare.sessions import Session, SessionManager, SessionUnavailableError
 from camouflare.solution import is_best_effort_browser_error
 from camouflare.solver import solve_request
+from camouflare.timer import TimeoutTimer
 
 logger = logging.getLogger(__name__)
 
@@ -42,13 +44,25 @@ class CommandService:
     cleanup: CleanupSupervisor | None = None
     direct_http: DirectHttpExecutor | None = None
 
-    async def dispatch(self, request: V1Request, *, start_timestamp: int) -> V1Response:
+    async def dispatch(
+        self,
+        request: V1Request,
+        *,
+        start_timestamp: int,
+        timer: TimeoutTimer | None = None,
+    ) -> V1Response:
         if self.direct_http is None:
-            return await self._dispatch(request, start_timestamp=start_timestamp)
+            return await self._dispatch(request, start_timestamp=start_timestamp, timer=timer)
         with active_direct_http_executor(self.direct_http):
-            return await self._dispatch(request, start_timestamp=start_timestamp)
+            return await self._dispatch(request, start_timestamp=start_timestamp, timer=timer)
 
-    async def _dispatch(self, request: V1Request, *, start_timestamp: int) -> V1Response:
+    async def _dispatch(
+        self,
+        request: V1Request,
+        *,
+        start_timestamp: int,
+        timer: TimeoutTimer | None,
+    ) -> V1Response:
         return await dispatch_v1(
             request,
             pool=self.pool,
@@ -57,6 +71,7 @@ class CommandService:
             captcha_provider=self.captcha_provider,
             cleanup=self.cleanup,
             start_timestamp=start_timestamp,
+            timer=timer,
         )
 
 
@@ -69,7 +84,11 @@ async def dispatch_v1(
     captcha_provider: CaptchaProvider,
     start_timestamp: int,
     cleanup: CleanupSupervisor | None = None,
+    timer: TimeoutTimer | None = None,
 ) -> V1Response:
+    # maxTimeout is one absolute budget for the whole command: session-creation
+    # and solve waits share it instead of restarting it once a page is ready.
+    timer = timer if timer is not None else TimeoutTimer(request.max_timeout)
     if not request.cmd:
         raise CamouflareError(
             "Request parameter 'cmd' is mandatory.",
@@ -90,6 +109,7 @@ async def dispatch_v1(
             sessions=sessions,
             settings=settings,
             cleanup=cleanup,
+            timer=timer,
         )
     if request.cmd == "sessions.list":
         return V1Response(status="ok", sessions=sessions.list_ids(), version=settings.version)
@@ -114,6 +134,7 @@ async def dispatch_v1(
             captcha_provider=captcha_provider,
             cleanup=cleanup,
             start_timestamp=start_timestamp,
+            timer=timer,
         )
     raise CamouflareError(
         f"Request parameter 'cmd' = '{request.cmd}' is invalid.",
@@ -128,9 +149,11 @@ async def sessions_create(
     sessions: SessionManager,
     settings: Settings,
     cleanup: CleanupSupervisor | None = None,
+    timer: TimeoutTimer | None = None,
 ) -> V1Response:
-    session_id = request.session
-    existing = sessions.get(session_id) if session_id else None
+    timer = timer if timer is not None else TimeoutTimer(request.max_timeout)
+    session_id = request.session or None
+    existing = sessions.get(session_id) if session_id is not None else None
     if existing is not None:
         return V1Response(
             status="ok",
@@ -138,26 +161,62 @@ async def sessions_create(
             session=existing.session_id,
             version=settings.version,
         )
-    proxy = resolve_proxy(request.proxy, settings.env_proxy)
+    session, created = await _create_session(
+        request,
+        session_id,
+        proxy=resolve_proxy(request.proxy, settings.env_proxy),
+        ttl_seconds=resolve_ttl_seconds(request, settings),
+        pool=pool,
+        sessions=sessions,
+        settings=settings,
+        cleanup=cleanup,
+        timer=timer,
+    )
+    return V1Response(
+        status="ok",
+        message="Session already exists." if not created else "Session created successfully.",
+        session=session.session_id,
+        version=settings.version,
+    )
+
+
+async def _create_session(
+    request: V1Request,
+    session_id: str | None,
+    *,
+    proxy: dict[str, str] | None,
+    ttl_seconds: int | None,
+    pool: BrowserPool,
+    sessions: SessionManager,
+    settings: Settings,
+    cleanup: CleanupSupervisor | None,
+    timer: TimeoutTimer,
+) -> tuple[Session, bool]:
+    """Register a new persistent session, or return the winner of a same-id race."""
+
+    if session_id is not None:
+        # A closing tombstone still holds this id and its capacity. Building a
+        # context first would only turn that into a misleading capacity error.
+        sessions.raise_if_closing(session_id)
     proxy_lease = await open_proxy_lease(proxy)
-    ttl_seconds = resolve_ttl_seconds(request, settings)
+    building = sessions.creating(session_id) if session_id is not None else nullcontext()
     try:
-        persistent = await pool.create_persistent_context(
-            **context_options(proxy_lease.browser_proxy, request)
-        )
+        with building:
+            persistent = await pool.create_persistent_context(
+                **context_options(proxy_lease.browser_proxy, request)
+            )
     except PersistentCapacityError:
         await _close_proxy_best_effort(proxy_lease, cleanup=cleanup, settings=settings)
         if session_id is not None:
-            for _ in range(3):
-                winner = sessions.get(session_id)
-                if winner is not None:
-                    return V1Response(
-                        status="ok",
-                        message="Session already exists.",
-                        session=winner.session_id,
-                        version=settings.version,
-                    )
-                await asyncio.sleep(0)
+            # The last persistent slot may belong to a same-id request that is
+            # still building its context. Wait for its actual outcome, within this
+            # command's deadline, before rejecting a race that request will win.
+            winner = await sessions.wait_for_creation(
+                session_id,
+                timeout=timer.remaining_seconds,
+            )
+            if winner is not None:
+                return winner, False
         record_session_event("rejected")
         raise
     except BaseException:
@@ -172,6 +231,8 @@ async def sessions_create(
             settings=settings,
         )
 
+    # Registration runs without awaiting after the build settles, so a same-id
+    # waiter woken by that settlement always observes the registered winner.
     try:
         session, created = sessions.register_or_get(
             session_id or generated_session_id(),
@@ -185,12 +246,7 @@ async def sessions_create(
         raise
     if not created:
         await close_session_resources()
-    return V1Response(
-        status="ok",
-        message="Session already exists." if not created else "Session created successfully.",
-        session=session.session_id,
-        version=settings.version,
-    )
+    return session, created
 
 
 async def execute_request(
@@ -202,7 +258,9 @@ async def execute_request(
     captcha_provider: CaptchaProvider,
     start_timestamp: int,
     cleanup: CleanupSupervisor | None = None,
+    timer: TimeoutTimer | None = None,
 ) -> V1Response:
+    timer = timer if timer is not None else TimeoutTimer(request.max_timeout)
     if request.cmd == "request.get" and not request.url:
         raise CamouflareError(
             "Request parameter 'url' is mandatory in 'request.get' command.",
@@ -226,12 +284,18 @@ async def execute_request(
             sessions=sessions,
             settings=settings,
             cleanup=cleanup,
+            timer=timer,
         )
         sessions.mark_in_use(session)
         try:
             async with session.lock:
                 if sessions.get(request.session) is not session:
-                    raise RuntimeError("The session was closed by a concurrent request.")
+                    # Evicted, destroyed, or rotated while this request waited for
+                    # the lock. Nothing was sent, so any command may retry.
+                    raise SessionUnavailableError(
+                        "The session was closed by a concurrent request; "
+                        "retry to use a fresh session."
+                    )
                 session.touch()
                 existing_page_ids = _context_page_ids(session.context)
                 page: PageLike | None = None
@@ -248,14 +312,7 @@ async def execute_request(
                         # marker-based.
                         await sessions.evict_if_current(session)
                         if is_best_effort_browser_error(exc):
-                            raise CamouflareError(
-                                "Browser transport closed before a session page could be created.",
-                                error_code=V1ErrorCode.BROWSER_TRANSPORT_CLOSED,
-                                retryable=request.cmd == "request.get",
-                                # No target request can have been sent before
-                                # BrowserContext.new_page() returns.
-                                request_outcome_unknown=False,
-                            ) from exc
+                            raise _page_creation_transport_error(request) from exc
                         raise
                     response = await solve_request(
                         request,
@@ -272,6 +329,7 @@ async def execute_request(
                         allow_direct_http_first=False,
                         cleanup_supervisor=cleanup,
                         cleanup_timeout_seconds=settings.cleanup_timeout_seconds,
+                        timer=timer,
                     )
                     if response.error_code is V1ErrorCode.BROWSER_TRANSPORT_CLOSED:
                         await _evict_session_if_context_unusable(
@@ -292,6 +350,7 @@ async def execute_request(
         proxy = resolve_proxy(request.proxy, settings.env_proxy)
         proxy_lease = await open_proxy_lease(proxy)
         response = None
+        solve_started = False
         try:
             try:
                 async with pool.lease_context(
@@ -301,6 +360,7 @@ async def execute_request(
                     page = None
                     try:
                         page = await lease.context.new_page()
+                        solve_started = True
                         response = await solve_request(
                             request,
                             context=lease.context,
@@ -311,6 +371,7 @@ async def execute_request(
                             allow_direct_http_first=proxy is None,
                             cleanup_supervisor=cleanup,
                             cleanup_timeout_seconds=settings.cleanup_timeout_seconds,
+                            timer=timer,
                         )
                     finally:
                         await close_request_pages(
@@ -320,12 +381,19 @@ async def execute_request(
                             cleanup_supervisor=cleanup,
                             timeout_seconds=settings.cleanup_timeout_seconds,
                         )
-            except Exception:
-                if response is None:
+            except Exception as exc:
+                if response is not None:
+                    logger.warning(
+                        "Ignoring browser cleanup error after a completed solve.", exc_info=True
+                    )
+                elif not solve_started and is_best_effort_browser_error(exc):
+                    # The browser transport closed while the leased context or
+                    # its page was being opened, before any target request. A
+                    # retry leases a fresh context, and the pool retires a
+                    # disconnected browser before handing it out again.
+                    raise _page_creation_transport_error(request) from exc
+                else:
                     raise
-                logger.warning(
-                    "Ignoring browser cleanup error after a completed solve.", exc_info=True
-                )
         finally:
             await _close_proxy_best_effort(
                 proxy_lease,
@@ -355,9 +423,11 @@ async def session_for_request(
     sessions: SessionManager,
     settings: Settings,
     cleanup: CleanupSupervisor | None = None,
+    timer: TimeoutTimer | None = None,
 ) -> Session:
     assert request.session is not None
-    ttl_seconds = resolve_ttl_seconds(request, settings)
+    timer = timer if timer is not None else TimeoutTimer(request.max_timeout)
+    ttl_seconds: int | None = resolve_ttl_seconds(request, settings)
     existing = sessions.get(request.session)
     if existing is not None and (
         not existing.expired() or existing.lock.locked() or existing.in_use > 0
@@ -371,37 +441,29 @@ async def session_for_request(
         record_session_event("rotated")
     else:
         proxy = resolve_proxy(request.proxy, settings.env_proxy)
-    proxy_lease = await open_proxy_lease(proxy)
-    try:
-        persistent = await pool.create_persistent_context(
-            **context_options(proxy_lease.browser_proxy, request)
-        )
-    except BaseException:
-        await _close_proxy_best_effort(proxy_lease, cleanup=cleanup, settings=settings)
-        raise
-
-    async def close_session_resources() -> None:
-        await _close_persistent_resources(
-            persistent,
-            proxy_lease,
-            cleanup=cleanup,
-            settings=settings,
-        )
-
-    try:
-        session, created = sessions.register_or_get(
-            request.session,
-            persistent.context,
-            proxy=proxy,
-            on_close=close_session_resources,
-            ttl_seconds=ttl_seconds,
-        )
-    except BaseException:
-        await close_session_resources()
-        raise
-    if not created:
-        await close_session_resources()
+    session, _created = await _create_session(
+        request,
+        request.session,
+        proxy=proxy,
+        ttl_seconds=ttl_seconds,
+        pool=pool,
+        sessions=sessions,
+        settings=settings,
+        cleanup=cleanup,
+        timer=timer,
+    )
     return session
+
+
+def _page_creation_transport_error(request: V1Request) -> CamouflareError:
+    return CamouflareError(
+        "Browser transport closed before a request page could be created.",
+        error_code=V1ErrorCode.BROWSER_TRANSPORT_CLOSED,
+        retryable=request.cmd == "request.get",
+        # No target request can have been sent before BrowserContext.new_page()
+        # returns, so even a POST has a known (unsent) outcome.
+        request_outcome_unknown=False,
+    )
 
 
 def context_options(

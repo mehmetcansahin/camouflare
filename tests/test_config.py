@@ -143,3 +143,16 @@ def test_settings_validate_ttl_ceiling_and_log_format() -> None:
 
     with pytest.raises(ValueError, match="LOG_FORMAT"):
         Settings(log_format="xml")
+
+
+@pytest.mark.parametrize(
+    ("url", "username"),
+    [
+        ("http://proxy.internal:3128/pac", None),
+        ("user:secret@proxy.internal:3128", None),
+        ("socks4://proxy.internal:1080", "user"),
+    ],
+)
+def test_invalid_default_proxy_fails_at_startup(url: str, username: str | None) -> None:
+    with pytest.raises(ValueError, match="PROXY_URL/PROXY_SERVER"):
+        Settings(proxy_url=url, proxy_username=username)

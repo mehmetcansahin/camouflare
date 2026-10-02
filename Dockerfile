@@ -57,14 +57,15 @@ RUN --mount=type=secret,id=camoufox_releases,required=false \
     apt-get purge -y --auto-remove curl && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* && \
-    chown -R 1000:1000 /cache /tmp && \
+    chown -R 1000:1000 /app /cache /tmp && \
     chmod -R a+rwX /cache /tmp
-
-RUN chown -R 1000:1000 /app
 
 USER 1000
 EXPOSE 8191
 HEALTHCHECK --interval=1m --timeout=30s --start-period=30s --retries=3 \
     CMD /app/.venv/bin/python -c "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('PORT', '8191') + '/health', timeout=30).read()"
-ENTRYPOINT ["/usr/bin/dumb-init", "--"]
+# Forward SIGTERM only to Python so Uvicorn drains requests and the lifespan closes
+# browsers while the Playwright driver and Xvfb are still alive; dumb-init's default
+# process-group forwarding would terminate them concurrently with the app.
+ENTRYPOINT ["/usr/bin/dumb-init", "--single-child", "--"]
 CMD ["/app/.venv/bin/python", "-m", "camouflare"]

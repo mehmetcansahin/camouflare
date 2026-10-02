@@ -5,6 +5,32 @@ All notable changes to Camouflare are documented here. The project follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Session cleanup timeouts now return a retryable error envelope instead of leaking
+  cancellation. Requests queued behind a closed session receive a retryable
+  `SESSION_NOT_FOUND`, and GET page-opening disconnects are classified before a target
+  request is sent.
+- Retiring browsers pinned by sessions no longer block replacement capacity, and
+  concurrent creation of the same session id returns as soon as the first winner
+  registers, without waiting for other context builds or spuriously rejecting capacity.
+- The challenge solver shares the command's absolute `maxTimeout` budget, including
+  context and session setup. Invalid default proxy settings fail at startup.
+- The CLI bounds Uvicorn's request drain to 10 seconds before application cleanup;
+  Docker's init forwards shutdown to Python without signalling its browser children.
+
+### Security
+
+- Navigation and exception logs redact target URL paths, queries, fragments, and
+  credentials while retaining the scheme and host where safe. Ambiguous credential
+  spills beyond the URL authority are redacted entirely, including without a numeric port.
+- Source and image installs pin and verify the default uBlock Origin add-on alongside
+  the Camoufox archive; runtime launch refuses missing add-ons instead of downloading
+  floating versions.
+- Multi-architecture release candidates publish by digest without an interim public
+  tag. Promotion rechecks the release tag against the build commit immediately before
+  attaching the final version tag.
+
 ## [2.0.0] - 2026-09-06
 
 ### Changed

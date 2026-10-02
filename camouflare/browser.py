@@ -28,6 +28,10 @@ _PLAYWRIGHT_INNER_SEND_FINGERPRINT = (
     "4c6bf1f8b8138acf3cd26579ececb99f790e62a51d6a9013b175d2e4c868563c"
 )
 _PLAYWRIGHT_CANCEL_PATCH_STATUS = "pending"
+_CAMOUFOX_FETCH_HINT = (
+    "Install the pinned browser and add-ons with `python scripts/fetch_camoufox.py` "
+    "from a Camouflare source checkout."
+)
 
 
 class CamoufoxBrowserHandle:
@@ -91,6 +95,38 @@ def validate_headless_mode(headless: str | bool) -> None:
             "HEADLESS=virtual is only supported on Linux. Use HEADLESS=true "
             "or HEADLESS=false on macOS and Windows."
         )
+
+
+def installed_default_addon_paths() -> list[str]:
+    """Return the installed Camoufox default add-ons, never downloading anything.
+
+    Camoufox replaces a missing browser with its latest release and a missing default
+    add-on with a floating latest.xpi. ``scripts/fetch_camoufox.py`` installs pinned,
+    verified copies instead, so a missing one is a deployment error.
+    """
+
+    from camoufox.addons import DefaultAddons, get_addon_path
+    from camoufox.exceptions import UnsupportedVersion
+    from camoufox.pkgman import camoufox_path
+
+    # get_addon_path() installs the latest browser when none is usable; check first.
+    try:
+        camoufox_path(download_if_missing=False)
+    except (FileNotFoundError, UnsupportedVersion) as exc:
+        raise RuntimeError(
+            "Camoufox browser is not installed or is outside the supported version range. "
+            f"{_CAMOUFOX_FETCH_HINT}"
+        ) from exc
+    paths: list[str] = []
+    for addon in DefaultAddons:
+        path = Path(get_addon_path(addon.name))
+        if not (path / "manifest.json").is_file():
+            raise RuntimeError(
+                f"Camoufox default add-on {addon.name} is not installed at {path}. "
+                f"{_CAMOUFOX_FETCH_HINT}"
+            )
+        paths.append(str(path))
+    return paths
 
 
 def _playwright_core_bundle_path() -> Path:
@@ -269,16 +305,12 @@ def make_camoufox_browser_factory(
         patch_playwright_cancelled_protocol_future()
         patch_playwright_page_error_location()
 
+        from camoufox.addons import DefaultAddons
         from camoufox.async_api import AsyncCamoufox
 
-        launch_options: dict[str, Any] = {
-            "headless": settings.headless,
-            "humanize": True,
-            "i_know_what_im_doing": True,
-            "main_world_eval": True,
-            "config": {"forceScopeAccess": True},
-            "disable_coop": True,
-        }
+        # Default add-ons are passed explicitly and excluded from Camoufox's own
+        # resolution, which would otherwise download them at launch.
+        addons = installed_default_addon_paths()
         if settings.challenge_solver != "none":
             # The ClickSolver relies on a bundled Camoufox add-on that must be
             # registered at launch (it powers the add_init_script workaround).
@@ -286,7 +318,17 @@ def make_camoufox_browser_factory(
                 get_addon_path,
             )
 
-            launch_options["addons"] = [str(Path(get_addon_path()).absolute())]
+            addons.append(str(Path(get_addon_path()).absolute()))
+        launch_options: dict[str, Any] = {
+            "headless": settings.headless,
+            "humanize": True,
+            "i_know_what_im_doing": True,
+            "main_world_eval": True,
+            "config": {"forceScopeAccess": True},
+            "disable_coop": True,
+            "addons": addons,
+            "exclude_addons": list(DefaultAddons),
+        }
         manager = AsyncCamoufox(**launch_options)
         # The failure path stays inside the lock: tearing down a half-launched
         # manager kills its virtual display, which must not overlap the next

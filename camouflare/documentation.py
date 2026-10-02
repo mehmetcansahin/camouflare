@@ -728,7 +728,34 @@ DOCUMENTATION_HTML = """
             <td><code>SESSION_NOT_FOUND</code>.</td>
           </tr>
           <tr>
-            <td>Challenge solve or requested wait exceeds <code>maxTimeout</code>.</td>
+            <td>A session is closing, or closes while a request waits for its lock.</td>
+            <td>HTTP 500</td>
+            <td>
+              <code>SESSION_NOT_FOUND</code>; retryable because no target request
+              was sent.
+            </td>
+          </tr>
+          <tr>
+            <td>Session cleanup times out or fails during destroy or rotation.</td>
+            <td>HTTP 500</td>
+            <td>
+              <code>REQUEST_TIMEOUT</code> or <code>INTERNAL_ERROR</code>;
+              retryable after the session is removed.
+            </td>
+          </tr>
+          <tr>
+            <td>A stateless browser page cannot be opened before navigation.</td>
+            <td>HTTP 500</td>
+            <td>
+              <code>BROWSER_TRANSPORT_CLOSED</code>; the outcome is known.
+              A GET is retryable; a POST is not automatically retryable.
+            </td>
+          </tr>
+          <tr>
+            <td>
+              Challenge solve or requested wait exceeds the command's
+              <code>maxTimeout</code>.
+            </td>
             <td>HTTP 500</td>
             <td>
               <code>CHALLENGE_FAILED</code> or <code>REQUEST_TIMEOUT</code>; may include

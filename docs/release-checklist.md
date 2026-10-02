@@ -8,7 +8,8 @@ change description and approve the protected `release` environment before public
 - Create a GitHub environment named `release` and require a maintainer reviewer.
 - Protect `v*` tags with a repository ruleset that blocks updates and deletion; the release
   workflow also resolves the current tag through the authenticated GitHub API and checks it
-  against the event commit immediately before publication, including for private repositories.
+  against the event commit before building and again inside the promotion step, including
+  for private repositories.
 - Link the GHCR package to this repository, grant this repository's Actions workflow write
   access, and make the package public before advertising unauthenticated Compose/image pulls.
 - Permit the workflow `packages: write`, `id-token: write`, and `attestations: write`
@@ -27,10 +28,12 @@ change description and approve the protected `release` environment before public
 - [ ] Obtain maintainer approval for the exact changelog/release wording.
 - [ ] Confirm all CI jobs pass on Python 3.11–3.14.
 - [ ] Confirm real-browser, package-install, Docker smoke, coverage, type, and format gates pass.
-- [ ] Confirm the exact Camoufox `release_tag` and every archive in
+- [ ] Confirm the exact Camoufox `release_tag`, every archive, and every `addons` pin in
   `scripts/camoufox-artifacts.json` match independently verified upstream metadata and
   SHA-256 digests; update the reviewed tag and pins together when changing the browser
-  release.
+  release. When changing an addon, re-verify its version, versioned XPI URL, and digest
+  together: hash the downloaded XPI independently and compare it with the AMO file hash
+  and the upstream release asset digest.
 - [ ] Review high/critical scan results and remove obsolete security exceptions.
 - [ ] Confirm every remaining exception has a specific reason and unexpired `expires_on` date.
 
@@ -56,5 +59,6 @@ change description and approve the protected `release` environment before public
 - [ ] Record the published digests and workflow URL in the [release record](releases.md).
 - [ ] If publication is interrupted, re-run the same tag-push workflow event. The preflight
   reuses an existing GHCR version only after its platform manifests pass smoke, security,
-  and source-revision checks.
+  and source-revision checks. A run that failed before promotion leaves only an untagged
+  candidate digest; delete that package version from GHCR if it is not needed as evidence.
 - [ ] Follow the [rollback procedure](rollback.md) if the published image is unhealthy.

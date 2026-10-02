@@ -55,6 +55,10 @@ include `expiry`.
 SOCKS4 proxies cannot carry credentials and SOCKS5 credentials are limited to 255 UTF-8
 bytes. Malformed values return `INVALID_REQUEST` instead of a browser launch error.
 
+The same validation now applies to the default `PROXY_URL` / `PROXY_SERVER` at startup.
+Check those settings before restarting: an invalid default proxy prevents the service
+from starting rather than leaving `/ready` healthy while every command fails.
+
 ### Tokenless mode
 
 Without `CAMOUFLARE_API_TOKEN` the service accepts only loopback peers and `Host` values,

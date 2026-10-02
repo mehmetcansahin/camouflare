@@ -6,7 +6,7 @@ import pytest
 
 from camouflare.cleanup import CleanupSupervisor
 from camouflare.errors import SessionCapacityError, V1ErrorCode
-from camouflare.sessions import SessionManager
+from camouflare.sessions import SessionManager, SessionUnavailableError
 from tests.fakes import DelayedFakeSessionContext, FakeContext
 
 
@@ -93,6 +93,39 @@ def test_register_or_get_returns_existing_instead_of_raising() -> None:
     assert created_first is True
     assert created_second is False
     assert second is first
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("register_winner", [True, False], ids=["winner", "all-failed"])
+async def test_creation_wait_resolves_on_first_winner_or_last_failed_build(
+    register_winner: bool,
+) -> None:
+    manager = SessionManager(max_sessions=4, default_ttl_seconds=3600)
+    waiter_started = asyncio.Event()
+
+    async def wait_for_session() -> object:
+        waiter_started.set()
+        return await manager.wait_for_creation("abc", timeout=5)
+
+    waiter = asyncio.create_task(wait_for_session())
+    try:
+        # Both builds are active before the capacity-rejected caller waits.
+        with manager.creating("abc"):
+            with manager.creating("abc"):
+                await waiter_started.wait()
+            # The first build has finished; the second still owns its build scope.
+            if register_winner:
+                winner = manager.register_existing("abc", FakeContext())
+                assert await asyncio.wait_for(waiter, timeout=1) is winner
+            else:
+                await asyncio.sleep(0)
+                assert waiter.done() is False
+        if not register_winner:
+            assert await asyncio.wait_for(waiter, timeout=1) is None
+    finally:
+        waiter.cancel()
+        await asyncio.gather(waiter, return_exceptions=True)
+        await manager.close()
 
 
 @pytest.mark.anyio
@@ -200,8 +233,10 @@ async def test_cancelled_destroy_keeps_cleanup_tracked_and_reserves_id_and_capac
     assert manager.snapshot().active == 0
     assert manager.snapshot().closing == 1
     assert manager.is_closing("abc") is True
-    with pytest.raises(RuntimeError, match="still closing"):
+    with pytest.raises(SessionUnavailableError) as closing:
         manager.register_existing("abc", FakeContext())
+    assert closing.value.error_code is V1ErrorCode.SESSION_NOT_FOUND
+    assert closing.value.retryable is True
     with pytest.raises(SessionCapacityError, match="Maximum sessions") as capacity:
         manager.register_existing("other", FakeContext())
     assert capacity.value.error_code is V1ErrorCode.POOL_UNAVAILABLE
@@ -337,7 +372,7 @@ async def test_session_id_stays_reserved_until_timed_out_physical_cleanup_finish
     assert manager.snapshot().closing == 1
     assert cleanup.snapshot().in_flight == 1
 
-    with pytest.raises(RuntimeError, match="still closing"):
+    with pytest.raises(SessionUnavailableError):
         manager.register_existing("abc", FakeContext())
     with pytest.raises(SessionCapacityError, match="Maximum sessions"):
         manager.register_existing("other", FakeContext())

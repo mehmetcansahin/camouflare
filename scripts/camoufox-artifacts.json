@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "release_tag": "v152.0.4-beta.29",
   "artifacts": {
     "camoufox-152.0.4-beta.29-lin.arm64.zip": "sha256:c8844c03f3c233d6a466d59fd3f4e6f21470bd685e1b7cc82d650379a9b23e35",
@@ -8,5 +8,12 @@
     "camoufox-152.0.4-beta.29-mac.x86_64.zip": "sha256:eeada250746edefc5d7b63fc371d51ed3252b21134e971ac64ca590ff78e7bb7",
     "camoufox-152.0.4-beta.29-win.i686.zip": "sha256:fc98bab1836a61f0cff88731bfa3a170a839c5b61f93d581e3844d2c4adc3fc9",
     "camoufox-152.0.4-beta.29-win.x86_64.zip": "sha256:b9ccdc298330e96f807999fe22aa212e9847fc9e210bc36b2e965b6cce03b25b"
+  },
+  "addons": {
+    "UBO": {
+      "version": "1.75.0",
+      "url": "https://addons.mozilla.org/firefox/downloads/file/5034826/ublock_origin-1.75.0.xpi",
+      "digest": "sha256:5b74415860456370644bd80f16125e865b0e6c356bb5dfcfb84069967eaa5287"
+    }
   }
 }

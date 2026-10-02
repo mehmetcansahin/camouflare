@@ -16,6 +16,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from camouflare.browser import (
     CamoufoxBrowserHandle,
+    installed_default_addon_paths,
     patch_playwright_cancelled_protocol_future,
     patch_playwright_page_error_location,
 )
@@ -224,11 +225,12 @@ BrowserFactory = Callable[[], Awaitable[Any]]
 
 
 def make_offline_camoufox_factory() -> BrowserFactory:
-    """Return a real Camoufox factory that never performs GeoIP network discovery."""
+    """Return a real Camoufox factory without GeoIP or implicit add-on downloads."""
 
     async def factory() -> CamoufoxBrowserHandle:
         patch_playwright_cancelled_protocol_future()
         patch_playwright_page_error_location()
+        from camoufox.addons import DefaultAddons
         from camoufox.async_api import AsyncCamoufox
 
         target_os = "macos" if platform.system() == "Darwin" else "linux"
@@ -240,6 +242,8 @@ def make_offline_camoufox_factory() -> BrowserFactory:
             main_world_eval=True,
             config={"forceScopeAccess": True},
             disable_coop=True,
+            addons=installed_default_addon_paths(),
+            exclude_addons=list(DefaultAddons),
         )
         try:
             browser = await manager.__aenter__()

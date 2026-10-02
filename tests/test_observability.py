@@ -12,6 +12,7 @@ import camouflare.metrics as metrics
 from camouflare.observability import (
     MAX_REQUEST_ID_LENGTH,
     REDACTED,
+    REDACTED_URL,
     JsonLogFormatter,
     TextLogFormatter,
     bind_request_id,
@@ -68,14 +69,28 @@ def test_request_id_context_is_nested_and_resets() -> None:
     [
         (
             "https://user:password@example.com/path?q=secret#fragment",
-            "https://example.com/path",
+            "https://example.com",
         ),
         ("socks5://name:pass@[2001:db8::1]:1080", "socks5://[2001:db8::1]:1080"),
         ("socks4://name:pass@proxy.example:1080", "socks4://proxy.example:1080"),
-        ("https://example.com/plain", "https://example.com/plain"),
+        (
+            "https://example.com:8443/reset/one-time-code",
+            "https://example.com:8443",
+        ),
+        ("https://example.com/@handle/post", "https://example.com"),
+        # Raw credentials containing "/" end the authority inside the password.
+        ("https://user:pa/ss@host.example/path", REDACTED_URL),
+        ("https://user:12/34@host.example/path", REDACTED_URL),
+        ("https://user:p@ss/word@host.example/path", REDACTED_URL),
+        ("https://user:p@ss?word@host.example/path", REDACTED_URL),
+        ("https://user:p@ss#word@host.example/path", REDACTED_URL),
+        ("https://user:/pass@host.example/path", REDACTED_URL),
+        ("https://user:?pass@host.example/path", REDACTED_URL),
+        ("https://user:#pass@host.example/path", REDACTED_URL),
+        ("https://user:pa%40ss%2Fword@host.example/path", "https://host.example"),
     ],
 )
-def test_redact_url_removes_credentials_and_query(raw: str, expected: str) -> None:
+def test_redact_url_keeps_only_credential_free_origin(raw: str, expected: str) -> None:
     assert redact_url(raw) == expected
 
 
@@ -93,7 +108,7 @@ def test_redaction_helpers_cover_nested_secrets_and_rendered_messages() -> None:
         }
     )
     assert redacted == {
-        "url": "https://example.com/path",
+        "url": "https://example.com",
         "headers": {"Authorization": REDACTED, "X-Trace": "safe"},
         "proxy": {
             "server": "http://proxy.test:8080",
@@ -109,7 +124,8 @@ def test_redaction_helpers_cover_nested_secrets_and_rendered_messages() -> None:
     assert "secret" not in message
     assert "abc" not in message
     assert "Bearer xyz" not in message
-    assert "https://example.com/a" in message
+    assert "https://example.com" in message
+    assert "/a" not in message
 
     access_message = redact_text(
         '127.0.0.1:1234 - "GET /v1?token=top-secret&cookie=hidden HTTP/1.1" 200'
@@ -143,7 +159,7 @@ def test_text_and_json_formatters_include_context_and_redact() -> None:
     assert "user:pass" not in text_output
     assert json_output["request_id"] == "request-42"
     assert json_output["fields"] == {
-        "url": "https://example.com/a",
+        "url": "https://example.com",
         "password": REDACTED,
         "command": "request.get",
         "error_code": "BROWSER_TRANSPORT_CLOSED",
@@ -151,6 +167,78 @@ def test_text_and_json_formatters_include_context_and_redact() -> None:
         "fallback_used": True,
     }
     assert "top-secret" not in json_output["message"]
+
+
+@pytest.mark.parametrize(
+    "formatter",
+    [TextLogFormatter(), JsonLogFormatter()],
+    ids=["text", "json"],
+)
+def test_logged_exception_keeps_only_origin_of_url_in_error_text(
+    formatter: logging.Formatter,
+) -> None:
+    # Built outside the raise statement so traceback source lines cannot echo it.
+    target = (
+        "https://user:pass@example.com:8443/reset/one-time-code?sig=query-secret#fragment-secret"
+    )
+    logger = logging.getLogger("camouflare.test.exception_redaction")
+    # A stock handler formats first and caches the raw traceback on the shared record.
+    stock_handler = logging.StreamHandler(io.StringIO())
+    safe_stream = io.StringIO()
+    safe_handler = logging.StreamHandler(safe_stream)
+    safe_handler.setFormatter(formatter)
+    logger.addHandler(stock_handler)
+    logger.addHandler(safe_handler)
+    logger.propagate = False
+    try:
+        try:
+            raise RuntimeError(f"Page.goto: net::ERR_ABORTED at {target}")
+        except RuntimeError:
+            logger.exception("Unexpected navigation error.")
+    finally:
+        logger.removeHandler(stock_handler)
+        logger.removeHandler(safe_handler)
+        logger.propagate = True
+
+    emitted = safe_stream.getvalue()
+    assert "RuntimeError: Page.goto: net::ERR_ABORTED at https://example.com:8443" in emitted
+    for secret in (
+        "/reset",
+        "one-time-code",
+        "query-secret",
+        "fragment-secret",
+        "user:pass",
+    ):
+        assert secret not in emitted
+
+
+@pytest.mark.parametrize(
+    "formatter",
+    [TextLogFormatter(), JsonLogFormatter()],
+    ids=["text", "json"],
+)
+def test_logged_exception_redacts_credential_spill_without_numeric_port(
+    formatter: logging.Formatter,
+) -> None:
+    target = "https://user:p@secretpiece/word@host.example/path"
+    try:
+        raise RuntimeError(f"Page.goto: navigation failed at {target}")
+    except RuntimeError as exc:
+        record = logging.LogRecord(
+            "camouflare.test",
+            logging.ERROR,
+            __file__,
+            1,
+            "Navigation error.",
+            (),
+            (type(exc), exc, exc.__traceback__),
+        )
+    # Exercise the cached traceback shared with an earlier, stock handler.
+    logging.Formatter().format(record)
+    emitted = formatter.format(record)
+    assert f"navigation failed at {REDACTED_URL}" in emitted
+    assert "secretpiece" not in emitted
+    assert "word@host.example" not in emitted
 
 
 def test_configure_logging_supports_json_and_rejects_unknown_format() -> None:

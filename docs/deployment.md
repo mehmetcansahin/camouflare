@@ -34,7 +34,7 @@ The supplied Compose profile uses these starting limits:
 | Memory | 4 GiB | Browser processes and response/screenshot buffers |
 | Shared memory | 2 GiB | Browser stability under concurrent pages |
 | PIDs | 1024 | Browser process and thread headroom within a bounded process tree |
-| Stop grace period | 45 seconds | Exceeds the 30-second app cleanup deadline |
+| Stop grace period | 45 seconds | Covers the 10-second request drain plus the 30-second app cleanup deadline |
 
 The profile keeps two browser processes warm with one context per browser, for two
 physical context slots. `POOL_RESERVED_TRANSIENT_CONTEXTS` withholds one slot from
@@ -77,6 +77,25 @@ The profile drops all Linux capabilities and enables `no-new-privileges`. Preser
 controls when translating the deployment to another runtime. Increase memory or PID limits
 only after load testing the configured pool and payload limits.
 
+## Graceful shutdown
+
+The image runs `dumb-init` in single-child mode, so a stop signal reaches only the Python
+process; the Playwright driver and Xvfb stay available while the application closes its
+browsers. Uvicorn stops accepting connections, gives in-flight requests up to 10 seconds to
+finish, and cancels any still running. The application then closes sessions and browsers
+within `SHUTDOWN_TIMEOUT_SECONDS` (30 seconds by default). When Python exits, `dumb-init`
+exits with it and the container runtime terminates anything cleanup left behind. The
+10-second drain is set by the `camouflare` command; an external
+`uvicorn camouflare.asgi:app` command must pass `--timeout-graceful-shutdown`, because
+Uvicorn otherwise waits for in-flight requests without limit before cleanup starts.
+
+Keep the runtime's stop timeout above the 10-second drain plus `SHUTDOWN_TIMEOUT_SECONDS`,
+or it kills the container before browser cleanup finishes. The Compose profile allows
+45 seconds. `docker run` and `docker stop` default to 10 seconds, so pass
+`--stop-timeout 45` or `docker stop --time 45`; on Kubernetes set
+`terminationGracePeriodSeconds: 45` or higher. Raise the stop timeout by the same amount
+whenever `SHUTDOWN_TIMEOUT_SECONDS` is raised.
+
 ## Version and architecture policy
 
 GHCR images are released from `vMAJOR.MINOR.PATCH` tags. Images contain linux/amd64 and
@@ -86,11 +105,23 @@ omitted to prevent a release rerun from moving an established channel backward. 
 GHCR package is intended to be public; private mirrors require `docker login` before Compose
 or direct pulls.
 
+The release workflow pushes the multi-arch candidate by digest only; no temporary tag is
+created. It smokes, revision-checks, and scans the exact per-platform digests and uploads
+the release evidence first. The promotion step then re-confirms through the authenticated
+GitHub API that the release tag still names the workflow commit and, in the same step,
+tags the scanned index digest. A run that fails before that step leaves only an untagged
+package version, which no tag references and which maintainers may delete from the GHCR
+package settings.
+
 Docker and release jobs fetch the exact Camoufox tag declared in
 `scripts/camoufox-artifacts.json`, install only archives listed there, and verify each
-download against its reviewed SHA-256 digest before extraction. New upstream releases are
+download against its reviewed SHA-256 digest before extraction. Camoufox's default browser
+addons are pinned in the same manifest: each `addons` entry names an exact version, a
+versioned XPI URL, and a reviewed SHA-256 digest, and a download, digest, or embedded
+version mismatch fails the fetch and therefore the image build. New upstream releases are
 ignored until their exact tag and independently verified platform digests are reviewed and
-updated in the manifest.
+updated in the manifest; an addon update likewise requires its version, URL, and digest to
+be re-verified and changed together.
 
 ## Operational checks
 
@@ -100,9 +131,8 @@ probes by leasing, and if needed launching, a browser context, unless every cont
 is held by a browser that is still serving; then it returns HTTP 200 with
 `capacity_state: saturated` without waiting, even while such a browser is past a recycle
 limit and finishing its work. A browser whose process has disconnected is retired before
-that verdict, so a
-dead busy browser is probed rather than reported as saturated. A 503 therefore means the
-pool could not produce a working browser within
+that verdict, so a dead busy browser is probed rather than reported as saturated. A 503
+therefore means the pool could not produce a working browser within
 `POOL_ACQUIRE_TIMEOUT_MS` and `READINESS_TIMEOUT_MS`, not that it is merely full. Give
 external probes a client timeout above `READINESS_TIMEOUT_MS`. Diagnostics returns HTTP 200
 when the snapshot succeeds; alert from `capacity_state` and its counters, not from the
