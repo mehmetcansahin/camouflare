@@ -33,6 +33,7 @@ dependencies = [
     "prometheus-client>=0.23,<0.24",
     "publicsuffixlist>=1.0.2.20260702,<2",
     "pydantic>=2,<3",
+    "urllib3>=2.8,<3",
     "uvicorn[standard]>=0.38,<0.39",
 ]
 
