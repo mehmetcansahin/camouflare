@@ -30,6 +30,8 @@ All notable changes to Camouflare are documented here. The project follows
 
 ### Security
 
+- Runtime packages require AnyIO 4.14.2 or newer, and the lockfile selects 4.14.2 to
+  address GHSA-82r6-8w77-94w6, GHSA-3w57-8xmc-8v26, and GHSA-5p39-cfhj-2xmp.
 - Navigation and exception logs redact target URL paths, queries, fragments, and
   credentials while retaining the scheme and host where safe. Ambiguous credential
   spills beyond the URL authority are redacted entirely, including without a numeric port.

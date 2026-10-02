@@ -26,6 +26,7 @@ classifiers = [
 ]
 dependencies = [
     "aiofiles>=24,<25",
+    "anyio>=4.14.2,<5",
     "camoufox>=0.4,<0.5",
     "fastapi>=0.136,<0.137",
     "playwright-captcha>=0.1.5,<0.2",
