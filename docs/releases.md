@@ -23,6 +23,14 @@ docker inspect <container> \
 The per-architecture digests are recorded for evidence and for pinning a single platform.
 Normal deployments use the index digest and let the runtime select the platform.
 
+## 2.0.1 - 2026-10-02
+
+- Commit: `62e9c5fc241273dd30e81707cd16d43edd758b3f`
+- Release run: https://github.com/mehmetcansahin/camouflare/actions/runs/36998244292
+- Index: `sha256:1b211a7f67a9d0b7beb1d12f0c28518a6e6c5b311417ab517ef5c57060d16250`
+- linux/amd64: `sha256:ce252a71b305c0961dfba8df706f883a132d6034b5cb8b3afeb9ca0c9ef99a8a`
+- linux/arm64: `sha256:cf353ee291d517ee20ff712cdbe609861addd7f103a6f78191bac266ddb128cb`
+
 ## 2.0.0 - 2026-09-06
 
 - Commit: `94c32f185b4fb6a23e45e1b7f8c8fa5b5b83434e`
