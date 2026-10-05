@@ -20,13 +20,20 @@ validates request cookies and proxies, and hardens tokenless local mode. Success
 Non-`User-Agent` `headers` (including `Referer`) no longer configure the browser page.
 A stateless, proxyless `request.get` carrying them is served by direct HTTP: the headers
 are removed before any cross-origin redirect, and JavaScript rendering, browser challenge
-handling, and screenshots do not apply. A Cloudflare-protected target therefore returns
-`CHALLENGE_FAILED` on this path. With a `session`, `proxy`, or `returnScreenshot`, the
-request is rejected with `INVALID_REQUEST`.
+handling, and screenshots do not apply. An unresolved challenge returns `CHALLENGE_FAILED`;
+a confirmed Cloudflare-style hard block returns `TARGET_BLOCKED` without a solving attempt.
+Ordinary target 403/503 responses still pass through in `solution.status`. With a `session`,
+`proxy`, or `returnScreenshot`, the request is rejected with `INVALID_REQUEST`.
 
 Migration: drop headers the target does not need, or solve the challenge first with a
 header-less `request.get` and reuse the returned cookies. `userAgent` and
 `headers.User-Agent` keep configuring the browser identity.
+
+GET timing in 2.0.2: DOM readiness and commit grace each wait at most 15 seconds under
+the original command deadline. Navigation leaves collection time and a bounded share
+for an already-eligible `ajax=true` timeout fallback. Short or setup-delayed requests
+keep a proportional reserve, and committed pages retain the original budget for
+challenge handling. No session, proxy, screenshot, or POST transport is relaxed.
 
 ### `request.post`
 

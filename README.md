@@ -76,7 +76,7 @@ docker run --detach --rm \
   --publish 127.0.0.1:8191:8191 \
   --env CAMOUFLARE_API_TOKEN \
   --shm-size 2g \
-  ghcr.io/mehmetcansahin/camouflare:2.0.1
+  ghcr.io/mehmetcansahin/camouflare:2.0.2
 ```
 
 Check that the service is ready:
@@ -199,6 +199,29 @@ response rather than a JavaScript-rendered page, so browser challenge handling d
 apply. `User-Agent` is the compatibility exception: whether supplied through `headers`
 or `userAgent`, it defines browser identity for the whole context.
 
+Direct HTTP GET decodes `gzip` and `deflate` before charset conversion, including
+concatenated gzip members and up to four stacked encodings. The response byte limit
+applies to the wire body and every decoded layer under the same request deadline.
+Unsupported, malformed, or truncated encodings return `RESPONSE_DECODE_ERROR`;
+oversized bodies return `RESOURCE_LIMIT_EXCEEDED`. Cookies-only GET inspects only a
+bounded 64 KiB decoded prefix, without validating the unread remainder.
+
+GET navigation shares the command's absolute `maxTimeout` with setup, challenge handling,
+and collection. DOM readiness and commit grace each wait at most 15 seconds. Navigation
+keeps up to one second for collection (at most half the remaining time for short budgets),
+and eligible `ajax=true` timeout fallback keeps up to 15 seconds or half the navigation
+budget left after preflight. These stage caps are not a fresh timeout: direct HTTP workers
+use the shortened deadline too. An already-committed page remains on the browser path
+with the original request budget for challenge clearance; sessions, proxies, screenshots,
+and POST do not gain new direct HTTP eligibility.
+
+Confirmed Cloudflare-style bot/WAF block documents return `TARGET_BLOCKED` with
+`retryable: false`, without invoking the challenge solver. An unresolved challenge
+still returns `CHALLENGE_FAILED`. HTTP 403/503 alone is not a block: ordinary target
+errors remain successful fetches with the upstream status in `solution.status`.
+`request.post` with `returnOnlyCookies` does not read its response body, so that mode
+cannot classify body-based challenges or blocks.
+
 Other endpoints:
 
 - `GET /` returns service metadata.
@@ -242,8 +265,14 @@ The most commonly used environment variables are:
 | `PROXY_URL` | unset | Default proxy URL |
 | `PROMETHEUS_ENABLED` | `false` | Enable `/metrics` |
 | `CHALLENGE_SOLVER` | `none` | Set to `click` to enable click-based handling |
+| `LOG_FORMAT` | `text` | `text` or `json`; both redact messages and structured fields |
 
 See `/documentation` on a running instance for every option and request field.
+
+Text logs append compact JSON as `fields={...}` when structured fields are present.
+Request completion records expose `result`, `http_status`, `duration_ms`, and an
+`error_code` when applicable. JSON logs retain the same redacted fields under `fields`;
+URLs lose credentials, paths, and queries, and sensitive values are masked.
 
 Challenge handling is disabled by default. To enable the optional
 [playwright-captcha](https://pypi.org/project/playwright-captcha/) ClickSolver:

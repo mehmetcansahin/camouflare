@@ -4,7 +4,8 @@ import asyncio
 import inspect
 import logging
 import time
-from collections.abc import Awaitable, Callable, Mapping
+import zlib
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping
 from concurrent.futures import Future as ConcurrentFuture
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar, Token
@@ -24,7 +25,7 @@ from urllib.request import (
     Request as URLRequest,
 )
 
-from camouflare.challenge import content_has_challenge_markers
+from camouflare.challenge import CHALLENGE_RESULT_RESERVE_MS, content_has_challenge_markers
 from camouflare.cookie_policy import is_public_suffix
 from camouflare.errors import CamouflareError, V1ErrorCode
 from camouflare.limits import (
@@ -41,6 +42,9 @@ from camouflare.solution import is_best_effort_browser_error, response_charset
 from camouflare.timer import TimeoutTimer
 
 ALLOWED_URL_SCHEMES = ("http", "https")
+# Caps each bounded browser GET stage (DOM readiness, then the commit grace) and the
+# share of the navigation budget the browser stages leave for an eligible timeout
+# fallback, so an uncommitted navigation never waits out a long maxTimeout.
 DOMCONTENTLOADED_NAVIGATION_TIMEOUT_MS = 15000
 DIRECT_HTTP_DEFAULT_HEADERS = {
     "User-Agent": (
@@ -50,10 +54,14 @@ DIRECT_HTTP_DEFAULT_HEADERS = {
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
+    # Advertise only the content codings _read_direct_http_body can decode.
+    "Accept-Encoding": "gzip, deflate",
 }
 DIRECT_HTTP_MAX_REDIRECTS = 10
 DIRECT_HTTP_MAX_WORKERS = 4
 DIRECT_HTTP_CHALLENGE_PROBE_BYTES = 65_536
+_DIRECT_HTTP_CHUNK_BYTES = 65_536
+_DIRECT_HTTP_MAX_CONTENT_CODINGS = 4
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
 logger = logging.getLogger(__name__)
@@ -88,6 +96,17 @@ class RawResponse:
 
     async def text(self) -> str:
         return self._body
+
+
+class _DirectHttpDecodeError(CamouflareError):
+    """A direct HTTP body could not be decoded into the bytes the server encoded."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(
+            message,
+            error_code=V1ErrorCode.RESPONSE_DECODE_ERROR,
+            retryable=False,
+        )
 
 
 NavigationResponse: TypeAlias = ResponseLike | RawResponse | None
@@ -281,24 +300,41 @@ async def navigate_get(
                 "returnScreenshot is not supported when request.get uses origin-bound headers.",
                 error_code=V1ErrorCode.INVALID_REQUEST,
             )
-        direct_response = await fetch_direct(url, request, timer)
+        direct_response = await fetch_direct(url, request, _navigation_timer(timer))
         await _import_direct_response_cookies(page, direct_response)
         return direct_response
+    navigation_timer = _navigation_timer(timer)
     if allow_direct_http_first and should_try_direct_get_first(request):
         direct_response = await try_direct_http_get_first(
             url,
             request,
-            timer,
+            navigation_timer,
             page=page,
             direct_http_get=fetch_direct,
         )
         if direct_response is not None:
             return direct_response
 
+    timeout_fallback = allow_direct_http_fallback and (
+        should_try_direct_get_after_navigation_timeout(request)
+    )
+    # An eligible timeout fallback is one more stage: the browser stages leave it up to
+    # one stage cap of the navigation budget, never more than half of what is left.
+    fallback_reserve_ms = (
+        min(DOMCONTENTLOADED_NAVIGATION_TIMEOUT_MS, max(0, _unspent_ms(navigation_timer)) // 2)
+        if timeout_fallback
+        else 0
+    )
+    browser_timer = _timer_keeping(navigation_timer, fallback_reserve_ms)
+    if browser_timer is None or _unspent_ms(browser_timer) < 2:
+        # Navigation and the commit decision each need a positive Playwright timeout.
+        # Do not start a doomed navigation that could change the page during collection.
+        raise TimeoutError("Navigation timed out before browser navigation could start.")
+
     try:
         return await page.goto(
             url,
-            timeout=min(timer.remaining_ms, DOMCONTENTLOADED_NAVIGATION_TIMEOUT_MS),
+            timeout=_stage_timeout_ms(browser_timer, reserve_ms=1),
             wait_until="domcontentloaded",
         )
     except Exception as exc:
@@ -308,19 +344,23 @@ async def navigate_get(
                 extra={"target": redact_url(url), "error": type(exc).__name__},
             )
             try:
+                # This resolves immediately for a committed document, keeping it and
+                # the remaining request budget for challenge clearance and collection.
                 await page.wait_for_url(
                     lambda current_url: (
                         urlsplit(str(current_url)).scheme.lower() in ALLOWED_URL_SCHEMES
                     ),
                     wait_until="commit",
-                    timeout=timer.remaining_ms,
+                    timeout=_stage_timeout_ms(browser_timer),
                 )
                 return None
             except Exception as commit_exc:
+                # Only a degenerate budget is spent here: the browser stages leave the
+                # fallback its share, and an attempt with no time left cannot finish.
                 if (
-                    allow_direct_http_fallback
+                    timeout_fallback
                     and is_timeout_error(commit_exc)
-                    and should_try_direct_get_after_navigation_timeout(request)
+                    and _unspent_ms(navigation_timer) > 0
                 ):
                     logger.info(
                         "Navigation timed out before commit; trying direct HTTP fallback.",
@@ -332,7 +372,7 @@ async def navigate_get(
                     direct_response = await try_direct_http_get_after_navigation_timeout(
                         url,
                         request,
-                        timer,
+                        navigation_timer,
                         page=page,
                         direct_http_get=fetch_direct,
                     )
@@ -351,7 +391,7 @@ async def navigate_get(
                         return await _fallback_after_browser_transport(
                             url,
                             request,
-                            timer,
+                            navigation_timer,
                             browser_error=commit_exc,
                             fetch_direct=fetch_direct,
                             page=page,
@@ -367,13 +407,60 @@ async def navigate_get(
                 return await _fallback_after_browser_transport(
                     url,
                     request,
-                    timer,
+                    navigation_timer,
                     browser_error=exc,
                     fetch_direct=fetch_direct,
                     page=page,
                 )
             _emit_browser_transport_error(exc, fallback_used=False)
         raise
+
+
+def _result_reserve_ms(timer: TimeoutTimer) -> int:
+    """Request time navigation leaves for classifying and collecting the result.
+
+    It is the challenge wait's result reserve; a budget too short for it keeps half
+    instead, so a short ``maxTimeout`` still navigates and still collects.
+    """
+    return min(CHALLENGE_RESULT_RESERVE_MS, max(1, timer.timeout_ms // 2))
+
+
+def _unspent_ms(timer: TimeoutTimer) -> int:
+    """Milliseconds before ``timer``'s deadline; zero or negative once it has passed."""
+    return timer.timeout_ms - timer.elapsed_ms
+
+
+def _timer_keeping(timer: TimeoutTimer, reserve_ms: int) -> TimeoutTimer | None:
+    """Return a timer ending ``reserve_ms`` before ``timer``'s deadline, or None.
+
+    The derived timer shares that deadline rather than granting a fresh budget, so a
+    direct HTTP worker started with it also stops before the reserve.
+    """
+    if _unspent_ms(timer) <= reserve_ms:
+        return None
+    bounded = TimeoutTimer(timer.timeout_ms - reserve_ms)
+    bounded.started = timer.started
+    return bounded
+
+
+def _navigation_timer(timer: TimeoutTimer) -> TimeoutTimer:
+    """Leave collection time without denying short budgets useful navigation time."""
+    # Pool/session setup may have spent most of maxTimeout before a page was ready.
+    # Keep half of that remaining time available for navigation, down to 1 ms.
+    reserve_ms = min(_result_reserve_ms(timer), max(1, _unspent_ms(timer) // 2))
+    navigation_timer = _timer_keeping(timer, reserve_ms)
+    if navigation_timer is None:
+        raise TimeoutError("The request deadline left no time for navigation.")
+    return navigation_timer
+
+
+def _stage_timeout_ms(timer: TimeoutTimer, *, reserve_ms: int = 0) -> int:
+    """Return one browser stage's Playwright timeout.
+
+    Keep a positive commit decision even when DOM readiness spends a short budget.
+    A floor of 1 is required because Playwright treats 0 as no timeout at all.
+    """
+    return min(DOMCONTENTLOADED_NAVIGATION_TIMEOUT_MS, max(1, _unspent_ms(timer) - reserve_ms))
 
 
 def _emit_browser_transport_error(exc: Exception, *, fallback_used: bool) -> None:
@@ -408,7 +495,7 @@ async def _fallback_after_browser_transport(
 ) -> NavigationResponse:
     try:
         response = await fetch_direct(url, request, timer)
-    except ResourceLimitError:
+    except (ResourceLimitError, _DirectHttpDecodeError):
         _emit_browser_transport_error(browser_error, fallback_used=False)
         raise
     except Exception as fallback_error:
@@ -444,7 +531,7 @@ async def try_direct_http_get_first(
     fetch_direct = direct_http_get or _direct_http_get
     try:
         response = await fetch_direct(url, request, timer)
-    except ResourceLimitError:
+    except (ResourceLimitError, _DirectHttpDecodeError):
         raise
     except Exception as exc:
         logger.info(
@@ -490,7 +577,7 @@ async def try_direct_http_get_after_navigation_timeout(
     fetch_direct = direct_http_get or _direct_http_get
     try:
         response = await fetch_direct(url, request, timer)
-    except ResourceLimitError:
+    except (ResourceLimitError, _DirectHttpDecodeError):
         raise
     except Exception as exc:
         logger.info(
@@ -561,7 +648,10 @@ def is_timeout_error(exc: Exception) -> bool:
 
 
 async def wait_networkidle_best_effort(page: PageLike, timer: TimeoutTimer) -> None:
-    timeout = min(5000, timer.remaining_ms)
+    # Settling is optional, so it never spends the time kept for collecting the result.
+    timeout = min(5000, _unspent_ms(timer) - _result_reserve_ms(timer))
+    if timeout <= 0:
+        return
     try:
         await page.wait_for_load_state("networkidle", timeout=timeout)
     except Exception:
@@ -758,22 +848,21 @@ def _direct_http_get_sync(
                 next_url = clean_url(urljoin(response_url, location))
                 current_url = next_url
                 continue
-            body_limit = (
-                DIRECT_HTTP_CHALLENGE_PROBE_BYTES
-                if request.return_only_cookies
-                else maximum_body_bytes
-            )
-            raw_body = _read_direct_http_body(
-                response,
-                maximum_body_bytes=body_limit,
-                deadline=deadline,
-            )
-            if request.return_only_cookies:
-                # Cookies-only responses never serialize the body. Retain just a
-                # bounded prefix so challenge interstitials can still be classified.
-                raw_body = raw_body[:DIRECT_HTTP_CHALLENGE_PROBE_BYTES]
+            # Cookies-only responses never serialize the body. Retain just a bounded
+            # decoded prefix so challenge interstitials can still be classified.
+            if status in (204, 304):
+                raw_body = b""
             else:
-                ensure_bytes_size(raw_body, maximum_body_bytes, label="Response body")
+                raw_body = _read_direct_http_body(
+                    response,
+                    maximum_body_bytes=(
+                        DIRECT_HTTP_CHALLENGE_PROBE_BYTES
+                        if request.return_only_cookies
+                        else maximum_body_bytes
+                    ),
+                    deadline=deadline,
+                    prefix_only=request.return_only_cookies,
+                )
             body = raw_body.decode(response_charset(response.headers), errors="replace")
             browser_cookies = [_cookie_to_browser_cookie(cookie) for cookie in cookie_jar]
             return RawResponse(
@@ -794,26 +883,273 @@ def _read_direct_http_body(
     *,
     maximum_body_bytes: int,
     deadline: float,
+    prefix_only: bool = False,
 ) -> bytes:
+    """Read a body and remove its HTTP content codings within byte and time bounds.
+
+    Wire bytes, the output of every decoding layer, and the final body are each
+    limited to ``maximum_body_bytes``. A full read raises ``ResourceLimitError`` past
+    that limit and rejects truncated or malformed encodings. ``prefix_only`` instead
+    stops at the limit and returns the decoded prefix without integrity checks for
+    the remainder it deliberately did not read.
+    """
+
+    decoders = _content_decoders(_response_content_codings(response.headers))
+    wire = _limited_body_chunks(
+        _direct_http_wire_chunks(response, maximum_bytes=maximum_body_bytes, deadline=deadline),
+        maximum_bytes=maximum_body_bytes,
+        label="Response body",
+        prefix_only=prefix_only,
+    )
+    parts: list[bytes] = []
+    try:
+        decoded: Iterator[bytes] = wire
+        for decoder in decoders:
+            decoded = _limited_body_chunks(
+                _decoded_body_chunks(decoder, decoded, deadline=deadline),
+                maximum_bytes=maximum_body_bytes,
+                label="Decoded response body",
+                prefix_only=prefix_only,
+            )
+        for chunk in decoded:
+            parts.append(chunk)
+    except _BodyPrefixComplete:
+        pass
+    return b"".join(parts)
+
+
+class _BodyPrefixComplete(Exception):
+    """Internal signal: a prefix-only body read has every byte it may inspect."""
+
+
+def _ensure_direct_http_deadline(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("Direct HTTP request exceeded the request deadline.")
+    return remaining
+
+
+def _direct_http_wire_chunks(
+    response: Any,
+    *,
+    maximum_bytes: int,
+    deadline: float,
+) -> Iterator[bytes]:
+    """Yield undecoded body bytes, reading at most one byte beyond ``maximum_bytes``."""
+
     read_one_chunk = getattr(response, "read1", None)
     if not callable(read_one_chunk):
+        _set_response_socket_timeout(response, _ensure_direct_http_deadline(deadline))
         try:
-            return cast(bytes, response.read(maximum_body_bytes + 1))
+            body = cast(bytes, response.read(maximum_bytes + 1))
         except TypeError:
-            return cast(bytes, response.read())
+            body = cast(bytes, response.read())
+        _ensure_direct_http_deadline(deadline)
+        if body:
+            yield body
+        return
 
-    body = bytearray()
-    while len(body) <= maximum_body_bytes:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise TimeoutError("Direct HTTP request exceeded the request deadline.")
-        _set_response_socket_timeout(response, remaining)
-        maximum_chunk = min(65_536, maximum_body_bytes + 1 - len(body))
+    received = 0
+    while received <= maximum_bytes:
+        _set_response_socket_timeout(response, _ensure_direct_http_deadline(deadline))
+        maximum_chunk = min(_DIRECT_HTTP_CHUNK_BYTES, maximum_bytes + 1 - received)
         chunk = cast(bytes, read_one_chunk(maximum_chunk))
+        _ensure_direct_http_deadline(deadline)
         if not chunk:
-            break
-        body.extend(chunk)
-    return bytes(body)
+            return
+        received += len(chunk)
+        yield chunk
+
+
+def _limited_body_chunks(
+    chunks: Iterable[bytes],
+    *,
+    maximum_bytes: int,
+    label: str,
+    prefix_only: bool,
+) -> Iterator[bytes]:
+    received = 0
+    for chunk in chunks:
+        available = maximum_bytes - received
+        if len(chunk) > available:
+            if not prefix_only:
+                raise ResourceLimitError(
+                    f"{label} exceeds the configured {maximum_bytes}-byte limit."
+                )
+            if available:
+                yield chunk[:available]
+            raise _BodyPrefixComplete
+        received += len(chunk)
+        yield chunk
+
+
+def _decoded_body_chunks(
+    decoder: _ContentDecoder,
+    chunks: Iterable[bytes],
+    *,
+    deadline: float,
+) -> Iterator[bytes]:
+    for data in chunks:
+        while True:
+            _ensure_direct_http_deadline(deadline)
+            try:
+                output = decoder.decompress(data)
+            except zlib.error as exc:
+                raise _DirectHttpDecodeError(
+                    f"Direct HTTP response body has malformed {decoder.coding} content encoding."
+                ) from exc
+            data = b""
+            if output:
+                yield output
+            if not decoder.output_pending:
+                break
+    decoder.finish()
+
+
+def _response_content_codings(headers: Any) -> list[str]:
+    """Return non-identity content codings in the order the server applied them."""
+
+    get_all = getattr(headers, "get_all", None)
+    if callable(get_all):
+        values = [
+            str(value) for value in cast("Iterable[object]", get_all("Content-Encoding") or ())
+        ]
+    else:
+        values = [
+            str(value) for name, value in headers.items() if str(name).lower() == "content-encoding"
+        ]
+    codings: list[str] = []
+    for value in values:
+        for token in value.split(","):
+            coding = token.strip().lower()
+            if coding and coding != "identity":
+                codings.append("gzip" if coding == "x-gzip" else coding)
+    return codings
+
+
+def _content_decoders(codings: list[str]) -> list[_ContentDecoder]:
+    """Create decoders in removal order: the last coding applied comes off first."""
+
+    if len(codings) > _DIRECT_HTTP_MAX_CONTENT_CODINGS:
+        raise _DirectHttpDecodeError(
+            f"Direct HTTP response uses more than {_DIRECT_HTTP_MAX_CONTENT_CODINGS} "
+            "content encodings."
+        )
+    decoders: list[_ContentDecoder] = []
+    for coding in reversed(codings):
+        if coding == "gzip":
+            decoders.append(_GzipDecoder())
+        elif coding == "deflate":
+            decoders.append(_DeflateDecoder())
+        else:
+            raise _DirectHttpDecodeError(
+                f"Direct HTTP response uses unsupported content encoding {coding[:64]!r}."
+            )
+    return decoders
+
+
+class _GzipDecoder:
+    """Incremental gzip decoder that accepts concatenated members (RFC 1952)."""
+
+    coding = "gzip"
+
+    def __init__(self) -> None:
+        self._member: Any = None
+        self._input = b""
+        self._members_completed = 0
+        self.output_pending = False
+
+    def decompress(self, data: bytes) -> bytes:
+        """Return at most one chunk; call again with no data while output_pending."""
+
+        self._input += data
+        output = bytearray()
+        while len(output) < _DIRECT_HTTP_CHUNK_BYTES:
+            if self._member is None:
+                if self._members_completed:
+                    # Like gzip.decompress, accept NUL padding after a complete member.
+                    self._input = self._input.lstrip(b"\x00")
+                if not self._input:
+                    break
+                self._member = zlib.decompressobj(wbits=16 + zlib.MAX_WBITS)
+            output += self._member.decompress(
+                self._input,
+                _DIRECT_HTTP_CHUNK_BYTES - len(output),
+            )
+            if self._member.eof:
+                self._input = self._member.unused_data
+                self._member = None
+                self._members_completed += 1
+                continue
+            self._input = self._member.unconsumed_tail
+            if len(output) < _DIRECT_HTTP_CHUNK_BYTES:
+                break
+        self.output_pending = len(output) >= _DIRECT_HTTP_CHUNK_BYTES
+        return bytes(output)
+
+    def finish(self) -> None:
+        if self._members_completed == 0 or self._member is not None or self._input:
+            raise _DirectHttpDecodeError(
+                "Direct HTTP response body ended inside its gzip content encoding."
+            )
+
+
+_DEFLATE_TRAILING_DATA_MESSAGE = (
+    "Direct HTTP response body has data after the end of its deflate content encoding."
+)
+
+
+class _DeflateDecoder:
+    """Incremental HTTP deflate decoder for zlib-wrapped or raw RFC 1951 data."""
+
+    coding = "deflate"
+
+    def __init__(self) -> None:
+        self._stream: Any = None
+        self._input = b""
+        self.output_pending = False
+
+    def decompress(self, data: bytes) -> bytes:
+        """Return at most one chunk; call again with no data while output_pending."""
+
+        self._input += data
+        self.output_pending = False
+        if self._stream is None:
+            if len(self._input) < 2:
+                return b""
+            # HTTP deflate is zlib-wrapped (RFC 9110), but some servers send raw deflate.
+            self._stream = zlib.decompressobj(
+                wbits=zlib.MAX_WBITS if _has_zlib_header(self._input) else -zlib.MAX_WBITS
+            )
+        if self._stream.eof:
+            if self._input:
+                raise _DirectHttpDecodeError(_DEFLATE_TRAILING_DATA_MESSAGE)
+            return b""
+        output: bytes = self._stream.decompress(self._input, _DIRECT_HTTP_CHUNK_BYTES)
+        if self._stream.eof:
+            if self._stream.unused_data:
+                raise _DirectHttpDecodeError(_DEFLATE_TRAILING_DATA_MESSAGE)
+            self._input = b""
+        else:
+            self._input = self._stream.unconsumed_tail
+            self.output_pending = len(output) >= _DIRECT_HTTP_CHUNK_BYTES
+        return output
+
+    def finish(self) -> None:
+        if self._input or self._stream is None or not self._stream.eof:
+            raise _DirectHttpDecodeError(
+                "Direct HTTP response body ended inside its deflate content encoding."
+            )
+
+
+_ContentDecoder: TypeAlias = _GzipDecoder | _DeflateDecoder
+
+
+def _has_zlib_header(data: bytes) -> bool:
+    """Whether data starts with an RFC 1950 header: CM=8, CINFO<=7, valid FCHECK."""
+
+    cmf, flags = data[0], data[1]
+    return cmf & 0x0F == 8 and cmf >> 4 <= 7 and ((cmf << 8) | flags) % 31 == 0
 
 
 def _set_response_socket_timeout(response: Any, timeout_seconds: float) -> None:

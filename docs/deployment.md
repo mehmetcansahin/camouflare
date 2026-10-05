@@ -123,6 +123,31 @@ ignored until their exact tag and independently verified platform digests are re
 updated in the manifest; an addon update likewise requires its version, URL, and digest to
 be re-verified and changed together.
 
+## Preparing the 2.0.2 cutover
+
+The local 2.0.2 package and release wording are prepared separately from publication.
+A prepared wheel or a changed Compose version is not evidence that its GHCR image
+exists. Do not switch the live service to 2.0.2 until the release workflow has completed
+and its actual index digest has been recorded in `docs/releases.md`.
+
+1. Rotate the previously shared API token in the service secret store and every client.
+   For Events backend, update `CAMOUFLARE_TOKEN` together with the service's
+   `CAMOUFLARE_API_TOKEN`, then reload deployed client configuration/workers through
+   its existing deploy procedure. Verify the old token is rejected; do not log either
+   credential.
+2. Review `CHANGELOG.md` and `.github/release-notes/v2.0.2.md`, then follow
+   `docs/release-checklist.md` for CI, annotated-tag publication, protected-environment
+   approval, platform smoke, security scanning, and provenance. Local Python 3.14
+   checks do not replace the required Python 3.11–3.14 and container gates.
+3. Preserve the current live image/environment for rollback. Deploy the published
+   index digest using the commands in `docs/releases.md`, and confirm the running
+   container's revision matches the release commit. Deploy the Events backend changes
+   separately; the Camouflare image does not contain them.
+4. Check authenticated `/ready` and `/diagnostics`, gzip JSON content, a known terminal
+   block, an ordinary upstream HTTP error, and an uncommitted GET timeout. Confirm the
+   backend does not turn non-retryable API errors or target 503s into pool backpressure.
+   Observe cleanup and lifecycle behavior for the window required by the checklist.
+
 ## Operational checks
 
 Use `/health` for liveness, authenticated `/ready` for browser-backed readiness, and

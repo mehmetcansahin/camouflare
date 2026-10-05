@@ -5,6 +5,27 @@ All notable changes to Camouflare are documented here. The project follows
 
 ## [Unreleased]
 
+## [2.0.2] - 2026-10-05
+
+### Fixed
+
+- Browser GET DOM readiness and commit grace each wait at most 15 seconds under the
+  shared request deadline. Navigation reserves result-collection time and a bounded
+  share for an already-eligible GET timeout fallback; direct HTTP workers use the same
+  shortened deadline. Committed pages retain browser challenge handling, and session,
+  proxy, screenshot, and POST transport restrictions are unchanged.
+- Direct HTTP GET decodes gzip and deflate before charset conversion, supports
+  concatenated gzip members and bounded stacked encodings, and enforces wire and
+  decoded-layer byte limits under the request deadline. Unsupported or invalid
+  compression returns `RESPONSE_DECODE_ERROR` rather than corrupt response text.
+- Confirmed Cloudflare-style bot/WAF block documents return `TARGET_BLOCKED` without
+  invoking the challenge solver, including GET cookies-only probes. Ordinary target
+  errors and quoted block markup remain ordinary responses; genuine challenge
+  handling is preserved. POST cookies-only keeps its no-body-read contract.
+- Text logs expose existing structured diagnostics as redacted compact JSON, including
+  request result, HTTP status, error code, and duration. Prometheus error-code labels
+  now derive from the error enum so new library errors are not grouped as internal errors.
+
 ## [2.0.1] - 2026-10-02
 
 ### Changed
@@ -287,7 +308,8 @@ All notable changes to Camouflare are documented here. The project follows
 - High and critical dependency or container findings block releases unless covered by a
   reasoned, time-bounded exception.
 
-[Unreleased]: https://github.com/mehmetcansahin/camouflare/compare/v2.0.1...HEAD
+[Unreleased]: https://github.com/mehmetcansahin/camouflare/compare/v2.0.2...HEAD
+[2.0.2]: https://github.com/mehmetcansahin/camouflare/compare/v2.0.1...v2.0.2
 [2.0.1]: https://github.com/mehmetcansahin/camouflare/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/mehmetcansahin/camouflare/compare/v1.4.0...v2.0.0
 [1.4.0]: https://github.com/mehmetcansahin/camouflare/compare/v1.3.3...v1.4.0

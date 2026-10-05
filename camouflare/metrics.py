@@ -15,6 +15,8 @@ from prometheus_client import (
 )
 from starlette.responses import Response
 
+from camouflare.errors import V1ErrorCode
+
 # Metric labels must never contain request-derived values.  These allowlists keep
 # cardinality bounded even when a caller accidentally passes an exception name or
 # another dynamic string to one of the integration hooks below.
@@ -62,19 +64,7 @@ _V1_COMMANDS = frozenset(
         "unknown",
     }
 )
-_V1_ERROR_CODES = frozenset(
-    {
-        "INVALID_REQUEST",
-        "SESSION_NOT_FOUND",
-        "RESOURCE_LIMIT_EXCEEDED",
-        "POOL_UNAVAILABLE",
-        "REQUEST_TIMEOUT",
-        "NAVIGATION_TIMEOUT",
-        "BROWSER_TRANSPORT_CLOSED",
-        "CHALLENGE_FAILED",
-        "INTERNAL_ERROR",
-    }
-)
+_V1_ERROR_CODES = frozenset(code.value for code in V1ErrorCode)
 _BROWSER_TRANSPORT_PHASES = frozenset(
     {"acquire", "browser_launch", "context_create", "navigation", "collection", "cleanup", "other"}
 )

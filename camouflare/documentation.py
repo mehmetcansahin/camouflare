@@ -477,7 +477,7 @@ DOCUMENTATION_HTML = """
       <pre><code>{
   "status": "ok",
   "sessions": ["account-a"],
-  "version": "2.0.1"
+  "version": "2.0.2"
 }</code></pre>
 
       <h3 id="sessions-destroy"><code>sessions.destroy</code></h3>
@@ -500,6 +500,15 @@ DOCUMENTATION_HTML = """
         instead uses stateless direct HTTP so cross-origin redirects can remove
         those headers. That mode does not support sessions, proxies, screenshots,
         JavaScript rendering, or browser challenge handling.
+      </p>
+      <p>
+        DOM readiness and commit grace each wait at most 15 seconds within the shared
+        <code>maxTimeout</code>. GET navigation keeps up to one second for collection
+        (at most half the time remaining for short budgets); an already-eligible
+        <code>ajax=true</code> timeout fallback keeps up to 15 seconds or half the
+        remaining navigation budget. Direct HTTP uses the shortened deadline too.
+        A committed document keeps browser challenge handling under the original
+        request deadline. These budgets do not change transport eligibility.
       </p>
       <pre><code>{
   "cmd": "request.get",
@@ -551,7 +560,10 @@ DOCUMENTATION_HTML = """
           <tr>
             <td><code>maxTimeout</code></td>
             <td>integer</td>
-            <td>Maximum request time in milliseconds. Default: <code>60000</code>.</td>
+            <td>
+              Shared command deadline in milliseconds, including setup, navigation,
+              challenge handling, and collection. Default: <code>60000</code>.
+            </td>
           </tr>
           <tr>
             <td><code>session</code></td>
@@ -652,7 +664,7 @@ DOCUMENTATION_HTML = """
   },
   "startTimestamp": 1770000000000,
   "endTimestamp": 1770000001500,
-  "version": "2.0.1"
+  "version": "2.0.2"
 }</code></pre>
       <p>
         Errors use the same envelope with <code>status: "error"</code>.
@@ -675,6 +687,8 @@ DOCUMENTATION_HTML = """
         attempted. A non-2xx status, a transport error, or a challenge-looking body
         falls through to normal browser navigation; a body over the response size
         limit ends the request with <code>RESOURCE_LIMIT_EXCEEDED</code> instead.
+        Unsupported or invalid direct HTTP compression instead ends the request with
+        <code>RESPONSE_DECODE_ERROR</code>, without a browser retry.
         Neither the preflight nor the transport-failure fallback runs when a
         request-level or environment proxy is set.
       </p>
@@ -684,6 +698,26 @@ DOCUMENTATION_HTML = """
         falls back to browser navigation. It is rejected when a session, proxy, or
         screenshot is requested because those features cannot preserve the header
         boundary. A POST never follows redirects and reports its first response.
+      </p>
+      <p>
+        Direct HTTP GET advertises <code>gzip, deflate</code> by default and decodes
+        content encodings before applying the response charset. Concatenated gzip
+        members and up to four stacked encodings are supported. The response byte
+        limit applies to the wire body and every decoded layer under the shared
+        request deadline. Unsupported, malformed, or truncated compression returns
+        <code>RESPONSE_DECODE_ERROR</code>; size violations return
+        <code>RESOURCE_LIMIT_EXCEEDED</code>. Upstream response headers are preserved.
+        Cookies-only GET inspects at most a 64 KiB decoded prefix and does not
+        validate an unread remainder.
+      </p>
+      <p>
+        Confirmed Cloudflare-style hard block documents return
+        <code>TARGET_BLOCKED</code> without calling the challenge solver; an unresolved
+        challenge still returns <code>CHALLENGE_FAILED</code>. A 403 or 503 status
+        alone is not proof of a bot block: ordinary upstream errors remain
+        <code>status: "ok"</code> with that status in <code>solution.status</code>.
+        A cookies-only POST never reads its response body, so it cannot classify
+        body-based challenges or blocks.
       </p>
       <pre><code>{
   "status": "error",
@@ -699,7 +733,8 @@ DOCUMENTATION_HTML = """
         <code>INVALID_REQUEST</code>, <code>SESSION_NOT_FOUND</code>,
         <code>RESOURCE_LIMIT_EXCEEDED</code>, <code>POOL_UNAVAILABLE</code>,
         <code>REQUEST_TIMEOUT</code>, <code>NAVIGATION_TIMEOUT</code>,
-        <code>BROWSER_TRANSPORT_CLOSED</code>, <code>CHALLENGE_FAILED</code>, and
+        <code>BROWSER_TRANSPORT_CLOSED</code>, <code>CHALLENGE_FAILED</code>,
+        <code>TARGET_BLOCKED</code>, <code>RESPONSE_DECODE_ERROR</code>, and
         <code>INTERNAL_ERROR</code>. New metadata is optional so existing clients can
         continue using <code>status</code> and <code>message</code> unchanged.
       </p>
@@ -761,6 +796,19 @@ DOCUMENTATION_HTML = """
               <code>CHALLENGE_FAILED</code> or <code>REQUEST_TIMEOUT</code>; may include
               a partial <code>solution</code> for debugging.
             </td>
+          </tr>
+          <tr>
+            <td>A confirmed bot/WAF hard block document is returned.</td>
+            <td>HTTP 500</td>
+            <td>
+              <code>TARGET_BLOCKED</code>; not retryable. The solution retains the
+              upstream status, and its body is omitted for cookies-only GET.
+            </td>
+          </tr>
+          <tr>
+            <td>Direct HTTP compression is unsupported, malformed, or truncated.</td>
+            <td>HTTP 500</td>
+            <td><code>RESPONSE_DECODE_ERROR</code>; not retryable.</td>
           </tr>
         </tbody>
       </table>
@@ -1005,7 +1053,13 @@ DOCUMENTATION_HTML = """
           <tr>
             <td><code>LOG_FORMAT</code></td>
             <td><code>text</code></td>
-            <td>Logging format: <code>text</code> or <code>json</code>.</td>
+            <td>
+              Logging format: <code>text</code> or <code>json</code>. Both redact
+              messages and structured fields. Text appends compact JSON as
+              <code>fields={...}</code>; JSON stores it under <code>fields</code>.
+              Completion records include result, HTTP status, duration, and an
+              error code when applicable.
+            </td>
           </tr>
           <tr>
             <td><code>PROMETHEUS_ENABLED</code></td>

@@ -221,6 +221,18 @@ class TextLogFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         safe_record = copy.copy(record)
         safe_record.msg = redact_text(record.getMessage())
+        extras = {
+            key: value
+            for key, value in record.__dict__.items()
+            if key not in _STANDARD_LOG_RECORD_FIELDS
+        }
+        if extras:
+            fields = json.dumps(
+                redact_mapping(extras),
+                ensure_ascii=True,
+                separators=(",", ":"),
+            )
+            safe_record.msg += f" fields={fields}"
         safe_record.args = ()
         # Another handler's stock formatter may already have cached an
         # unredacted traceback on the shared record; never emit it verbatim.

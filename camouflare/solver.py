@@ -18,10 +18,10 @@ from camouflare.challenge import (
     Sleep,
 )
 from camouflare.challenge import (
-    challenge_detected as _challenge_detected,
+    content_is_hard_block as _content_is_hard_block,
 )
 from camouflare.challenge import (
-    challenge_markers_remain as _challenge_markers_remain,
+    content_state as _content_state,
 )
 from camouflare.challenge import (
     solve_challenge as _solve_challenge,
@@ -378,11 +378,20 @@ async def _run_solve_inner(
 
     fallback_used = True if getattr(response, "fallback_used", False) else None
     await _wait_networkidle_best_effort(page, timer)
-    detected = await _challenge_detected(
+    initial_response = _effective_response(response, final_response)
+    initial_status = _response_status(initial_response)
+    state = await _challenge_state(
         page,
         limits,
         include_content=inspect_response_content,
+        status=initial_status,
     )
+    if state != "blocked":
+        # A buffered direct/API response leaves the browser page blank.
+        buffered = await _buffered_response_text(initial_response)
+        if buffered is not None and _content_is_hard_block(buffered, status=initial_status):
+            state = "blocked"
+    detected = state == "present"
     record_challenge("detected" if detected else "not_detected")
     if detected:
         await _apply_media_blocking(context, False)
@@ -442,7 +451,7 @@ async def _run_solve_inner(
                 ),
             )
 
-    if request.wait_in_seconds and request.wait_in_seconds > 0:
+    if state != "blocked" and request.wait_in_seconds and request.wait_in_seconds > 0:
         try:
             await _wait_requested(request.wait_in_seconds, sleep=sleep, timer=timer)
         except RequestTimeoutError as exc:
@@ -466,32 +475,47 @@ async def _run_solve_inner(
                 ),
             )
 
-    effective_response = (
-        response if getattr(response, "raw_body", False) else final_response["value"] or response
-    )
+    effective_response = _effective_response(response, final_response)
+    effective_status = _response_status(effective_response)
+    content = ""
     if inspect_response_content:
         content = await _response_text_or_page_content(page, effective_response, limits)
-        title = await _safe_page_title(page)
-        challenge_remains = _challenge_markers_remain(title, content)
-    else:
-        content = ""
-        challenge_remains = await _challenge_detected(
+        if state != "blocked":
+            state = _content_state(content, status=effective_status)
+            if state == "cleared" and _title_is_challenge(await _safe_page_title(page)):
+                state = "present"
+    elif state != "blocked":
+        state = await _challenge_state(
             page,
             limits,
             include_content=False,
+            status=effective_status,
         )
-        if not challenge_remains and getattr(effective_response, "raw_body", False):
-            text_reader = getattr(effective_response, "text", None)
-            if callable(text_reader):
-                try:
-                    raw_content = await cast(Callable[[], Awaitable[str]], text_reader)()
-                    challenge_remains = _content_has_challenge_markers(raw_content)
-                except Exception:
-                    logger.warning(
-                        "Failed to inspect buffered raw response for challenge markers.",
-                        exc_info=True,
-                    )
-    if challenge_remains:
+        if state not in ("blocked", "present"):
+            buffered = await _buffered_response_text(effective_response)
+            if buffered is not None:
+                state = _content_state(buffered, status=effective_status)
+    if state == "blocked":
+        if detected:
+            record_challenge("failed")
+        return V1Response(
+            status="error",
+            message="Target returned a bot/WAF block page.",
+            error_code=V1ErrorCode.TARGET_BLOCKED,
+            retryable=False,
+            request_outcome_unknown=post_state.started,
+            fallback_used=fallback_used,
+            solution=await _collect_solution(
+                request,
+                context=context,
+                page=page,
+                page_response=effective_response,
+                content=content,
+                turnstile_token=turnstile_token,
+                limits=limits,
+            ),
+        )
+    if state == "present":
         if detected:
             record_challenge("failed")
         return V1Response(
@@ -528,6 +552,39 @@ async def _run_solve_inner(
             limits=limits,
         ),
     )
+
+
+def _effective_response(response: Any, final_response: MainFrameResponseHolder) -> Any:
+    """Return the response whose document the request will report.
+
+    A buffered direct/API response is authoritative; a browser navigation reports
+    the latest main-frame response, which may follow a cleared challenge.
+    """
+    if getattr(response, "raw_body", False):
+        return response
+    return final_response["value"] or response
+
+
+def _response_status(response: Any) -> int | None:
+    status = getattr(response, "status", None)
+    return status if isinstance(status, int) else None
+
+
+async def _buffered_response_text(response: Any) -> str | None:
+    """Read a buffered direct/API response body without touching the page."""
+    if not getattr(response, "raw_body", False):
+        return None
+    text_reader = getattr(response, "text", None)
+    if not callable(text_reader):
+        return None
+    try:
+        return await cast(Callable[[], Awaitable[str]], text_reader)()
+    except Exception:
+        logger.warning(
+            "Failed to inspect buffered raw response for challenge or block markers.",
+            exc_info=True,
+        )
+        return None
 
 
 def _emit_browser_transport_error(exc: Exception, *, phase: str) -> None:

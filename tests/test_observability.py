@@ -169,6 +169,54 @@ def test_text_and_json_formatters_include_context_and_redact() -> None:
     assert "top-secret" not in json_output["message"]
 
 
+def test_text_log_fields_preserve_diagnostics_without_secrets_or_line_injection() -> None:
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(TextLogFormatter())
+    logger = logging.getLogger("camouflare.test.text_fields")
+    original_propagate = logger.propagate
+    original_level = logger.level
+    logger.propagate = False
+    logger.setLevel(logging.INFO)
+    logger.addHandler(handler)
+    try:
+        with request_id_context("diagnostic-request"):
+            logger.info(
+                "Request completed.",
+                extra={
+                    "result": "error",
+                    "http_status": 500,
+                    "error_code": "RESPONSE_DECODE_ERROR",
+                    "duration_ms": 73,
+                    "details": {
+                        "headers": {"Authorization": "Bearer credential-secret"},
+                        "url": "https://user:password@example.com/private?token=query-secret",
+                        "note": "first line\nsecond line",
+                    },
+                },
+            )
+    finally:
+        logger.removeHandler(handler)
+        logger.propagate = original_propagate
+        logger.setLevel(original_level)
+
+    emitted = stream.getvalue()
+    assert len(emitted.splitlines()) == 1
+    assert "request_id=diagnostic-request" in emitted
+    fields = json.loads(emitted.split(" fields=", 1)[1])
+    assert fields["result"] == "error"
+    assert fields["http_status"] == 500
+    assert fields["error_code"] == "RESPONSE_DECODE_ERROR"
+    assert fields["duration_ms"] == 73
+    assert fields["details"] == {
+        "headers": {"Authorization": REDACTED},
+        "url": "https://example.com",
+        "note": "first line\nsecond line",
+    }
+    for secret in ("credential-secret", "user:password", "/private", "query-secret"):
+        assert secret not in emitted
+
+
 @pytest.mark.parametrize(
     "formatter",
     [TextLogFormatter(), JsonLogFormatter()],

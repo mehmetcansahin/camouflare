@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from contextlib import asynccontextmanager
 from typing import Any
@@ -2686,3 +2687,461 @@ async def test_url_containing_crashed_is_not_treated_as_a_crash() -> None:
     assert result.status == "error"
     assert result.error_code is V1ErrorCode.INTERNAL_ERROR
     assert result.retryable is False
+
+
+# A captured Cloudflare WAF block response (host and client IP replaced).
+_CLOUDFLARE_BLOCK_PAGE = (
+    "<!DOCTYPE html>\n"
+    '<!--[if lt IE 7]> <html class="no-js ie6 oldie" lang="en-US"> <![endif]-->\n'
+    '<!--[if IE 7]>    <html class="no-js ie7 oldie" lang="en-US"> <![endif]-->\n'
+    '<!--[if IE 8]>    <html class="no-js ie8 oldie" lang="en-US"> <![endif]-->\n'
+    '<!--[if gt IE 8]><!--> <html class="no-js" lang="en-US"> <!--<![endif]-->\n'
+    "<head>\n"
+    "<title>Attention Required! | Cloudflare</title>\n"
+    '<meta charset="UTF-8" />\n'
+    '<meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />\n'
+    '<meta http-equiv="X-UA-Compatible" content="IE=Edge" />\n'
+    '<meta name="robots" content="noindex, nofollow" />\n'
+    '<meta name="viewport" content="width=device-width,initial-scale=1" />\n'
+    '<link rel="stylesheet" id="cf_styles-css" href="/cdn-cgi/styles/cf.errors.css" />\n'
+    "<!--[if lt IE 9]><link rel=\"stylesheet\" id='cf_styles-ie-css' "
+    'href="/cdn-cgi/styles/cf.errors.ie.css" /><![endif]-->\n'
+    "<style>body{margin:0;padding:0}</style>\n"
+    "\n"
+    "\n"
+    "<!--[if gte IE 10]><!-->\n"
+    "<script>\n"
+    "  if (!navigator.cookieEnabled) {\n"
+    "    window.addEventListener('DOMContentLoaded', function () {\n"
+    "      var cookieEl = document.getElementById('cookie-alert');\n"
+    "      cookieEl.style.display = 'block';\n"
+    "    })\n"
+    "  }\n"
+    "</script>\n"
+    "<!--<![endif]-->\n"
+    "\n"
+    "</head>\n"
+    "<body>\n"
+    '  <div id="cf-wrapper">\n'
+    '    <div class="cf-alert cf-alert-error cf-cookie-error" id="cookie-alert" '
+    'data-translate="enable_cookies">Please enable cookies.</div>\n'
+    '    <div id="cf-error-details" class="cf-error-details-wrapper">\n'
+    '      <div class="cf-wrapper cf-header cf-error-overview">\n'
+    '        <h1 data-translate="block_headline">Sorry, you have been blocked</h1>\n'
+    '        <h2 class="cf-subheadline"><span data-translate="unable_to_access">You are unable to '
+    "access</span> tickets.example</h2>\n"
+    "      </div><!-- /.header -->\n"
+    "\n"
+    '      <div class="cf-section cf-highlight">\n'
+    '        <div class="cf-wrapper">\n'
+    '          <div class="cf-screenshot-container cf-screenshot-full">\n'
+    "            \n"
+    '              <span class="cf-no-screenshot error"></span>\n'
+    "            \n"
+    "          </div>\n"
+    "        </div>\n"
+    "      </div><!-- /.captcha-container -->\n"
+    "\n"
+    '      <div class="cf-section cf-wrapper">\n'
+    '        <div class="cf-columns two">\n'
+    '          <div class="cf-column">\n'
+    '            <h2 data-translate="blocked_why_headline">Why have I been blocked?</h2>\n'
+    "\n"
+    '            <p data-translate="blocked_why_detail">This website is using a security service '
+    "to protect itself from online attacks. The action you just performed triggered the security "
+    "solution. There are several actions that could trigger this block including submitting a "
+    "certain word or phrase, a SQL command or malformed data.</p>\n"
+    "          </div>\n"
+    "\n"
+    '          <div class="cf-column">\n'
+    '            <h2 data-translate="blocked_resolve_headline">What can I do to resolve '
+    "this?</h2>\n"
+    "\n"
+    '            <p data-translate="blocked_resolve_detail">You can email the site owner to let '
+    "them know you were blocked. Please include what you were doing when this page came up and the "
+    "Cloudflare Ray ID found at the bottom of this page.</p>\n"
+    "          </div>\n"
+    "        </div>\n"
+    "      </div><!-- /.section -->\n"
+    "\n"
+    '      <div class="cf-error-footer cf-wrapper w-240 lg:w-full py-10 sm:py-4 sm:px-8 mx-auto '
+    'text-center sm:text-left border-solid border-0 border-t border-gray-300">\n'
+    '    <p class="text-13">\n'
+    '      <span class="cf-footer-item sm:block sm:mb-1">Cloudflare Ray ID: <strong '
+    'class="font-semibold">a443f70e2d6818e9</strong></span>\n'
+    '      <span class="cf-footer-separator sm:hidden">&bull;</span>\n'
+    '      <span id="cf-footer-item-ip" class="cf-footer-item hidden sm:block sm:mb-1">\n'
+    "        Your IP:\n"
+    '        <button type="button" id="cf-footer-ip-reveal" class="cf-footer-ip-reveal-btn">Click '
+    "to reveal</button>\n"
+    '        <span class="hidden" id="cf-footer-ip">192.0.2.10</span>\n'
+    '        <span class="cf-footer-separator sm:hidden">&bull;</span>\n'
+    "      </span>\n"
+    '      <span class="cf-footer-item sm:block sm:mb-1"><span>Performance &amp; security '
+    'by</span> <a rel="noopener noreferrer" href="https://www.cloudflare.com/5xx-error-landing" '
+    'id="brand_link" target="_blank">Cloudflare</a></span>\n'
+    "      \n"
+    "    </p>\n"
+    '    <script>(function(){function d(){var b=a.getElementById("cf-footer-item-ip"),c=a.getElemen'
+    'tById("cf-footer-ip-reveal");b&&"classList"in b&&(b.classList.remove("hidden"),c.addEventListe'
+    'ner("click",function(){c.classList.add("hidden");a.getElementById("cf-footer-ip").classList.re'
+    'move("hidden")}))}var a=document;document.addEventListener&&a.addEventListener("DOMContentLoad'
+    'ed",d)})();</script>\n'
+    "  </div><!-- /.error-footer -->\n"
+    "\n"
+    "    </div><!-- /#cf-error-details -->\n"
+    "  </div><!-- /#cf-wrapper -->\n"
+    "\n"
+    "  <script>\n"
+    "    window._cf_translation = {};\n"
+    "    \n"
+    "    \n"
+    "  </script>\n"
+    "</body>\n"
+    "</html>"
+)
+# Block pages may also load challenge-platform scripts; no solver can pass them.
+_CLOUDFLARE_BLOCK_PAGE_WITH_CHALLENGE_SCRIPT = _CLOUDFLARE_BLOCK_PAGE.replace(
+    "</body>",
+    "<script>(function(){var s=document.createElement('script');"
+    "s.src='/cdn-cgi/challenge-platform/scripts/precursor/main.js';"
+    "document.head.appendChild(s);})();</script></body>",
+)
+
+
+class _RecordingSolveProvider:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def solve(self, **_: object) -> str | None:
+        self.calls += 1
+        return None
+
+
+class _DomProbePage(FakePage):
+    """Answers the bounded cookies-only DOM probe without serializing the page."""
+
+    async def content(self) -> str:
+        raise AssertionError("cookies-only classification must not serialize page content")
+
+    async def evaluate(self, script: str) -> Any:
+        if "cf-error-details" in script:
+            return {
+                "block": 'data-translate="block_headline"' in self.content_value,
+                "challenge": "/cdn-cgi/challenge-platform/" in self.content_value,
+            }
+        return await super().evaluate(script)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "document",
+    [_CLOUDFLARE_BLOCK_PAGE, _CLOUDFLARE_BLOCK_PAGE_WITH_CHALLENGE_SCRIPT],
+    ids=["block-page", "block-page-with-challenge-script"],
+)
+@pytest.mark.parametrize(
+    ("transport", "cookies_only"),
+    [("browser", False), ("browser", True), ("direct", False), ("direct", True)],
+    ids=["browser", "browser-cookies-only", "direct-header", "direct-header-cookies-only"],
+)
+async def test_cloudflare_block_page_is_a_terminal_target_block(
+    document: str,
+    transport: str,
+    cookies_only: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def direct_get(
+        url: str,
+        request: V1Request,
+        timer: TimeoutTimer,
+    ) -> solver_module.RawResponse:
+        return solver_module.RawResponse(
+            url=url,
+            status=403,
+            headers={"Content-Type": "text/html; charset=UTF-8", "Server": "cloudflare"},
+            body=document,
+        )
+
+    monkeypatch.setattr(solver_module, "_direct_http_get", direct_get)
+    context = FakeContext()
+    page = _DomProbePage(context) if cookies_only else FakePage(context)
+    context.pages.append(page)
+    if transport == "browser":
+        page.title_value = "Attention Required! | Cloudflare"
+        page.content_value = document
+        page.goto_response = FakeResponse(
+            status=403,
+            headers={"content-type": "text/html; charset=UTF-8"},
+        )
+    provider = _RecordingSolveProvider()
+
+    result = await solve_request(
+        V1Request(
+            cmd="request.get",
+            url="https://tickets.example/",
+            maxTimeout=60000,
+            returnOnlyCookies=cookies_only,
+            headers={"Accept": "text/html"} if transport == "direct" else None,
+        ),
+        context=context,
+        page=page,
+        captcha_provider=provider,
+    )
+
+    assert result.status == "error"
+    assert result.error_code is V1ErrorCode.TARGET_BLOCKED
+    assert result.retryable is False
+    assert result.request_outcome_unknown is False
+    assert provider.calls == 0
+    assert result.solution is not None
+    assert result.solution.status == 403
+    assert result.solution.cookies
+    assert result.solution.response == (None if cookies_only else document)
+    assert bool(page.goto_calls) is (transport == "browser")
+
+
+_ARTICLE_QUOTING_BLOCK_PAGE = (
+    "<html><head><title>Attention Required! | Cloudflare</title>"
+    '<script>const example = `<div id="cf-error-details">'
+    '<h1 data-translate="block_headline">Sorry, you have been blocked</h1></div>`;</script>'
+    "</head><body><h1>Sorry, you have been blocked</h1>"
+    "<p>What the Cloudflare block page means for crawlers.</p>"
+    '<pre>&lt;div id="cf-error-details"&gt;&lt;/div&gt;</pre></body></html>'
+)
+_CLOUDFLARE_ORIGIN_ERROR_PAGE = (
+    "<html><head><title>tickets.example | 522: Connection timed out</title></head><body>"
+    '<div id="cf-wrapper"><div id="cf-error-details" class="p-0"><header><h1>'
+    '<span class="inline-block">Connection timed out</span> '
+    '<span class="code-label">Error code 522</span></h1></header></div></div></body></html>'
+)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("status", "content_type", "document"),
+    [
+        (
+            403,
+            "text/html",
+            "<html><head><title>403 Forbidden</title></head>"
+            "<body><h1>403 Forbidden</h1><hr>nginx</body></html>",
+        ),
+        (
+            503,
+            "text/html; charset=UTF-8",
+            "<html><head><title>Briefly unavailable for scheduled maintenance</title></head>"
+            "<body>Check back in a few hours.</body></html>",
+        ),
+        (522, "text/html; charset=UTF-8", _CLOUDFLARE_ORIGIN_ERROR_PAGE),
+        (200, "text/html; charset=utf-8", _ARTICLE_QUOTING_BLOCK_PAGE),
+        (
+            403,
+            "text/html",
+            "<html><head><title>Attention Required! | Cloudflare</title></head>"
+            '<body><div id="cf-error-details"></div>'
+            "<h1>Sorry, you have been blocked</h1></body></html>",
+        ),
+        (
+            403,
+            "application/json",
+            json.dumps({"error": "forbidden", "html": _CLOUDFLARE_BLOCK_PAGE.replace('"', "'")}),
+        ),
+    ],
+    ids=[
+        "forbidden",
+        "maintenance",
+        "cloudflare-origin-error",
+        "quoting-article",
+        "heading-outside-block-container",
+        "json",
+    ],
+)
+@pytest.mark.parametrize(
+    ("transport", "cookies_only"),
+    [("browser", False), ("direct", False), ("direct", True)],
+    ids=["browser", "direct-header", "direct-header-cookies-only"],
+)
+async def test_ordinary_upstream_responses_are_not_classified_as_blocks(
+    status: int,
+    content_type: str,
+    document: str,
+    transport: str,
+    cookies_only: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def direct_get(
+        url: str,
+        request: V1Request,
+        timer: TimeoutTimer,
+    ) -> solver_module.RawResponse:
+        return solver_module.RawResponse(
+            url=url,
+            status=status,
+            headers={"Content-Type": content_type},
+            body=document,
+        )
+
+    monkeypatch.setattr(solver_module, "_direct_http_get", direct_get)
+    context = FakeContext()
+    page = await context.new_page()
+    if transport == "browser":
+        page.title_value = solver_module._html_title(document)
+        page.content_value = document
+        page.goto_response = FakeResponse(
+            status=status,
+            headers={"content-type": content_type},
+            text_value=document,
+        )
+
+    result = await solve_request(
+        V1Request(
+            cmd="request.get",
+            url="https://tickets.example/",
+            maxTimeout=60000,
+            returnOnlyCookies=cookies_only,
+            headers={"Accept": "text/html"} if transport == "direct" else None,
+        ),
+        context=context,
+        page=page,
+    )
+
+    assert result.status == "ok"
+    assert result.message == "Challenge not detected!"
+    assert result.solution is not None
+    assert result.solution.status == status
+    assert result.solution.response == (None if cookies_only else document)
+
+
+@pytest.mark.anyio
+async def test_challenge_replaced_by_block_page_reports_target_blocked_without_polling() -> None:
+    context = FakeContext()
+    page = await context.new_page()
+    page.title_value = "Just a moment..."
+    page.content_value = (
+        "<html><title>Just a moment...</title>"
+        '<script src="/cdn-cgi/challenge-platform/x"></script></html>'
+    )
+
+    class BlockingProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def solve(self, **_: object) -> str | None:
+            self.calls += 1
+            page.title_value = "Attention Required! | Cloudflare"
+            page.content_value = _CLOUDFLARE_BLOCK_PAGE_WITH_CHALLENGE_SCRIPT
+            page.emit_navigation_response(status=403, url="https://tickets.example/")
+            return "turnstile-token"
+
+    async def unexpected_sleep(_: float) -> None:
+        raise AssertionError("a terminal block must not be polled as a pending challenge")
+
+    provider = BlockingProvider()
+    result = await solve_request(
+        V1Request(cmd="request.get", url="https://tickets.example/", maxTimeout=60000),
+        context=context,
+        page=page,
+        captcha_provider=provider,
+        sleep=unexpected_sleep,
+    )
+
+    assert provider.calls == 1
+    assert result.status == "error"
+    assert result.error_code is V1ErrorCode.TARGET_BLOCKED
+    assert result.retryable is False
+    assert result.solution is not None
+    assert result.solution.status == 403
+    assert result.solution.turnstile_token == "turnstile-token"
+    assert result.solution.response == _CLOUDFLARE_BLOCK_PAGE_WITH_CHALLENGE_SCRIPT
+
+
+@pytest.mark.anyio
+async def test_post_block_page_keeps_uncertain_outcome_without_solving() -> None:
+    class BlockedApiRequest:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def post(self, url: str, **kwargs: Any) -> FakeResponse:
+            self.calls += 1
+            return FakeResponse(
+                status=403,
+                headers={"content-type": "text/html; charset=UTF-8"},
+                text_value=_CLOUDFLARE_BLOCK_PAGE,
+            )
+
+    context = FakeContext()
+    api_request = BlockedApiRequest()
+    context.request = api_request  # type: ignore[attr-defined]
+    page = await context.new_page()
+    provider = _RecordingSolveProvider()
+
+    result = await solve_request(
+        V1Request(
+            cmd="request.post",
+            url="https://tickets.example/orders",
+            postData="item=1",
+            maxTimeout=60000,
+        ),
+        context=context,
+        page=page,
+        captcha_provider=provider,
+    )
+
+    assert api_request.calls == 1
+    assert provider.calls == 0
+    assert result.status == "error"
+    assert result.error_code is V1ErrorCode.TARGET_BLOCKED
+    assert result.retryable is False
+    assert result.request_outcome_unknown is True
+    assert result.solution is not None
+    assert result.solution.status == 403
+    assert result.solution.response == _CLOUDFLARE_BLOCK_PAGE
+
+
+@pytest.mark.anyio
+async def test_block_page_does_not_bypass_response_body_limit() -> None:
+    context = FakeContext()
+    page = await context.new_page()
+    page.title_value = "Attention Required! | Cloudflare"
+    page.content_value = _CLOUDFLARE_BLOCK_PAGE
+    page.goto_response = FakeResponse(status=403)
+
+    with pytest.raises(ResourceLimitError, match="Response body"):
+        await solve_request(
+            V1Request(cmd="request.get", url="https://tickets.example/", maxTimeout=60000),
+            context=context,
+            page=page,
+            limits=ResourceLimits(response_body_bytes=len(_CLOUDFLARE_BLOCK_PAGE) - 1),
+            allow_direct_http_first=False,
+        )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("cookies_only", [False, True])
+async def test_confirmed_block_takes_precedence_over_challenge_title(cookies_only: bool) -> None:
+    context = FakeContext()
+    page = _DomProbePage(context) if cookies_only else FakePage(context)
+    context.pages.append(page)
+    page.title_value = "Just a moment..."
+    page.content_value = _CLOUDFLARE_BLOCK_PAGE.replace(
+        "Attention Required! | Cloudflare", "Just a moment..."
+    )
+    page.goto_response = FakeResponse(status=403)
+    provider = _RecordingSolveProvider()
+
+    result = await solve_request(
+        V1Request(
+            cmd="request.get",
+            url="https://tickets.example/",
+            maxTimeout=2000,
+            returnOnlyCookies=cookies_only,
+        ),
+        context=context,
+        page=page,
+        captcha_provider=provider,
+    )
+
+    assert result.error_code is V1ErrorCode.TARGET_BLOCKED
+    assert provider.calls == 0
+    assert result.solution is not None
+    assert result.solution.status == 403
