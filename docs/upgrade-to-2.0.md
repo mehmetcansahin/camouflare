@@ -84,7 +84,7 @@ open a page is evicted. Plan memory and PID headroom for up to another
 ## Container image
 
 ```bash
-docker pull ghcr.io/mehmetcansahin/camouflare:2.0.0
+docker pull ghcr.io/mehmetcansahin/camouflare:2.0.2
 ```
 
 The Camoufox archive inside the image is selected from `scripts/camoufox-artifacts.json`

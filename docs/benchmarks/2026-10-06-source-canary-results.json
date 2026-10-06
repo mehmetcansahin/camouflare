@@ -1,0 +1,200 @@
+{
+  "acceptance": {
+    "all_requests_succeeded": true,
+    "idle_after": true,
+    "minimum_recycles_observed": true,
+    "zero_acquire_timeouts": true,
+    "zero_asyncio_unhandled": true,
+    "zero_browser_transport_errors": true,
+    "zero_v1_errors": true
+  },
+  "aggregates": [
+    {
+      "client_errors": 0,
+      "client_p50_ms": 1119.728,
+      "client_p95_ms": 1525.869,
+      "concurrency": 1,
+      "internal_p50_ms": 1117.0,
+      "internal_p95_ms": 1524.0,
+      "load": "Sequential baseline",
+      "requests": 4,
+      "server_errors": 0,
+      "success_rate": 1.0,
+      "successes": 4,
+      "timeouts": 0
+    },
+    {
+      "client_errors": 0,
+      "client_p50_ms": 2281.285,
+      "client_p95_ms": 3874.342,
+      "concurrency": 4,
+      "internal_p50_ms": 2276.0,
+      "internal_p95_ms": 3867.0,
+      "load": "4 concurrent",
+      "requests": 12,
+      "server_errors": 0,
+      "success_rate": 1.0,
+      "successes": 12,
+      "timeouts": 0
+    }
+  ],
+  "diagnostics": {
+    "idle_after": {
+      "capacity_state": "available",
+      "cleanup": {
+        "by_kind": {},
+        "in_flight": 0,
+        "oldest_age_seconds": null
+      },
+      "pool": {
+        "active_contexts": 0,
+        "closing_slots": 0,
+        "creating_slots": 0,
+        "idle_recyclable_slots": 0,
+        "max_browsers": 2,
+        "max_contexts_per_browser": 1,
+        "max_slots": 2,
+        "persistent_contexts": 0,
+        "ready_browser_slots": 2,
+        "retiring_browser_slots": 0,
+        "transient_contexts": 0,
+        "usable_context_slots": 2,
+        "waiting_requests": 0
+      },
+      "runtime": {
+        "playwright_cancel_patch": "applied",
+        "playwright_version": "1.61.0"
+      },
+      "sessions": {
+        "active": 0,
+        "closing": 0,
+        "in_use": 0,
+        "max_sessions": 32
+      },
+      "status": "ok"
+    },
+    "idle_before": {
+      "capacity_state": "available",
+      "cleanup": {
+        "by_kind": {},
+        "in_flight": 0,
+        "oldest_age_seconds": null
+      },
+      "pool": {
+        "active_contexts": 0,
+        "closing_slots": 0,
+        "creating_slots": 0,
+        "idle_recyclable_slots": 0,
+        "max_browsers": 2,
+        "max_contexts_per_browser": 1,
+        "max_slots": 2,
+        "persistent_contexts": 0,
+        "ready_browser_slots": 2,
+        "retiring_browser_slots": 0,
+        "transient_contexts": 0,
+        "usable_context_slots": 2,
+        "waiting_requests": 0
+      },
+      "runtime": {
+        "playwright_cancel_patch": "applied",
+        "playwright_version": "1.61.0"
+      },
+      "sessions": {
+        "active": 0,
+        "closing": 0,
+        "in_use": 0,
+        "max_sessions": 32
+      },
+      "status": "ok"
+    }
+  },
+  "environment": {
+    "client_os": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+    "client_python": "3.14.7",
+    "image": null,
+    "label": "Source checkout e21587abab2499c129e4d051e5807899abf802be; macOS-26.6.2-arm64-arm-64bit-Mach-O; Python 3.14.7; Camoufox 152.0.4-beta.29; HEADLESS=true; two browsers, one context each; POOL_RESERVED_TRANSIENT_CONTEXTS=1; POOL_ACQUIRE_TIMEOUT_MS=10000; no container memory, shared-memory, or PID limits; deterministic loopback HTTP target; BROWSER_MAX_AGE_MINUTES=1; BROWSER_MAX_USES=2"
+  },
+  "failures": [],
+  "generated_at": "2026-10-06T10:11:29.247238Z",
+  "method": {
+    "api_max_timeout_ms": 60000,
+    "client_timeout_seconds": 70,
+    "command": "request.get",
+    "concurrency_levels": [
+      4
+    ],
+    "idle_gate": "active=0, waiting=0, creating=0, closing=0, cleanup_in_flight=0",
+    "latency_percentiles_include": "successful requests only",
+    "metrics_required": true,
+    "minimum_recycles": 3,
+    "percentile_method": "nearest-rank",
+    "rounds_per_concurrency": 3,
+    "sequential_requests": 4,
+    "warmup_requests_excluded": 4
+  },
+  "prometheus_delta": {
+    "camouflare_browser_event_total{event=\"created\"}": 8.0,
+    "camouflare_browser_event_total{event=\"recycled\"}": 8.0,
+    "camouflare_browser_recycle_total{reason=\"max_uses\"}": 8.0,
+    "camouflare_challenge_total{outcome=\"not_detected\"}": 16.0,
+    "camouflare_cleanup_total{kind=\"browser\",result=\"success\"}": 8.0,
+    "camouflare_cleanup_total{kind=\"captcha\",result=\"success\"}": 16.0,
+    "camouflare_cleanup_total{kind=\"context\",result=\"success\"}": 16.0,
+    "camouflare_cleanup_total{kind=\"page\",result=\"success\"}": 16.0,
+    "camouflare_cleanup_total{kind=\"proxy\",result=\"success\"}": 16.0,
+    "camouflare_pool_acquire_total{kind=\"transient\",result=\"success\"}": 16.0,
+    "camouflare_request_total{command=\"request.get\",result=\"ok\"}": 16.0
+  },
+  "schema_version": 2,
+  "service": {
+    "base_url": "http://127.0.0.1:60531",
+    "target_url": "http://127.0.0.1:60391/",
+    "version": "2.0.2"
+  },
+  "successful_latency_samples_ms": {
+    "concurrency_4": {
+      "client": [
+        1388.373,
+        1826.409,
+        3874.342,
+        3053.169,
+        1400.482,
+        1881.898,
+        3845.771,
+        3114.122,
+        1345.163,
+        2281.285,
+        3776.972,
+        3616.675
+      ],
+      "internal": [
+        1384,
+        1823,
+        3867,
+        3047,
+        1397,
+        1873,
+        3839,
+        3108,
+        1342,
+        2276,
+        3770,
+        3611
+      ]
+    },
+    "sequential": {
+      "client": [
+        1119.728,
+        1354.404,
+        1044.955,
+        1525.869
+      ],
+      "internal": [
+        1117,
+        1352,
+        1042,
+        1524
+      ]
+    }
+  }
+}

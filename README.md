@@ -39,10 +39,14 @@ its main focus is predictable operation:
 - **Useful production signals.** Browser-backed readiness, passive diagnostics,
   structured request logs, and low-cardinality Prometheus metrics expose pool,
   session, cleanup, timeout, and browser transport state.
-- **Measured release profile.** The published image completed all 45 load requests
-  and all 16 lifecycle-canary requests, including eight browser recycle cycles, with
-  no cleanup backlog in the accepted profile. See the
-  [recorded evidence](docs/benchmarks/README.md).
+- **Measured release profile.** The published 1.3.3 image completed all 45 load requests,
+  and the published 2.0.0 image completed all 16 lifecycle-canary requests, including
+  eight browser recycle cycles, with no cleanup backlog in the accepted profile.
+  These runs used deterministic local targets and do not measure challenge success.
+  See the [recorded evidence](docs/benchmarks/README.md) for versions, environments,
+  and the scope of each measurement. A separate macOS source run on 2.0.2 also
+  completed 45 load requests and 16 canary requests with eight browser recycle
+  cycles; it does not measure Docker resource limits or third-party integrations.
 - **Hardened, verifiable delivery.** The container runs as a non-root user; Compose
   binds to loopback, requires a token, drops Linux capabilities, and applies memory,
   shared-memory, and PID limits. The Camoufox browser archive and its default uBlock
@@ -65,6 +69,11 @@ Unknown fields are also ignored for compatibility.
 No named third-party client integration is currently part of CI, so the project
 does not claim verified drop-in compatibility with Prowlarr, Jackett, Sonarr, or
 similar clients. See `/documentation` for the full field and behavior reference.
+
+Before connecting a client, check that it supports the required authentication and
+the GET/POST transport rules described below. The supplied Docker and Compose setup
+requires `Authorization: Bearer <token>` or `X-API-Token: <token>` on `/v1`; configuring
+only a service URL is insufficient for a client that cannot send either header.
 
 ## Run with Docker
 
@@ -274,7 +283,9 @@ Request completion records expose `result`, `http_status`, `duration_ms`, and an
 `error_code` when applicable. JSON logs retain the same redacted fields under `fields`;
 URLs lose credentials, paths, and queries, and sensitive values are masked.
 
-Challenge handling is disabled by default. To enable the optional
+Active click-based challenge handling is disabled by default. Browser-side challenges
+may still clear on their own within the request deadline; success depends on the target.
+To enable the optional
 [playwright-captcha](https://pypi.org/project/playwright-captcha/) ClickSolver:
 
 ```bash
@@ -283,7 +294,7 @@ CHALLENGE_SOLVER=click uv run python -m camouflare
 
 ## Deployment notes
 
-Camouflare 1.x is designed for a single user and a single application worker.
+Camouflare is designed for a single trusted user and a single application worker.
 Browser and session state is kept in the process, so multiple workers do not share
 sessions.
 

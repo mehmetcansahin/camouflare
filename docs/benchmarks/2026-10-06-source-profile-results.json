@@ -1,0 +1,294 @@
+{
+  "acceptance": {
+    "all_requests_succeeded": true,
+    "idle_after": true,
+    "zero_acquire_timeouts": true,
+    "zero_asyncio_unhandled": true,
+    "zero_browser_transport_errors": true,
+    "zero_v1_errors": true
+  },
+  "aggregates": [
+    {
+      "client_errors": 0,
+      "client_p50_ms": 1077.818,
+      "client_p95_ms": 1387.008,
+      "concurrency": 1,
+      "internal_p50_ms": 1075.0,
+      "internal_p95_ms": 1383.0,
+      "load": "Sequential baseline",
+      "requests": 10,
+      "server_errors": 0,
+      "success_rate": 1.0,
+      "successes": 10,
+      "timeouts": 0
+    },
+    {
+      "client_errors": 0,
+      "client_p50_ms": 1097.368,
+      "client_p95_ms": 1124.414,
+      "concurrency": 1,
+      "internal_p50_ms": 1095.0,
+      "internal_p95_ms": 1122.0,
+      "load": "1 concurrent",
+      "requests": 5,
+      "server_errors": 0,
+      "success_rate": 1.0,
+      "successes": 5,
+      "timeouts": 0
+    },
+    {
+      "client_errors": 0,
+      "client_p50_ms": 1264.225,
+      "client_p95_ms": 2891.708,
+      "concurrency": 2,
+      "internal_p50_ms": 1259.0,
+      "internal_p95_ms": 2888.0,
+      "load": "2 concurrent",
+      "requests": 10,
+      "server_errors": 0,
+      "success_rate": 1.0,
+      "successes": 10,
+      "timeouts": 0
+    },
+    {
+      "client_errors": 0,
+      "client_p50_ms": 1393.579,
+      "client_p95_ms": 2648.34,
+      "concurrency": 4,
+      "internal_p50_ms": 1386.0,
+      "internal_p95_ms": 2637.0,
+      "load": "4 concurrent",
+      "requests": 20,
+      "server_errors": 0,
+      "success_rate": 1.0,
+      "successes": 20,
+      "timeouts": 0
+    }
+  ],
+  "diagnostics": {
+    "idle_after": {
+      "capacity_state": "available",
+      "cleanup": {
+        "by_kind": {},
+        "in_flight": 0,
+        "oldest_age_seconds": null
+      },
+      "pool": {
+        "active_contexts": 0,
+        "closing_slots": 0,
+        "creating_slots": 0,
+        "idle_recyclable_slots": 0,
+        "max_browsers": 2,
+        "max_contexts_per_browser": 1,
+        "max_slots": 2,
+        "persistent_contexts": 0,
+        "ready_browser_slots": 2,
+        "retiring_browser_slots": 0,
+        "transient_contexts": 0,
+        "usable_context_slots": 2,
+        "waiting_requests": 0
+      },
+      "runtime": {
+        "playwright_cancel_patch": "applied",
+        "playwright_version": "1.61.0"
+      },
+      "sessions": {
+        "active": 0,
+        "closing": 0,
+        "in_use": 0,
+        "max_sessions": 32
+      },
+      "status": "ok"
+    },
+    "idle_before": {
+      "capacity_state": "available",
+      "cleanup": {
+        "by_kind": {},
+        "in_flight": 0,
+        "oldest_age_seconds": null
+      },
+      "pool": {
+        "active_contexts": 0,
+        "closing_slots": 0,
+        "creating_slots": 0,
+        "idle_recyclable_slots": 0,
+        "max_browsers": 2,
+        "max_contexts_per_browser": 1,
+        "max_slots": 2,
+        "persistent_contexts": 0,
+        "ready_browser_slots": 2,
+        "retiring_browser_slots": 0,
+        "transient_contexts": 0,
+        "usable_context_slots": 2,
+        "waiting_requests": 0
+      },
+      "runtime": {
+        "playwright_cancel_patch": "applied",
+        "playwright_version": "1.61.0"
+      },
+      "sessions": {
+        "active": 0,
+        "closing": 0,
+        "in_use": 0,
+        "max_sessions": 32
+      },
+      "status": "ok"
+    }
+  },
+  "environment": {
+    "client_os": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+    "client_python": "3.14.7",
+    "image": null,
+    "label": "Source checkout e21587abab2499c129e4d051e5807899abf802be; macOS-26.6.2-arm64-arm-64bit-Mach-O; Python 3.14.7; Camoufox 152.0.4-beta.29; HEADLESS=true; two browsers, one context each; POOL_RESERVED_TRANSIENT_CONTEXTS=1; POOL_ACQUIRE_TIMEOUT_MS=10000; no container memory, shared-memory, or PID limits; deterministic loopback HTTP target; BROWSER_MAX_AGE_MINUTES=120; BROWSER_MAX_USES=200"
+  },
+  "failures": [],
+  "generated_at": "2026-10-06T10:10:55.591077Z",
+  "method": {
+    "api_max_timeout_ms": 60000,
+    "client_timeout_seconds": 70,
+    "command": "request.get",
+    "concurrency_levels": [
+      1,
+      2,
+      4
+    ],
+    "idle_gate": "active=0, waiting=0, creating=0, closing=0, cleanup_in_flight=0",
+    "latency_percentiles_include": "successful requests only",
+    "metrics_required": true,
+    "percentile_method": "nearest-rank",
+    "rounds_per_concurrency": 5,
+    "sequential_requests": 10,
+    "warmup_requests_excluded": 3
+  },
+  "prometheus_delta": {
+    "camouflare_challenge_total{outcome=\"not_detected\"}": 45.0,
+    "camouflare_cleanup_total{kind=\"captcha\",result=\"success\"}": 45.0,
+    "camouflare_cleanup_total{kind=\"context\",result=\"success\"}": 45.0,
+    "camouflare_cleanup_total{kind=\"page\",result=\"success\"}": 45.0,
+    "camouflare_cleanup_total{kind=\"proxy\",result=\"success\"}": 45.0,
+    "camouflare_pool_acquire_total{kind=\"transient\",result=\"success\"}": 45.0,
+    "camouflare_request_total{command=\"request.get\",result=\"ok\"}": 45.0
+  },
+  "schema_version": 2,
+  "service": {
+    "base_url": "http://127.0.0.1:60392",
+    "target_url": "http://127.0.0.1:60391/",
+    "version": "2.0.2"
+  },
+  "successful_latency_samples_ms": {
+    "concurrency_1": {
+      "client": [
+        1097.368,
+        1068.162,
+        1124.414,
+        1060.657,
+        1099.026
+      ],
+      "internal": [
+        1095,
+        1065,
+        1122,
+        1058,
+        1097
+      ]
+    },
+    "concurrency_2": {
+      "client": [
+        1216.33,
+        1528.862,
+        1213.784,
+        1264.225,
+        1353.125,
+        2891.708,
+        1212.956,
+        1202.547,
+        1400.425,
+        1392.252
+      ],
+      "internal": [
+        1214,
+        1525,
+        1211,
+        1259,
+        1348,
+        2888,
+        1210,
+        1198,
+        1396,
+        1386
+      ]
+    },
+    "concurrency_4": {
+      "client": [
+        1380.26,
+        1393.579,
+        2628.57,
+        2645.622,
+        1255.82,
+        1274.313,
+        2595.26,
+        2538.808,
+        1333.907,
+        1313.067,
+        2583.472,
+        2598.42,
+        1245.014,
+        1263.74,
+        2650.086,
+        2648.34,
+        1339.432,
+        1332.059,
+        2627.835,
+        2631.837
+      ],
+      "internal": [
+        1372,
+        1386,
+        2620,
+        2637,
+        1248,
+        1268,
+        2590,
+        2533,
+        1331,
+        1305,
+        2575,
+        2591,
+        1239,
+        1258,
+        2644,
+        2637,
+        1334,
+        1325,
+        2621,
+        2624
+      ]
+    },
+    "sequential": {
+      "client": [
+        1113.921,
+        1119.702,
+        1387.008,
+        1062.966,
+        1257.345,
+        1141.143,
+        1077.818,
+        1066.344,
+        1062.759,
+        1073.992
+      ],
+      "internal": [
+        1111,
+        1117,
+        1383,
+        1061,
+        1255,
+        1139,
+        1075,
+        1064,
+        1061,
+        1072
+      ]
+    }
+  }
+}

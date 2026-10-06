@@ -55,7 +55,7 @@ and rate limiting appropriate for the environment.
 Camouflare binds to `127.0.0.1` by default and refuses to start on a non-loopback
 `HOST` unless `CAMOUFLARE_API_TOKEN` is configured.
 
-The supported 1.0 deployment model is one trusted user and one worker per
+The supported deployment model is one trusted user and one worker per
 instance. Private and loopback target URLs are intentionally available. Do not
 share a session namespace between mutually untrusted users; use a separate
 container or instance for each trust boundary.

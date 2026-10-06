@@ -29,7 +29,7 @@ uv run python scripts/benchmark_service.py \
   --base-url http://127.0.0.1:8191 \
   --target-url http://host.docker.internal:18194/ \
   --output docs/benchmarks/<date>-<environment>-results.json \
-  --expected-version 1.3.3 \
+  --expected-version 2.0.2 \
   --environment-label "<host, image platform, limits, and pool profile>" \
   --image "<immutable image digest>" \
   --require-metrics
@@ -78,6 +78,70 @@ The legacy schema 1 file uses `concurrency_4_failures` and
 timestamps in Camouflare's response. Percentiles include successful requests only.
 
 ## Runs
+
+### 2026-10-06, 2.0.2 source checkout
+
+`2026-10-06-source-profile-results.json` and
+`2026-10-06-source-canary-results.json`. These runs used source checkout
+`e21587abab2499c129e4d051e5807899abf802be`, whose application code and dependency lock
+match the published 2.0.2 tag, on macOS 26.6.2 arm64 with Python 3.14.7 and Camoufox
+152.0.4-beta.29. The service used the normal application browser factory with
+`HEADLESS=true`, two warm browsers, one context per browser,
+`POOL_RESERVED_TRANSIENT_CONTEXTS=1`, and `POOL_ACQUIRE_TIMEOUT_MS=10000` against a
+deterministic loopback HTTP target serving a fixed HTML document.
+
+Docker was unavailable on this host. These are source-installation measurements:
+`environment.image` is null, and no container memory, shared-memory, or PID limits
+were enforced. They do not revalidate the published Docker image, measure challenge
+success or third-party client compatibility, or establish performance improvements
+over the earlier Linux container runs. The published image's platform smoke and
+security gates are recorded in [the release record](../releases.md).
+
+#### Isolated-context load profile
+
+All 45 measured requests completed, including the four-client load. Prometheus
+recorded zero acquire timeouts, unhandled asyncio events, browser transport errors,
+or `/v1` errors. The final snapshot had two ready browsers, `capacity_state`
+`available`, and no active, waiting, creating, or closing work or cleanup backlog.
+Browser max age was 120 minutes and the max-use limit was 200.
+
+| Load | Requests | Successes | HTTP errors | client p50 | client p95 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Sequential baseline | 10 | 10 | 0 | 1078 ms | 1387 ms |
+| 1 concurrent | 5 | 5 | 0 | 1097 ms | 1124 ms |
+| 2 concurrent | 10 | 10 | 0 | 1264 ms | 2892 ms |
+| 4 concurrent | 20 | 20 | 0 | 1394 ms | 2648 ms |
+
+#### Lifecycle canary
+
+With a one-minute browser max age and a two-use limit, all 16 measured requests
+completed. The run observed eight `max_uses` recycle operations and eight replacement
+launches, zero request or transport errors, zero acquire timeouts, zero unhandled
+asyncio events, and an idle final snapshot with two ready browsers and no cleanup
+backlog.
+
+| Load | Requests | Successes | HTTP errors | client p50 | client p95 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Sequential baseline | 4 | 4 | 0 | 1120 ms | 1526 ms |
+| 4 concurrent | 12 | 12 | 0 | 2281 ms | 3874 ms |
+
+#### Idle-age observation
+
+`2026-10-06-source-idle-age-results.json` records a separate 80-second observation
+with a one-minute browser max age and a 200-use limit. The higher use limit prevents
+the readiness probes from triggering use-based recycling. All eight readiness probes
+succeeded; both browsers were recycled by `max_age` and replaced. The final snapshot
+had two ready browsers, available capacity, and no cleanup backlog. No unhandled
+asyncio events or browser transport errors were recorded.
+
+To reproduce the source profile, serve a fixed HTML fixture on loopback, start
+`python -m camouflare` with the settings above and `PROMETHEUS_ENABLED=true`, and
+use `scripts/benchmark_service.py` with a loopback `--base-url`, the fixture's
+`--target-url`, `--expected-version 2.0.2`, and `--require-metrics`. Omit `--image`
+for a source run. Use the default request counts for the load profile; restart
+with `BROWSER_MAX_AGE_MINUTES=1` and `BROWSER_MAX_USES=2` and the shorter request
+counts shown above for the canary. Preserve the runtime and target conditions
+when comparing results.
 
 ### 2026-09-06, published 2.0.0 image
 
