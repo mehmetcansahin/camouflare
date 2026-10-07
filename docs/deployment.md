@@ -113,6 +113,16 @@ tags the scanned index digest. A run that fails before that step leaves only an 
 package version, which no tag references and which maintainers may delete from the GHCR
 package settings.
 
+After GHCR publication succeeds, a separate job in the protected `release` environment
+copies that exact index to `docker.io/mehmetcansahin/camouflare:<version>`. It preserves
+the linux/amd64, linux/arm64, and attached BuildKit SBOM/provenance manifests and verifies
+the destination digest. GitHub's additional provenance attestation remains on GHCR.
+An existing Docker Hub version is skipped only when its digest matches; a conflicting
+version or an ambiguous registry response fails without an overwrite. Docker Hub failure
+does not roll back the GHCR release; re-run the failed mirror job after fixing access.
+Enable immutable tags in Docker Hub to prevent other writers from replacing versions.
+See the [one-time setup and existing-version backfill](release-checklist.md#docker-hub).
+
 Docker and release jobs fetch the exact Camoufox tag declared in
 `scripts/camoufox-artifacts.json`, install only archives listed there, and verify each
 download against its reviewed SHA-256 digest before extraction. Camoufox's default browser
