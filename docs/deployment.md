@@ -93,9 +93,10 @@ whenever `SHUTDOWN_TIMEOUT_SECONDS` is raised.
 
 ## Version and architecture policy
 
-Releases use exact `MAJOR.MINOR.PATCH` image tags for linux/amd64 and linux/arm64;
-there are no rolling `latest`, major, or major/minor tags. Compose defaults to the public
-Docker Hub image. GHCR also hosts the release history; [the release record](releases.md)
+Releases use exact `MAJOR.MINOR.PATCH` image tags for linux/amd64 and linux/arm64.
+Docker Hub's `latest` follows the newest release for quick trials; pin an exact version
+in deployments. There are no major or major/minor tags, and GHCR has no `latest`.
+Compose defaults to the public Docker Hub image. GHCR also hosts the release history; [the release record](releases.md)
 identifies which versions were mirrored to Docker Hub and records their immutable digests.
 
 Mirrored versions have identical index and platform digests, including attached BuildKit

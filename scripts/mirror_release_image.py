@@ -10,11 +10,61 @@ import sys
 
 from scripts.check_release_destinations import _image_tag_digest
 
+RELEASE_TAG = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
+
+
+def _release_tags() -> list[str]:
+    listing = subprocess.run(
+        ["git", "ls-remote", "--tags", "--refs", "origin"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    return [line.rpartition("refs/tags/")[2] for line in listing.splitlines() if line]
+
+
+def _version(tag: str) -> tuple[int, int, int] | None:
+    match = RELEASE_TAG.fullmatch(tag)
+    if match is None:
+        return None
+    major, minor, patch = (int(part) for part in match.groups())
+    return major, minor, patch
+
+
+def _point_latest(*, tag: str, destination_image: str, digest: str) -> None:
+    versions = [version for version in map(_version, _release_tags()) if version is not None]
+    if _version(tag) not in versions:
+        raise RuntimeError(f"{tag} is not a release tag in the repository; latest unchanged.")
+    if _version(tag) != max(versions):
+        print(f"{tag} is not the newest release; latest unchanged.")
+        return
+
+    latest = f"{destination_image}:latest"
+    if _image_tag_digest(latest) == digest:
+        print(f"{latest} already names {digest}; no update needed.")
+        return
+    # Unlike version tags, latest is expected to move, so an existing digest is replaced.
+    subprocess.run(
+        [
+            "docker",
+            "buildx",
+            "imagetools",
+            "create",
+            "--tag",
+            latest,
+            f"{destination_image}@{digest}",
+        ],
+        check=True,
+    )
+    if _image_tag_digest(latest) != digest:
+        raise RuntimeError(f"Updated {latest} does not match the release digest.")
+    print(f"Verified {latest}@{digest}.")
+
 
 def mirror_release_image(
-    *, tag: str, source_image: str, digest: str, destination_image: str
+    *, tag: str, source_image: str, digest: str, destination_image: str, latest: bool = False
 ) -> None:
-    if re.fullmatch(r"v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", tag) is None:
+    if _version(tag) is None:
         raise ValueError("Expected an exact vMAJOR.MINOR.PATCH release tag.")
     if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
         raise ValueError("Expected an exact sha256 image index digest.")
@@ -30,17 +80,19 @@ def mirror_release_image(
         if existing_digest != digest:
             raise RuntimeError(f"Refusing to replace {destination}: it names {existing_digest}.")
         print(f"{destination} already names {digest}; no copy needed.")
-        return
+    else:
+        # A single index source retains both platform manifests and the attached BuildKit
+        # SBOM/provenance manifests. Do not rebuild or add annotations that change its digest.
+        subprocess.run(
+            ["docker", "buildx", "imagetools", "create", "--tag", destination, source],
+            check=True,
+        )
+        if _image_tag_digest(destination) != digest:
+            raise RuntimeError(f"Copied {destination} does not match the source release digest.")
+        print(f"Verified {destination}@{digest}.")
 
-    # A single index source retains both platform manifests and the attached BuildKit
-    # SBOM/provenance manifests. Do not rebuild or add annotations that change its digest.
-    subprocess.run(
-        ["docker", "buildx", "imagetools", "create", "--tag", destination, source],
-        check=True,
-    )
-    if _image_tag_digest(destination) != digest:
-        raise RuntimeError(f"Copied {destination} does not match the source release digest.")
-    print(f"Verified {destination}@{digest}.")
+    if latest:
+        _point_latest(tag=tag, destination_image=destination_image, digest=digest)
 
 
 def main() -> int:
@@ -53,6 +105,11 @@ def main() -> int:
     parser.add_argument(
         "--destination-image", required=True, help="Destination image name without tag"
     )
+    parser.add_argument(
+        "--latest",
+        action="store_true",
+        help="Also point the destination's latest tag here when this is the newest release",
+    )
     args = parser.parse_args()
     try:
         mirror_release_image(
@@ -60,6 +117,7 @@ def main() -> int:
             source_image=args.source_image,
             digest=args.digest,
             destination_image=args.destination_image,
+            latest=args.latest,
         )
     except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError) as exc:
         print(f"release mirror error: {exc}", file=sys.stderr)

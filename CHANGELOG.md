@@ -5,6 +5,12 @@ All notable changes to Camouflare are documented here. The project follows
 
 ## [Unreleased]
 
+### Changed
+
+- The Docker Hub mirror points `latest` at a release when it is the newest
+  `vMAJOR.MINOR.PATCH` tag in the repository; version tags stay immutable and GHCR keeps
+  exact version tags only.
+
 ## [2.0.2] - 2026-10-05
 
 ### Fixed

@@ -62,3 +62,4 @@ jobs:
           --source-image "${IMAGE_NAME}"
           --digest "${SOURCE_DIGEST}"
           --destination-image "${DOCKERHUB_IMAGE_NAME}"
+          --latest

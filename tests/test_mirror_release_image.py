@@ -93,6 +93,103 @@ def test_mirror_rejects_missing_source_conflicts_and_ambiguous_checks_before_cop
     assert copies == []
 
 
+LATEST = "docker.io/example/camouflare:latest"
+LATEST_SOURCE = f"docker.io/example/camouflare@{DIGEST}"
+
+
+def _mirror_latest(monkeypatch: pytest.MonkeyPatch, release_tags: list[str]) -> None:
+    monkeypatch.setattr(mirror_release_image, "_release_tags", lambda: release_tags)
+    mirror_release_image.mirror_release_image(
+        tag="v2.0.2",
+        source_image="ghcr.io/example/camouflare",
+        digest=DIGEST,
+        destination_image="docker.io/example/camouflare",
+        latest=True,
+    )
+
+
+def test_mirror_points_latest_at_the_newest_release_after_copying(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inspections, copies = _stub_registry(monkeypatch, [DIGEST, None, DIGEST, OTHER_DIGEST, DIGEST])
+
+    _mirror_latest(monkeypatch, ["v1.4.0", "v2.0.2", "v2.0.1", "v10-rc"])
+
+    assert inspections == [SOURCE_TAG, DESTINATION, DESTINATION, LATEST, LATEST]
+    assert copies == [
+        ["docker", "buildx", "imagetools", "create", "--tag", DESTINATION, SOURCE],
+        ["docker", "buildx", "imagetools", "create", "--tag", LATEST, LATEST_SOURCE],
+    ]
+
+
+def test_mirror_backfills_latest_for_an_already_mirrored_newest_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inspections, copies = _stub_registry(monkeypatch, [DIGEST, DIGEST, None, DIGEST])
+
+    _mirror_latest(monkeypatch, ["v2.0.2"])
+
+    assert inspections == [SOURCE_TAG, DESTINATION, LATEST, LATEST]
+    assert copies == [["docker", "buildx", "imagetools", "create", "--tag", LATEST, LATEST_SOURCE]]
+
+
+def test_mirror_leaves_latest_alone_when_it_already_names_the_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inspections, copies = _stub_registry(monkeypatch, [DIGEST, DIGEST, DIGEST])
+
+    _mirror_latest(monkeypatch, ["v2.0.2"])
+
+    assert inspections == [SOURCE_TAG, DESTINATION, LATEST]
+    assert copies == []
+
+
+def test_mirror_does_not_move_latest_back_to_an_older_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inspections, copies = _stub_registry(monkeypatch, [DIGEST, DIGEST])
+
+    # A patch for an older line must not replace latest; 2.0.10 sorts above 2.0.2.
+    _mirror_latest(monkeypatch, ["v2.0.2", "v2.0.10"])
+
+    assert inspections == [SOURCE_TAG, DESTINATION]
+    assert copies == []
+
+
+def test_mirror_refuses_latest_for_a_tag_missing_from_the_repository(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, copies = _stub_registry(monkeypatch, [DIGEST, DIGEST])
+
+    with pytest.raises(RuntimeError, match="not a release tag"):
+        _mirror_latest(monkeypatch, ["v2.0.1"])
+
+    assert copies == []
+
+
+def test_mirror_fails_if_updated_latest_does_not_match(monkeypatch: pytest.MonkeyPatch) -> None:
+    _, copies = _stub_registry(monkeypatch, [DIGEST, DIGEST, None, OTHER_DIGEST])
+
+    with pytest.raises(RuntimeError, match="does not match"):
+        _mirror_latest(monkeypatch, ["v2.0.2"])
+
+    assert len(copies) == 1
+
+
+def test_release_tags_reads_tag_names_from_the_remote(monkeypatch: pytest.MonkeyPatch) -> None:
+    commands: list[list[str]] = []
+
+    def ls_remote(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        stdout = f"{'1' * 40}\trefs/tags/v2.0.1\n{'2' * 40}\trefs/tags/v2.0.2\n"
+        return subprocess.CompletedProcess(command, 0, stdout=stdout)
+
+    monkeypatch.setattr(mirror_release_image.subprocess, "run", ls_remote)
+
+    assert mirror_release_image._release_tags() == ["v2.0.1", "v2.0.2"]
+    assert commands == [["git", "ls-remote", "--tags", "--refs", "origin"]]
+
+
 @pytest.mark.parametrize("copied_digest", [None, OTHER_DIGEST])
 def test_mirror_fails_if_copied_index_does_not_match(
     monkeypatch: pytest.MonkeyPatch, copied_digest: str | None
@@ -168,6 +265,7 @@ def test_dockerhub_job_only_mirrors_the_successfully_published_digest() -> None:
     assert copy["env"]["SOURCE_DIGEST"] == "${{ needs.publish.outputs.image-digest }}"
     assert '--digest "${SOURCE_DIGEST}"' in copy["run"]
     assert '--destination-image "${DOCKERHUB_IMAGE_NAME}"' in copy["run"]
+    assert copy["run"].split()[-1] == "--latest"
     assert not any(step.get("uses", "").startswith("docker/build-push-action@") for step in steps)
 
 
@@ -190,6 +288,7 @@ def test_manual_mirror_requires_explicit_release_inputs_and_protected_environmen
     assert mirror["environment"]["name"] == "release"
     assert "scripts.mirror_release_image" in mirror["steps"][-1]["run"]
     assert '--digest "${SOURCE_DIGEST}"' in mirror["steps"][-1]["run"]
+    assert mirror["steps"][-1]["run"].split()[-1] == "--latest"
     assert not any(
         step.get("uses", "").startswith("docker/build-push-action@") for step in mirror["steps"]
     )

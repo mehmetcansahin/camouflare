@@ -20,14 +20,18 @@ environment before publication.
 ### Docker Hub
 
 - Create a public `mehmetcansahin/camouflare` repository on Docker Hub.
-- Enable **All tags are immutable** in the repository's **Settings > General > Tag
-  mutability settings**. The mirror helper also refuses to replace any different digest.
+- In the repository's **Settings > General > Tag mutability settings**, make only version
+  tags immutable with the rule `^[0-9]+\.[0-9]+\.[0-9]+$`. `latest` must stay mutable so
+  each new release can move it. The mirror helper also refuses to replace a version tag
+  that names a different digest.
 - Create a Docker Hub personal access token with **Read & Write** permissions and an
   expiry date. Store it as `DOCKERHUB_TOKEN` in the GitHub `release` environment; the
   workflow uses `mehmetcansahin` as the login username. Do not paste the token into chat
   or commit it. Keep the token renewed before it expires.
-- Confirm the mirror job runs only after the GHCR publish job succeeds. Only exact
-  version tags are copied; there is no `latest` tag.
+- Confirm the mirror job runs only after the GHCR publish job succeeds. The exact version
+  tag is copied, and Docker Hub's `latest` is pointed at the same digest only when the
+  release is the newest `vMAJOR.MINOR.PATCH` tag in the repository, so a patch for an
+  older line never moves it back. GHCR has no `latest` tag.
 
 The 2.0.2 release was mirrored to Docker Hub on 2026-10-07 with the same index and
 platform digests as GHCR; the completed mirror run is recorded in [releases.md](releases.md).
@@ -36,12 +40,14 @@ The tag-push workflow uses the workflow source stored in that tag's commit. Re-r
 a release created before the Docker Hub job was added therefore does not include that
 job. To mirror another existing release, run **Mirror existing release to Docker Hub**
 in GitHub Actions with the exact source tag and its verified index digest from
-[releases.md](releases.md). It uses the same protected `release` environment and checks
-that the GHCR version tag matches the supplied digest before copying.
+[releases.md](releases.md). It uses the same protected `release` environment, checks
+that the GHCR version tag matches the supplied digest before copying, and moves `latest`
+only when that tag is the newest release.
 
 For a local backfill, install Docker CLI with Buildx and sign in from a checkout
 containing the mirror helper. This 2.0.2 example skips the copy when the destination
-already has the recorded digest:
+already has the recorded digest; `--latest` also points `latest` at it while 2.0.2 is the
+newest release:
 
 ```bash
 docker login --username mehmetcansahin
@@ -49,7 +55,8 @@ python3 -m scripts.mirror_release_image \
   --tag v2.0.2 \
   --source-image ghcr.io/mehmetcansahin/camouflare \
   --digest sha256:f4c2b7acba6974f89dfc01c3dba72404290d0d3f6f8a6abb311e632478da7fc3 \
-  --destination-image docker.io/mehmetcansahin/camouflare
+  --destination-image docker.io/mehmetcansahin/camouflare \
+  --latest
 ```
 
 Enter the token at the password prompt. GHCR's public image needs no login for this

@@ -79,7 +79,8 @@ only a service URL is insufficient for a client that cannot send either header.
 ## Run with Docker
 
 The published image is available on [Docker Hub](https://hub.docker.com/r/mehmetcansahin/camouflare)
-for `linux/amd64` and `linux/arm64`. The examples below use the `2.0.2` release.
+for `linux/amd64` and `linux/arm64`. The examples below pin the `2.0.2` release;
+`mehmetcansahin/camouflare:latest` follows the newest release for quick trials.
 
 ```bash
 docker pull mehmetcansahin/camouflare:2.0.2
