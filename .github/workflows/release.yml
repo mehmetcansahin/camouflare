@@ -16,6 +16,7 @@ env:
   UV_VERSION: "0.11.16"
   RELEASE_TAG: ${{ github.ref_name }}
   IMAGE_NAME: ghcr.io/${{ github.repository }}
+  DOCKERHUB_IMAGE_NAME: docker.io/mehmetcansahin/camouflare
 
 jobs:
   build-package:
@@ -274,6 +275,8 @@ jobs:
     needs: [build-package, release-unit, release-quality, release-browser, release-gate]
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    outputs:
+      image-digest: ${{ steps.image.outputs.digest }}
     environment:
       name: release
     permissions:
@@ -487,3 +490,43 @@ jobs:
           subject-name: ${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.image.outputs.digest }}
           push-to-registry: true
+
+  publish-dockerhub:
+    name: Mirror verified release to Docker Hub
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment:
+      name: release
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Log in to Docker Hub
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: docker.io
+          username: mehmetcansahin
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Copy the published index and verify the Docker Hub digest
+        env:
+          SOURCE_DIGEST: ${{ needs.publish.outputs.image-digest }}
+        run: >-
+          python3 -m scripts.mirror_release_image
+          --tag "${RELEASE_TAG}"
+          --source-image "${IMAGE_NAME}"
+          --digest "${SOURCE_DIGEST}"
+          --destination-image "${DOCKERHUB_IMAGE_NAME}"

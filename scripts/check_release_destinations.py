@@ -35,12 +35,14 @@ def _image_tag_digest(reference: str) -> str | None:
     if result.returncode == 0:
         match = IMAGE_DIGEST.search(result.stdout)
         if match is None:
-            raise RuntimeError("GHCR returned an image without a parseable index digest.")
+            raise RuntimeError(f"Registry returned {reference} without a parseable index digest.")
         return match.group(1)
     message = f"{result.stdout}\n{result.stderr}"
     if _definitively_absent_image(reference, message):
         return None
-    raise RuntimeError("GHCR availability check failed without a definitive not-found result.")
+    raise RuntimeError(
+        f"Registry check for {reference} failed without a definitive not-found result."
+    )
 
 
 def _image_tag_exists(reference: str) -> bool:
@@ -56,7 +58,9 @@ def _image_tag_exists(reference: str) -> bool:
         return True
     if _definitively_absent_image(reference, f"{result.stdout}\n{result.stderr}"):
         return False
-    raise RuntimeError("GHCR availability check failed without a definitive not-found result.")
+    raise RuntimeError(
+        f"Registry check for {reference} failed without a definitive not-found result."
+    )
 
 
 def _write_github_output(*, image_digest: str | None) -> None:

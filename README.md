@@ -120,6 +120,13 @@ docker compose up -d
 is unset. Use `docker compose up --build` to build the image locally instead of
 pulling it.
 
+After a version has been mirrored to Docker Hub, use
+`mehmetcansahin/camouflare:<version>` in `docker run`, or set
+`CAMOUFLARE_IMAGE=docker.io/mehmetcansahin/camouflare:<version>` for Compose. The
+release workflow copies the verified GHCR index, including both architectures and
+the attached BuildKit SBOM/provenance, and checks that its digest is identical.
+See the [Docker Hub setup and backfill instructions](docs/release-checklist.md#docker-hub).
+
 The production profile keeps two warm browser processes with one isolated context
 per browser, so two requests run at a time. `POOL_RESERVED_TRANSIENT_CONTEXTS` holds one
 of those two slots for stateless traffic, which leaves room for exactly one concurrent
