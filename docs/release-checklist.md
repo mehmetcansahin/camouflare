@@ -65,7 +65,9 @@ This follows Docker's [registry-to-registry copy workflow](https://docs.docker.c
 - [ ] Update `camouflare.__version__` and package metadata to the same semantic version.
 - [ ] Move reviewed entries from `Unreleased` to a dated changelog heading.
 - [ ] Obtain maintainer approval for the exact changelog/release wording.
-- [ ] Confirm all CI jobs pass on Python 3.11–3.14.
+- [ ] Confirm CI passes unit tests on Python 3.11 and unit tests with coverage on Python 3.14,
+  plus the linux/amd64 container checks. The release workflow covers Python 3.11–3.14
+  and both linux/amd64 and linux/arm64 before publication.
 - [ ] Confirm real-browser, package-install, Docker smoke, coverage, type, and format gates pass.
 - [ ] Confirm the exact Camoufox `release_tag`, every archive, and every `addons` pin in
   `scripts/camoufox-artifacts.json` match independently verified upstream metadata and

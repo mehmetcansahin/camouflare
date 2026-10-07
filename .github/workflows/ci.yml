@@ -17,13 +17,9 @@ env:
 
 jobs:
   unit:
-    name: Unit tests (Python ${{ matrix.python-version }})
+    name: Unit tests (Python 3.11)
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       - name: Check out source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -32,7 +28,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.11"
       - name: Set up uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
@@ -76,11 +72,6 @@ jobs:
           uv run --with pytest-cov==7.1.0 python -m pytest tests
           --ignore=tests/integration --ignore=tests/soak
           --cov=camouflare --cov-report=term-missing --cov-fail-under=85 -q
-      - name: Validate security exception policy
-        run: >-
-          python scripts/render_security_allowlist.py
-          --source .github/security-allowlist.json
-          --output .github/.trivyignore.generated
 
   package:
     name: Build and install package
@@ -184,20 +175,14 @@ jobs:
           format: table
 
   container:
-    name: Container (${{ matrix.arch }})
+    name: Container (amd64)
     runs-on: ubuntu-24.04
     timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [amd64, arm64]
     steps:
       - name: Check out source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
       - name: Set up Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
       - name: Fetch authenticated Camoufox release metadata
@@ -206,28 +191,22 @@ jobs:
         run: |
           camoufox_tag="$(python3 -c 'import json; print(json.load(open("scripts/camoufox-artifacts.json"))["release_tag"])')"
           gh api "repos/daijro/camoufox/releases/tags/${camoufox_tag}" > "${RUNNER_TEMP}/camoufox-releases.json"
-      - name: Build linux/${{ matrix.arch }} runtime image
+      - name: Build linux/amd64 runtime image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
-          platforms: linux/${{ matrix.arch }}
+          platforms: linux/amd64
           load: true
           push: false
-          tags: camouflare:ci-${{ matrix.arch }}
+          tags: camouflare:ci-amd64
           provenance: false
           sbom: false
           secret-files: |
             camoufox_releases=${{ runner.temp }}/camoufox-releases.json
-          cache-from: type=gha,scope=container-ci-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=container-ci-${{ matrix.arch }}
+          cache-from: type=gha,scope=container-ci-amd64
+          cache-to: type=gha,mode=max,scope=container-ci-amd64
       - name: Run health, readiness, and local-target smoke
-        env:
-          CAMOUFLARE_SMOKE_POOL_ACQUIRE_TIMEOUT_MS: ${{ matrix.arch == 'arm64' && '120000' || '30000' }}
-          CAMOUFLARE_SMOKE_READINESS_TIMEOUT_MS: ${{ matrix.arch == 'arm64' && '120000' || '15000' }}
-          CAMOUFLARE_SMOKE_REQUEST_TIMEOUT_MS: ${{ matrix.arch == 'arm64' && '120000' || '60000' }}
-          CAMOUFLARE_SMOKE_CURL_TIMEOUT_SECONDS: ${{ matrix.arch == 'arm64' && '180' || '90' }}
-          CAMOUFLARE_SMOKE_STARTUP_TIMEOUT_SECONDS: ${{ matrix.arch == 'arm64' && '180' || '120' }}
-        run: bash scripts/container_smoke.sh camouflare:ci-${{ matrix.arch }}
+        run: bash scripts/container_smoke.sh camouflare:ci-amd64
       - name: Render active security exceptions
         run: >-
           python3 scripts/render_security_allowlist.py
@@ -236,7 +215,7 @@ jobs:
       - name: Scan runtime image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: camouflare:ci-${{ matrix.arch }}
+          image-ref: camouflare:ci-amd64
           severity: HIGH,CRITICAL
           exit-code: "1"
           ignore-unfixed: "false"
@@ -245,23 +224,23 @@ jobs:
       - name: Generate runtime SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
-          image: camouflare:ci-${{ matrix.arch }}
+          image: camouflare:ci-amd64
           format: spdx-json
-          output-file: image-${{ matrix.arch }}.spdx.json
+          output-file: image-amd64.spdx.json
           upload-artifact: false
           upload-release-assets: false
       - name: Upload runtime SBOM
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: runtime-sbom-${{ matrix.arch }}
-          path: image-${{ matrix.arch }}.spdx.json
+          name: runtime-sbom-amd64
+          path: image-amd64.spdx.json
           if-no-files-found: error
           retention-days: 14
       - name: Read current and released image sizes
         id: sizes
         shell: bash
         env:
-          ARCH: ${{ matrix.arch }}
+          ARCH: amd64
           BASELINE_IMAGE: ghcr.io/${{ github.repository }}:${{ vars.IMAGE_SIZE_BASELINE_TAG || '1.0.0' }}
         run: |
           current="$(docker image inspect "camouflare:ci-${ARCH}" --format '{{.Size}}')"
@@ -277,12 +256,12 @@ jobs:
           --current ${{ steps.sizes.outputs.current }}
           --baseline ${{ steps.sizes.outputs.baseline }}
           --threshold 0.10
-          --platform linux/${{ matrix.arch }}
-          --output image-size-${{ matrix.arch }}.json
+          --platform linux/amd64
+          --output image-size-amd64.json
       - name: Upload image size record
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: image-size-${{ matrix.arch }}
-          path: image-size-${{ matrix.arch }}.json
+          name: image-size-amd64
+          path: image-size-amd64.json
           if-no-files-found: error
           retention-days: 30

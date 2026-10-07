@@ -147,14 +147,27 @@ def test_public_files_use_canonical_repository_owner() -> None:
         assert legacy_repository not in contents, f"{relative_path} uses the old owner"
 
 
-def test_ci_runs_supported_python_matrix_and_builds_package() -> None:
+def test_ci_and_release_cover_supported_python_versions_and_build_package() -> None:
     workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    ci_jobs = yaml.safe_load(workflow)["jobs"]
+    release_jobs = yaml.safe_load(
+        (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    )["jobs"]
+
+    def python_version(job: dict[str, Any]) -> str:
+        setup = next(step for step in job["steps"] if step["name"] == "Set up Python")
+        return setup["with"]["python-version"]
 
     assert "permissions:" in workflow
     assert "contents: read" in workflow
-    assert "python-version:" in workflow
-    for version in ("3.11", "3.12", "3.13", "3.14"):
-        assert version in workflow
+    assert python_version(ci_jobs["unit"]) == "3.11"
+    assert python_version(ci_jobs["quality"]) == "3.14"
+    release_unit_versions = set(
+        release_jobs["release-unit"]["strategy"]["matrix"]["python-version"]
+    )
+    release_coverage_version = python_version(release_jobs["release-quality"])
+    assert release_coverage_version not in release_unit_versions
+    assert release_unit_versions | {release_coverage_version} == {"3.11", "3.12", "3.13", "3.14"}
     assert "uv build" in workflow
 
 
@@ -212,26 +225,9 @@ def test_ci_and_nightly_cover_real_browser_container_and_soak_gates() -> None:
     ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     nightly = (ROOT / ".github/workflows/nightly.yml").read_text(encoding="utf-8")
 
-    assert "arch: [amd64, arm64]" in ci
+    assert "platforms: linux/amd64" in ci
     assert "CAMOUFLARE_RUN_BROWSER_TESTS" in ci
-    assert "scripts/container_smoke.sh" in ci
-    assert (
-        "CAMOUFLARE_SMOKE_POOL_ACQUIRE_TIMEOUT_MS: "
-        "${{ matrix.arch == 'arm64' && '120000' || '30000' }}"
-    ) in ci
-    assert (
-        "CAMOUFLARE_SMOKE_READINESS_TIMEOUT_MS: "
-        "${{ matrix.arch == 'arm64' && '120000' || '15000' }}"
-    ) in ci
-    assert (
-        "CAMOUFLARE_SMOKE_REQUEST_TIMEOUT_MS: ${{ matrix.arch == 'arm64' && '120000' || '60000' }}"
-    ) in ci
-    assert (
-        "CAMOUFLARE_SMOKE_CURL_TIMEOUT_SECONDS: ${{ matrix.arch == 'arm64' && '180' || '90' }}"
-    ) in ci
-    assert (
-        "CAMOUFLARE_SMOKE_STARTUP_TIMEOUT_SECONDS: ${{ matrix.arch == 'arm64' && '180' || '120' }}"
-    ) in ci
+    assert "bash scripts/container_smoke.sh camouflare:ci-amd64" in ci
     assert "--cov-fail-under=85" in ci
     assert "ruff format --check" in ci
     assert "pyright==1.1.411" in ci

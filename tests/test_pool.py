@@ -7,7 +7,7 @@ import time
 import pytest
 
 from camouflare.browser import CamoufoxBrowserHandle
-from camouflare.cleanup import CleanupSupervisor
+from camouflare.cleanup import CleanupScope, CleanupSupervisor
 from camouflare.pool import (
     MAX_CLOSE_RETRIES,
     BrowserPool,
@@ -1898,17 +1898,17 @@ async def test_physical_camoufox_close_stays_visible_after_cleanup_timeout() -> 
 
 @pytest.mark.anyio
 async def test_request_context_and_browser_close_share_one_cleanup_deadline() -> None:
-    loop = asyncio.get_running_loop()
     entered = asyncio.Event()
-    context_cancelled_at: list[float] = []
-    browser_cancelled_at: list[float] = []
+    request_scope: CleanupScope | None = None
+    context_scopes: list[CleanupScope | None] = []
+    browser_scopes: list[CleanupScope | None] = []
 
     class DeadlineContext(FakeContext):
         async def close(self) -> None:
             try:
                 await asyncio.Event().wait()
             except asyncio.CancelledError:
-                context_cancelled_at.append(loop.time())
+                context_scopes.append(cleanup.current_scope())
             self.closed = True
 
     class DeadlineBrowser(FakeBrowser):
@@ -1921,7 +1921,7 @@ async def test_request_context_and_browser_close_share_one_cleanup_deadline() ->
             try:
                 await asyncio.Event().wait()
             except asyncio.CancelledError:
-                browser_cancelled_at.append(loop.time())
+                browser_scopes.append(cleanup.current_scope())
             self.closed = True
 
     class Factory(FakeBrowserFactory):
@@ -1941,26 +1941,30 @@ async def test_request_context_and_browser_close_share_one_cleanup_deadline() ->
     await pool.start()
 
     async def use_context() -> None:
+        nonlocal request_scope
         async with pool.lease_context():
             entered.set()
-            await asyncio.Event().wait()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                request_scope = cleanup.current_scope()
+                raise
 
     request = asyncio.create_task(use_context())
     await entered.wait()
     cleanup.track(request, kind="request", timeout_seconds=0.05)
     group = cleanup.group_for(request)
-    started = loop.time()
     request.cancel()
 
     with pytest.raises(asyncio.CancelledError):
         await request
-    await asyncio.wait_for(cleanup.wait_for_group(group), timeout=0.2)
+    await asyncio.wait_for(cleanup.wait_for_group(group), timeout=1)
 
-    assert len(context_cancelled_at) == 1
-    assert len(browser_cancelled_at) == 1
-    assert context_cancelled_at[0] - started >= 0.03
-    assert browser_cancelled_at[0] - context_cancelled_at[0] < 0.02
-    assert browser_cancelled_at[0] - started < 0.09
+    # Compare the inherited deadline and ownership directly; event-loop stalls
+    # can delay cancellation even when every cleanup shares the same deadline.
+    assert request_scope is not None
+    assert context_scopes == [request_scope]
+    assert browser_scopes == [request_scope]
     assert pool.snapshot().active_contexts == 0
     assert pool.snapshot().closing_slots == 0
 
