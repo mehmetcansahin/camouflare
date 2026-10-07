@@ -8,6 +8,8 @@
 Camouflare is a FlareSolverr-compatible `/v1` service powered by Camoufox. It keeps a
 small browser pool running and supports both isolated requests and persistent sessions.
 
+[![Watch the Camouflare launch video on YouTube](docs/assets/camouflare-launch-cover.png)](https://www.youtube.com/watch?v=oEZkk81Et4w)
+
 - FlareSolverr-style GET, POST, and session commands
 - Configurable browser and context limits
 - Per-request cookies, headers, proxy, screenshots, and wait time
