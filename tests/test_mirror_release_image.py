@@ -176,6 +176,7 @@ def test_manual_mirror_requires_explicit_release_inputs_and_protected_environmen
         (ROOT / ".github/workflows/dockerhub-mirror.yml").read_text(encoding="utf-8")
     )
     events = workflow.get("on", workflow.get(True))
+    assert set(events) == {"workflow_dispatch"}
     inputs = events["workflow_dispatch"]["inputs"]
     assert inputs["tag"]["required"] and inputs["digest"]["required"]
     assert inputs["tag"]["default"] == "v2.0.2"
@@ -183,6 +184,8 @@ def test_manual_mirror_requires_explicit_release_inputs_and_protected_environmen
         "sha256:f4c2b7acba6974f89dfc01c3dba72404290d0d3f6f8a6abb311e632478da7fc3"
     )
     assert workflow["permissions"] == {"contents": "read", "packages": "read"}
+    assert workflow["env"]["RELEASE_TAG"] == "${{ inputs.tag }}"
+    assert workflow["env"]["SOURCE_DIGEST"] == "${{ inputs.digest }}"
     mirror = workflow["jobs"]["mirror"]
     assert mirror["environment"]["name"] == "release"
     assert "scripts.mirror_release_image" in mirror["steps"][-1]["run"]

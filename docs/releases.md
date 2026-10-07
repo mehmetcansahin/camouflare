@@ -30,6 +30,9 @@ Normal deployments use the index digest and let the runtime select the platform.
 - Index: `sha256:f4c2b7acba6974f89dfc01c3dba72404290d0d3f6f8a6abb311e632478da7fc3`
 - linux/amd64: `sha256:160e3c9d41bfe54d2aca5b8bf2ea2c0d343fed310f9d7822e1d188f830a9a928`
 - linux/arm64: `sha256:a28df913b0c90d54f8049a25275a01ab59615743fe04adc4e54610b51dec915c`
+- Docker Hub mirror: [mehmetcansahin/camouflare:2.0.2](https://hub.docker.com/r/mehmetcansahin/camouflare/tags),
+  published on 2026-10-07 with the same index and platform digests.
+- Mirror run: https://github.com/mehmetcansahin/camouflare/actions/runs/37603843437
 
 ## 2.0.1 - 2026-10-02
 

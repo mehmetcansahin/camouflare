@@ -120,9 +120,9 @@ docker compose up -d
 is unset. Use `docker compose up --build` to build the image locally instead of
 pulling it.
 
-After a version has been mirrored to Docker Hub, use
-`mehmetcansahin/camouflare:<version>` in `docker run`, or set
-`CAMOUFLARE_IMAGE=docker.io/mehmetcansahin/camouflare:<version>` for Compose. The
+The same 2.0.2 release is available on [Docker Hub](https://hub.docker.com/r/mehmetcansahin/camouflare)
+as `mehmetcansahin/camouflare:2.0.2`. Use that image in `docker run`, or set
+`CAMOUFLARE_IMAGE=docker.io/mehmetcansahin/camouflare:2.0.2` for Compose. The
 release workflow copies the verified GHCR index, including both architectures and
 the attached BuildKit SBOM/provenance, and checks that its digest is identical.
 See the [Docker Hub setup and backfill instructions](docs/release-checklist.md#docker-hub).

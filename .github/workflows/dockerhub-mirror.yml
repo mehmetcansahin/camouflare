@@ -13,14 +13,9 @@ on:
         required: true
         default: sha256:f4c2b7acba6974f89dfc01c3dba72404290d0d3f6f8a6abb311e632478da7fc3
         type: string
-  # Bootstrap the already published release before this workflow reaches main.
-  # Remove this temporary trigger once the initial mirror has been verified.
-  push:
-    branches: [dockerhub-publishing]
-    paths: [.github/workflows/dockerhub-mirror.yml]
 
 concurrency:
-  group: dockerhub-mirror-${{ inputs.tag || 'v2.0.2' }}
+  group: dockerhub-mirror-${{ inputs.tag }}
   cancel-in-progress: false
 
 permissions:
@@ -28,8 +23,8 @@ permissions:
   packages: read
 
 env:
-  RELEASE_TAG: ${{ inputs.tag || 'v2.0.2' }}
-  SOURCE_DIGEST: ${{ inputs.digest || 'sha256:f4c2b7acba6974f89dfc01c3dba72404290d0d3f6f8a6abb311e632478da7fc3' }}
+  RELEASE_TAG: ${{ inputs.tag }}
+  SOURCE_DIGEST: ${{ inputs.digest }}
   IMAGE_NAME: ghcr.io/${{ github.repository }}
   DOCKERHUB_IMAGE_NAME: docker.io/mehmetcansahin/camouflare
 
