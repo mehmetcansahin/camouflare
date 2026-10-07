@@ -44,23 +44,18 @@ than waiting, and `MAX_SESSIONS` only caps the registry above that limit. Every 
 request, including a first `sessions.create` while both slots are busy, waits for a free
 slot until the earlier of `POOL_ACQUIRE_TIMEOUT_MS` (10 seconds here, then the same 503)
 and its own `maxTimeout` (then HTTP 500 `REQUEST_TIMEOUT`). `/ready` does not join that
-queue: while both slots are busy on a healthy pool it returns HTTP 200 with
-`capacity_state: saturated` from the passive snapshot. Add concurrent sessions by raising
+queue; see [operational checks](#operational-checks) for its saturation behavior.
+Add concurrent sessions by raising
 `POOL_MAX_BROWSERS`, which the sizing rule below gates on a load test, or by setting
 `POOL_RESERVED_TRANSIENT_CONTEXTS=0`; with no reservation, two idle sessions leave no
 capacity for stateless requests until they expire, and `/ready` reports `saturated` for
 that whole time.
 
 A browser retired by `BROWSER_MAX_USES` or `BROWSER_MAX_AGE_MINUTES` is replaced in the
-background as soon as it closes, so the pool returns to `POOL_MIN_BROWSERS` warm browsers
-without waiting for the next request; if a request is already waiting, that request's own
-launch replaces it and the next tick fills any remaining shortfall. The periodic tick
-(`POOL_MAINTENANCE_INTERVAL_SECONDS`, 15 seconds by default) also retires browsers that
-age out between requests. Background launches wait for closing browsers, so the tick never
-runs more than `POOL_MAX_BROWSERS` processes; a request-driven launch may still start while
-a retired generation is closing. The hard physical ceiling is two complete generations,
-so allow memory and PID headroom for up to another `POOL_MAX_BROWSERS` browser processes
-during a recycle.
+background after it closes. The maintenance tick (`POOL_MAINTENANCE_INTERVAL_SECONDS`,
+15 seconds by default) also retires browsers that age out between requests. Request-driven
+launches can overlap a closing generation; allow memory and PID headroom for up to
+another `POOL_MAX_BROWSERS` browser processes during a recycle.
 
 Keep contexts isolated within each browser. The published 1.3.3
 [load evidence](benchmarks/README.md) completed 45 of 45 requests with this profile,
@@ -98,54 +93,25 @@ whenever `SHUTDOWN_TIMEOUT_SECONDS` is raised.
 
 ## Version and architecture policy
 
-GHCR images are released from `vMAJOR.MINOR.PATCH` tags. Images contain linux/amd64 and
-linux/arm64 manifests and publish attached BuildKit SBOM/provenance. Only the exact immutable
-version tag is published; rolling `latest`, major, and major/minor tags are intentionally
-omitted to prevent a release rerun from moving an established channel backward. The official
-GHCR package is intended to be public; private mirrors require `docker login` before Compose
-or direct pulls.
+Releases use exact `MAJOR.MINOR.PATCH` image tags for linux/amd64 and linux/arm64;
+there are no rolling `latest`, major, or major/minor tags. Compose defaults to the public
+Docker Hub image. GHCR also hosts the release history; [the release record](releases.md)
+identifies which versions were mirrored to Docker Hub and records their immutable digests.
 
-The release workflow pushes the multi-arch candidate by digest only; no temporary tag is
-created. It smokes, revision-checks, and scans the exact per-platform digests and uploads
-the release evidence first. The promotion step then re-confirms through the authenticated
-GitHub API that the release tag still names the workflow commit and, in the same step,
-tags the scanned index digest. A run that fails before that step leaves only an untagged
-package version, which no tag references and which maintainers may delete from the GHCR
-package settings.
+Mirrored versions have identical index and platform digests, including attached BuildKit
+SBOM/provenance manifests. GitHub's additional provenance attestation remains on GHCR.
+Images contain the Camoufox browser and add-ons pinned in `scripts/camoufox-artifacts.json`,
+with downloads verified by SHA-256 before extraction. Private mirrors require `docker login`.
 
-After GHCR publication succeeds, a separate job in the protected `release` environment
-copies that exact index to `docker.io/mehmetcansahin/camouflare:<version>`. It preserves
-the linux/amd64, linux/arm64, and attached BuildKit SBOM/provenance manifests and verifies
-the destination digest. GitHub's additional provenance attestation remains on GHCR.
-An existing Docker Hub version is skipped only when its digest matches; a conflicting
-version or an ambiguous registry response fails without an overwrite. Docker Hub failure
-does not roll back the GHCR release; re-run the failed mirror job after fixing access.
-Enable immutable tags in Docker Hub to prevent other writers from replacing versions.
-See the [one-time setup and existing-version backfill](release-checklist.md#docker-hub).
+See the [release checklist](release-checklist.md) for publication, pins, and registry setup,
+and [rollback](rollback.md#interrupted-publication-recovery) for interrupted publication.
 
-Docker and release jobs fetch the exact Camoufox tag declared in
-`scripts/camoufox-artifacts.json`, install only archives listed there, and verify each
-download against its reviewed SHA-256 digest before extraction. Camoufox's default browser
-addons are pinned in the same manifest: each `addons` entry names an exact version, a
-versioned XPI URL, and a reviewed SHA-256 digest, and a download, digest, or embedded
-version mismatch fails the fetch and therefore the image build. New upstream releases are
-ignored until their exact tag and independently verified platform digests are reviewed and
-updated in the manifest; an addon update likewise requires its version, URL, and digest to
-be re-verified and changed together.
-
-## Deploying 2.0.2
-
-Camouflare 2.0.2 was published on 2026-10-05. Its release workflow, source commit,
-and immutable image digests are recorded in [the release record](releases.md).
-Publication validates the image; each deployment still needs its own operational checks.
+## Deploy or upgrade
 
 1. Set `CAMOUFLARE_API_TOKEN` in the service secret store and configure every client
-   to send the matching token. Rotate any credential previously exposed outside secret
-   storage and verify the old token is rejected without logging either value.
-2. Review the [2.0 upgrade guide](upgrade-to-2.0.md) and `CHANGELOG.md`, especially
-   authentication, custom-header GETs, POST redirects, and error metadata. When publishing
-   a new version, follow [the release checklist](release-checklist.md); local checks do
-   not replace the required Python 3.11–3.14 and container gates.
+   to send the matching token.
+2. Review the [2.0 upgrade guide](upgrade-to-2.0.md) and [changelog](../CHANGELOG.md),
+   especially authentication, custom-header GETs, POST redirects, and error metadata.
 3. Preserve the current live image and environment for rollback. Deploy the published
    index digest using the commands in [the release record](releases.md), then confirm
    the running container's revision matches the release commit. Deploy client changes
@@ -153,8 +119,8 @@ Publication validates the image; each deployment still needs its own operational
 4. Check authenticated `/ready` and `/diagnostics`, compressed content, a known terminal
    block, an ordinary upstream HTTP error, and an uncommitted GET timeout against targets
    you control. Confirm clients distinguish non-retryable API errors and target 503s from
-   pool backpressure. Observe cleanup and lifecycle behavior for the window required by
-   the checklist.
+   pool backpressure. For release observation, follow the
+   [post-publication checks](release-checklist.md#after-publication).
 
 ## Operational checks
 

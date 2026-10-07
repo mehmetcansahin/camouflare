@@ -36,3 +36,9 @@ release evidence and re-run the same tag-push workflow event. The workflow reuse
 existing GHCR version only after both platform manifests pass smoke, security, and
 source-revision checks. A mismatch is an incident: do not overwrite the destination;
 investigate and publish a new patch version if recovery cannot be proven safe.
+
+If GHCR publication succeeded but the Docker Hub mirror failed, fix registry access and
+re-run the failed mirror job. It skips a version only when its digest already matches;
+a conflicting digest or ambiguous registry response stops the copy without an overwrite.
+An unpromoted GHCR candidate has no tag; delete it only when it is no longer needed as
+release evidence.

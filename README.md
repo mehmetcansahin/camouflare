@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/mehmetcansahin/camouflare/actions/workflows/ci.yml/badge.svg)](https://github.com/mehmetcansahin/camouflare/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/tag/mehmetcansahin/camouflare?sort=semver&label=release)](https://github.com/mehmetcansahin/camouflare/tags)
+[![Docker Hub](https://img.shields.io/badge/Docker%20Hub-mehmetcansahin%2Fcamouflare-blue?logo=docker)](https://hub.docker.com/r/mehmetcansahin/camouflare)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 Camouflare is a FlareSolverr-compatible `/v1` service powered by Camoufox. It keeps a
@@ -77,7 +78,12 @@ only a service URL is insufficient for a client that cannot send either header.
 
 ## Run with Docker
 
+The published image is available on [Docker Hub](https://hub.docker.com/r/mehmetcansahin/camouflare)
+for `linux/amd64` and `linux/arm64`. The examples below use the `2.0.2` release.
+
 ```bash
+docker pull mehmetcansahin/camouflare:2.0.2
+
 export CAMOUFLARE_API_TOKEN="$(openssl rand -hex 32)"
 
 docker run --detach --rm \
@@ -85,7 +91,7 @@ docker run --detach --rm \
   --publish 127.0.0.1:8191:8191 \
   --env CAMOUFLARE_API_TOKEN \
   --shm-size 2g \
-  ghcr.io/mehmetcansahin/camouflare:2.0.2
+  mehmetcansahin/camouflare:2.0.2
 ```
 
 Check that the service is ready:
@@ -109,23 +115,21 @@ curl --request POST http://127.0.0.1:8191/v1 \
   }'
 ```
 
-To use Compose:
+To use the repository's Compose configuration:
 
 ```bash
 export CAMOUFLARE_API_TOKEN="$(openssl rand -hex 32)"
 docker compose up -d
 ```
 
-`compose.yaml` pins the same image and refuses to start when `CAMOUFLARE_API_TOKEN`
+`compose.yaml` defaults to `docker.io/mehmetcansahin/camouflare:2.0.2`. To use GHCR
+instead, set `CAMOUFLARE_IMAGE=ghcr.io/mehmetcansahin/camouflare:2.0.2`. Both registries
+provide the same image digest. Compose refuses to start when `CAMOUFLARE_API_TOKEN`
 is unset. Use `docker compose up --build` to build the image locally instead of
 pulling it.
 
-The same 2.0.2 release is available on [Docker Hub](https://hub.docker.com/r/mehmetcansahin/camouflare)
-as `mehmetcansahin/camouflare:2.0.2`. Use that image in `docker run`, or set
-`CAMOUFLARE_IMAGE=docker.io/mehmetcansahin/camouflare:2.0.2` for Compose. The
-release workflow copies the verified GHCR index, including both architectures and
-the attached BuildKit SBOM/provenance, and checks that its digest is identical.
-See the [Docker Hub setup and backfill instructions](docs/release-checklist.md#docker-hub).
+See the [release checklist](docs/release-checklist.md#docker-hub) for Docker Hub
+publishing and backfill instructions.
 
 The production profile keeps two warm browser processes with one isolated context
 per browser, so two requests run at a time. `POOL_RESERVED_TRANSIENT_CONTEXTS` holds one
@@ -308,8 +312,8 @@ sessions.
 Do not expose the service directly to the public internet. For non-loopback use,
 add network restrictions, access control, and rate limiting around it.
 
-See [the deployment guide](docs/deployment.md) for container sizing, monitoring,
-and production checks.
+See [the documentation index](docs/README.md) for deployment, upgrades, rollback,
+release records, and benchmarks.
 
 ## Development
 

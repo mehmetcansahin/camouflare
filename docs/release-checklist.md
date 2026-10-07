@@ -7,10 +7,7 @@ environment before publication.
 ## One-time repository configuration
 
 - Create a GitHub environment named `release` and require a maintainer reviewer.
-- Protect `v*` tags with a repository ruleset that blocks updates and deletion; the release
-  workflow also resolves the current tag through the authenticated GitHub API and checks it
-  against the event commit before building and again inside the promotion step, including
-  for private repositories.
+- Protect `v*` tags with a repository ruleset that blocks updates and deletion.
 - Link the GHCR package to this repository, grant this repository's Actions workflow write
   access, and make the package public before advertising unauthenticated Compose/image pulls.
 - Permit the workflow `packages: write`, `id-token: write`, and `attestations: write`
@@ -32,15 +29,19 @@ environment before publication.
 - Confirm the mirror job runs only after the GHCR publish job succeeds. Only exact
   version tags are copied; there is no `latest` tag.
 
+The 2.0.2 release was mirrored to Docker Hub on 2026-10-07 with the same index and
+platform digests as GHCR; the completed mirror run is recorded in [releases.md](releases.md).
+
 The tag-push workflow uses the workflow source stored in that tag's commit. Re-running
-an older release therefore cannot pick up the newly added Docker Hub job. Once this
-change reaches the default branch, run **Mirror existing release to Docker Hub** in
-GitHub Actions with the exact source tag and its verified index digest from
+a release created before the Docker Hub job was added therefore does not include that
+job. To mirror another existing release, run **Mirror existing release to Docker Hub**
+in GitHub Actions with the exact source tag and its verified index digest from
 [releases.md](releases.md). It uses the same protected `release` environment and checks
 that the GHCR version tag matches the supplied digest before copying.
 
-Alternatively, to backfill the already published 2.0.2 image from a checkout containing
-the mirror helper, install Docker CLI with Buildx, sign in, and copy the recorded index:
+For a local backfill, install Docker CLI with Buildx and sign in from a checkout
+containing the mirror helper. This 2.0.2 example skips the copy when the destination
+already has the recorded digest:
 
 ```bash
 docker login --username mehmetcansahin
@@ -69,12 +70,10 @@ This follows Docker's [registry-to-registry copy workflow](https://docs.docker.c
   plus the linux/amd64 container checks. The release workflow covers Python 3.11–3.14
   and both linux/amd64 and linux/arm64 before publication.
 - [ ] Confirm real-browser, package-install, Docker smoke, coverage, type, and format gates pass.
-- [ ] Confirm the exact Camoufox `release_tag`, every archive, and every `addons` pin in
-  `scripts/camoufox-artifacts.json` match independently verified upstream metadata and
-  SHA-256 digests; update the reviewed tag and pins together when changing the browser
-  release. When changing an addon, re-verify its version, versioned XPI URL, and digest
-  together: hash the downloaded XPI independently and compare it with the AMO file hash
-  and the upstream release asset digest.
+- [ ] Verify the Camoufox release, archive, and add-on pins in
+  `scripts/camoufox-artifacts.json` against upstream metadata and independently computed
+  SHA-256 digests. Change the reviewed version, URL, and digest together; compare add-on
+  hashes with AMO metadata and browser hashes with the upstream release asset digest.
 - [ ] Review high/critical scan results and remove obsolete security exceptions.
 - [ ] Confirm every remaining exception has a specific reason and unexpired `expires_on` date.
 
@@ -95,13 +94,11 @@ This follows Docker's [registry-to-registry copy workflow](https://docs.docker.c
 - [ ] Run the canary with a one-minute browser max age and low max-use limit for at least three
   complete lifecycle cycles. Accept only with zero unexpected acquire timeouts, zero unhandled
   futures/tasks, stable browser-process counts, and no cleanup backlog.
-- [ ] Enable Prometheus alerts for two consecutive readiness failures, `active=0 && usable=0`,
-  cleanup timeouts, and a growing browser-process count.
+- [ ] Enable the Prometheus alerts described in
+  [operational checks](deployment.md#operational-checks).
 - [ ] Observe production for at least one complete configured browser max-age window. If readiness
   or cleanup regresses, roll back to the recorded immutable digest using the documented procedure.
 - [ ] Record the published digests and workflow URL in the [release record](releases.md).
-- [ ] If publication is interrupted, re-run the same tag-push workflow event. The preflight
-  reuses an existing GHCR version only after its platform manifests pass smoke, security,
-  and source-revision checks. A run that failed before promotion leaves only an untagged
-  candidate digest; delete that package version from GHCR if it is not needed as evidence.
+- [ ] If publication is interrupted, follow
+  [interrupted publication recovery](rollback.md#interrupted-publication-recovery).
 - [ ] Follow the [rollback procedure](rollback.md) if the published image is unhealthy.

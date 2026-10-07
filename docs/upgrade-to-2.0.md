@@ -83,6 +83,15 @@ open a page is evicted. Plan memory and PID headroom for up to another
 
 ## Container image
 
+The 2.0.2 image is available on [Docker Hub](https://hub.docker.com/r/mehmetcansahin/camouflare)
+for `linux/amd64` and `linux/arm64`:
+
+```bash
+docker pull mehmetcansahin/camouflare:2.0.2
+```
+
+The same image digest is also available on GHCR:
+
 ```bash
 docker pull ghcr.io/mehmetcansahin/camouflare:2.0.2
 ```

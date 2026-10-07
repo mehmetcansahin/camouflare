@@ -1,12 +1,9 @@
 # Upgrading to Camouflare 1.0
 
-Camouflare 1.0 formalizes the project as a single-user, single-worker local service. Linux
-and macOS source installations are supported. Published containers support linux/amd64 and
-linux/arm64; Windows is not supported.
-
-> Camouflare is not published to PyPI. The GHCR commands below apply after 1.0.0 is
-> published. Until then, follow the source installation and local container instructions
-> in the README.
+Historical migration notes for 1.0. For current installation commands and container
+settings, use the [README](../README.md) and [deployment guide](deployment.md). Also
+review the [2.0 upgrade guide](upgrade-to-2.0.md) when upgrading from a pre-1.0 version
+to the current release.
 
 ## Before upgrading
 
@@ -32,44 +29,9 @@ Limit violations continue to use the FlareSolverr-compatible HTTP 500 error enve
 never return a truncated solution. Idle expired sessions are now closed by a background
 reaper, including when no new requests arrive.
 
-## Source upgrade
-
-After the reviewed `v1.0.0` tag is published, install that exact source tag in a clean
-environment first, then switch the service:
-
-```bash
-git clone --branch v1.0.0 --depth 1 \
-  https://github.com/mehmetcansahin/camouflare.git camouflare-1.0.0
-python -m pip install --upgrade ./camouflare-1.0.0
-camoufox fetch
-camouflare --version
-```
-
-## Container upgrade
-
-Prefer the immutable release tag or recorded digest. Compose requires an explicit token:
-
-```bash
-export CAMOUFLARE_API_TOKEN='replace-with-a-secret'
-docker compose pull
-docker compose up -d
-```
-
-The supplied Compose profile reserves 4 GiB of memory, 2 GiB of shared memory, and 512
-process IDs. It also drops Linux capabilities and enables no-new-privileges. Tune resource
-limits deliberately rather than removing the security options. It pulls
-`ghcr.io/mehmetcansahin/camouflare:1.0.0` by default; set `CAMOUFLARE_IMAGE` to an immutable
-digest for a pinned deployment. The retained `build: .` entry supports an explicit local
-`docker compose build` without changing the production image default.
-
 ## Verification
 
-```bash
-curl --fail http://127.0.0.1:8191/health
-curl --fail -H "Authorization: Bearer ${CAMOUFLARE_API_TOKEN}" \
-  http://127.0.0.1:8191/ready
-```
-
-Then send one representative request to `/v1`, confirm session creation/destruction, and
-observe memory and timeout metrics under expected concurrency. If verification fails, use
-the [rollback procedure](rollback.md).
+Check `/health`, authenticated `/ready`, a representative `/v1` request, and session
+creation/destruction using the current README examples. Observe memory and timeout
+metrics under expected concurrency. If verification fails, use the
+[rollback procedure](rollback.md).
