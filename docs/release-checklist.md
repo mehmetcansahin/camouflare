@@ -1,8 +1,8 @@
 # Release checklist
 
 The workflow publishes an immutable GHCR version tag and mirrors its digest to Docker Hub.
-A maintainer must review the exact
-change description and approve the protected `release` environment before publication.
+A maintainer must review the exact change description and approve the protected `release`
+environment before publication.
 
 ## One-time repository configuration
 
@@ -33,9 +33,14 @@ change description and approve the protected `release` environment before public
   version tags are copied; there is no `latest` tag.
 
 The tag-push workflow uses the workflow source stored in that tag's commit. Re-running
-an older release therefore cannot pick up the newly added Docker Hub job. To backfill
-the already published 2.0.2 image from a checkout containing the mirror helper, install
-Docker CLI with Buildx, sign in, and copy the index recorded in [releases.md](releases.md):
+an older release therefore cannot pick up the newly added Docker Hub job. Once this
+change reaches the default branch, run **Mirror existing release to Docker Hub** in
+GitHub Actions with the exact source tag and its verified index digest from
+[releases.md](releases.md). It uses the same protected `release` environment and checks
+that the GHCR version tag matches the supplied digest before copying.
+
+Alternatively, to backfill the already published 2.0.2 image from a checkout containing
+the mirror helper, install Docker CLI with Buildx, sign in, and copy the recorded index:
 
 ```bash
 docker login --username mehmetcansahin

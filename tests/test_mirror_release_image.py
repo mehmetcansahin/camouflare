@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DIGEST = f"sha256:{'a' * 64}"
 OTHER_DIGEST = f"sha256:{'b' * 64}"
 SOURCE = f"ghcr.io/example/camouflare@{DIGEST}"
+SOURCE_TAG = "ghcr.io/example/camouflare:2.0.2"
 DESTINATION = "docker.io/example/camouflare:2.0.2"
 
 
@@ -57,7 +58,7 @@ def test_mirror_copies_exact_index_then_verifies_destination(
 
     _mirror()
 
-    assert inspections == [SOURCE, DESTINATION, DESTINATION]
+    assert inspections == [SOURCE_TAG, DESTINATION, DESTINATION]
     assert copies == [["docker", "buildx", "imagetools", "create", "--tag", DESTINATION, SOURCE]]
 
 
@@ -68,7 +69,7 @@ def test_mirror_rerun_does_not_push_an_existing_matching_version(
 
     _mirror()
 
-    assert inspections == [SOURCE, DESTINATION]
+    assert inspections == [SOURCE_TAG, DESTINATION]
     assert copies == []
 
 
@@ -168,3 +169,24 @@ def test_dockerhub_job_only_mirrors_the_successfully_published_digest() -> None:
     assert '--digest "${SOURCE_DIGEST}"' in copy["run"]
     assert '--destination-image "${DOCKERHUB_IMAGE_NAME}"' in copy["run"]
     assert not any(step.get("uses", "").startswith("docker/build-push-action@") for step in steps)
+
+
+def test_manual_mirror_requires_explicit_release_inputs_and_protected_environment() -> None:
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/dockerhub-mirror.yml").read_text(encoding="utf-8")
+    )
+    events = workflow.get("on", workflow.get(True))
+    inputs = events["workflow_dispatch"]["inputs"]
+    assert inputs["tag"]["required"] and inputs["digest"]["required"]
+    assert inputs["tag"]["default"] == "v2.0.2"
+    assert inputs["digest"]["default"] == (
+        "sha256:f4c2b7acba6974f89dfc01c3dba72404290d0d3f6f8a6abb311e632478da7fc3"
+    )
+    assert workflow["permissions"] == {"contents": "read", "packages": "read"}
+    mirror = workflow["jobs"]["mirror"]
+    assert mirror["environment"]["name"] == "release"
+    assert "scripts.mirror_release_image" in mirror["steps"][-1]["run"]
+    assert '--digest "${SOURCE_DIGEST}"' in mirror["steps"][-1]["run"]
+    assert not any(
+        step.get("uses", "").startswith("docker/build-push-action@") for step in mirror["steps"]
+    )

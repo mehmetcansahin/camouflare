@@ -21,8 +21,9 @@ def mirror_release_image(
 
     source = f"{source_image}@{digest}"
     destination = f"{destination_image}:{tag.removeprefix('v')}"
-    if _image_tag_digest(source) != digest:
-        raise RuntimeError("Source registry did not return the requested release digest.")
+    source_tag = f"{source_image}:{tag.removeprefix('v')}"
+    if _image_tag_digest(source_tag) != digest:
+        raise RuntimeError("Source release tag did not return the requested release digest.")
 
     existing_digest = _image_tag_digest(destination)
     if existing_digest is not None:
