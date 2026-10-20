@@ -81,11 +81,11 @@ only a service URL is insufficient for a client that cannot send either header.
 ## Run with Docker
 
 The published image is available on [Docker Hub](https://hub.docker.com/r/mehmetcansahin/camouflare)
-for `linux/amd64` and `linux/arm64`. The examples below pin the `2.0.2` release;
+for `linux/amd64` and `linux/arm64`. The examples below pin the `2.1.0` release;
 `mehmetcansahin/camouflare:latest` follows the newest release for quick trials.
 
 ```bash
-docker pull mehmetcansahin/camouflare:2.0.2
+docker pull mehmetcansahin/camouflare:2.1.0
 
 export CAMOUFLARE_API_TOKEN="$(openssl rand -hex 32)"
 
@@ -94,7 +94,7 @@ docker run --detach --rm \
   --publish 127.0.0.1:8191:8191 \
   --env CAMOUFLARE_API_TOKEN \
   --shm-size 2g \
-  mehmetcansahin/camouflare:2.0.2
+  mehmetcansahin/camouflare:2.1.0
 ```
 
 Check that the service is ready:
@@ -125,8 +125,8 @@ export CAMOUFLARE_API_TOKEN="$(openssl rand -hex 32)"
 docker compose up -d
 ```
 
-`compose.yaml` defaults to `docker.io/mehmetcansahin/camouflare:2.0.2`. To use GHCR
-instead, set `CAMOUFLARE_IMAGE=ghcr.io/mehmetcansahin/camouflare:2.0.2`. Both registries
+`compose.yaml` defaults to `docker.io/mehmetcansahin/camouflare:2.1.0`. To use GHCR
+instead, set `CAMOUFLARE_IMAGE=ghcr.io/mehmetcansahin/camouflare:2.1.0`. Both registries
 provide the same image digest. Compose refuses to start when `CAMOUFLARE_API_TOKEN`
 is unset. Use `docker compose up --build` to build the image locally instead of
 pulling it.

@@ -5,6 +5,8 @@ All notable changes to Camouflare are documented here. The project follows
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-10-20
+
 ### Added
 
 - `TARGET_UNREACHABLE` error code for browser navigations that get no response from the
@@ -336,7 +338,8 @@ All notable changes to Camouflare are documented here. The project follows
 - High and critical dependency or container findings block releases unless covered by a
   reasoned, time-bounded exception.
 
-[Unreleased]: https://github.com/mehmetcansahin/camouflare/compare/v2.0.2...HEAD
+[Unreleased]: https://github.com/mehmetcansahin/camouflare/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/mehmetcansahin/camouflare/compare/v2.0.2...v2.1.0
 [2.0.2]: https://github.com/mehmetcansahin/camouflare/compare/v2.0.1...v2.0.2
 [2.0.1]: https://github.com/mehmetcansahin/camouflare/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/mehmetcansahin/camouflare/compare/v1.4.0...v2.0.0
