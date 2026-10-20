@@ -17,6 +17,7 @@ from uuid import uuid4
 MAX_REQUEST_ID_LENGTH = 128
 REDACTED = "<redacted>"
 REDACTED_URL = "<redacted-url>"
+CAPTCHA_SOLVER_LIFECYCLE_LOGGER = "playwright_captcha.solvers.base_solver"
 
 _REQUEST_ID: ContextVar[str | None] = ContextVar("camouflare_request_id", default=None)
 _URL_PATTERN = re.compile(r"(?i)\b(?:https?|socks(?:4|5h?)|ftp)://[^\s<>\"']+")
@@ -297,6 +298,12 @@ def configure_logging(
 
     root = logging.getLogger()
     root.setLevel(level)
+    # The captcha solver base logs six INFO prepare/cleanup lines for every request
+    # whether or not a challenge exists; keep them for DEBUG. Challenge-solving
+    # progress is logged by the solver's click modules, which stay at INFO.
+    logging.getLogger(CAPTCHA_SOLVER_LIFECYCLE_LOGGER).setLevel(
+        logging.NOTSET if root.getEffectiveLevel() <= logging.DEBUG else logging.WARNING
+    )
     if replace_handlers:
         for existing_handler in root.handlers[:]:
             root.removeHandler(existing_handler)

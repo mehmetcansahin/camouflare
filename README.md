@@ -241,7 +241,11 @@ and POST do not gain new direct HTTP eligibility.
 Confirmed Cloudflare-style bot/WAF block documents return `TARGET_BLOCKED` with
 `retryable: false`, without invoking the challenge solver. An unresolved challenge
 still returns `CHALLENGE_FAILED`. HTTP 403/503 alone is not a block: ordinary target
-errors remain successful fetches with the upstream status in `solution.status`.
+errors remain successful fetches with the upstream status in `solution.status`. That
+includes a 4xx/5xx with an empty body, which Firefox refuses to render; its
+`solution.response` is empty. When the browser cannot get a response at all (DNS
+failure, connection refused or reset, interrupted transfer), the request returns
+`TARGET_UNREACHABLE`, retryable for `request.get`.
 `request.post` with `returnOnlyCookies` does not read its response body, so that mode
 cannot classify body-based challenges or blocks.
 
@@ -293,9 +297,11 @@ The most commonly used environment variables are:
 See `/documentation` on a running instance for every option and request field.
 
 Text logs append compact JSON as `fields={...}` when structured fields are present.
-Request completion records expose `result`, `http_status`, `duration_ms`, and an
-`error_code` when applicable. JSON logs retain the same redacted fields under `fields`;
-URLs lose credentials, paths, and queries, and sensitive values are masked.
+Request completion records expose `result`, `http_status`, `duration_ms`, and, for
+errors, `error_code` plus `error_message` (the message's first line, at most 300
+characters). JSON logs retain the same redacted fields under `fields`; URLs lose
+credentials, paths, and queries, and sensitive values are masked. At `LOG_LEVEL=INFO`
+the captcha solver's per-request prepare/cleanup lines are suppressed; `DEBUG` shows them.
 
 Active click-based challenge handling is disabled by default. Browser-side challenges
 may still clear on their own within the request deadline; success depends on the target.

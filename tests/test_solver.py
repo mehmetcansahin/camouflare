@@ -2689,6 +2689,130 @@ async def test_url_containing_crashed_is_not_treated_as_a_crash() -> None:
     assert result.retryable is False
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("message", "expected_code"),
+    [
+        (
+            'Page.goto: NS_ERROR_CONNECTION_REFUSED\nCall log:\n  - navigating to "https://example.com/"',
+            V1ErrorCode.TARGET_UNREACHABLE,
+        ),
+        ("Page.goto: NS_ERROR_UNKNOWN_HOST", V1ErrorCode.TARGET_UNREACHABLE),
+        ("Page.goto: NS_ERROR_NET_PARTIAL_TRANSFER", V1ErrorCode.TARGET_UNREACHABLE),
+        # Only the leading error name counts: the call log can echo any target URL.
+        (
+            'Page.goto: NS_BINDING_ABORTED\nCall log:\n  - navigating to "https://example.com/NS_ERROR_NET_RESET"',
+            V1ErrorCode.INTERNAL_ERROR,
+        ),
+        # A failing proxy is not an unreachable target.
+        ("Page.goto: NS_ERROR_PROXY_CONNECTION_REFUSED", V1ErrorCode.INTERNAL_ERROR),
+    ],
+)
+async def test_firefox_network_failure_without_response_is_target_unreachable(
+    message: str,
+    expected_code: V1ErrorCode,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    context = FakeContext()
+    page = await context.new_page()
+    page.goto_failures["domcontentloaded"] = RuntimeError(message)
+
+    with caplog.at_level(logging.WARNING, logger="camouflare.solver"):
+        result = await solve_request(
+            V1Request(cmd="request.get", url="https://example.com/", maxTimeout=60000),
+            context=context,
+            page=page,
+        )
+
+    unreachable = expected_code is V1ErrorCode.TARGET_UNREACHABLE
+    assert result.status == "error"
+    assert result.error_code is expected_code
+    assert result.retryable is unreachable
+    assert result.request_outcome_unknown is False
+    unexpected = [r for r in caplog.records if r.message == "Unexpected navigation error."]
+    assert bool(unexpected) is not unreachable
+
+
+def _empty_error_status_page(
+    context: FakeContext,
+    *,
+    error_name: str,
+    status: int | None,
+) -> FakePage:
+    """Mimic Firefox: report the main-frame response, then fail goto, left on about:blank."""
+
+    class EmptyErrorStatusPage(FakePage):
+        async def goto(
+            self,
+            url: str,
+            *,
+            timeout: float | None = None,
+            wait_until: str | None = None,
+            referer: str | None = None,
+        ) -> FakeResponse:
+            if status is not None:
+                self.emit_navigation_response(
+                    status=status,
+                    url=url,
+                    headers={"content-type": "text/html", "retry-after": "5"},
+                )
+            raise RuntimeError(f'Page.goto: {error_name}\nCall log:\n  - navigating to "{url}"')
+
+    page = EmptyErrorStatusPage(context)
+    context.pages.append(page)
+    return page
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("error_name", "status"),
+    [("NS_ERROR_NET_EMPTY_RESPONSE", 429), ("NS_ERROR_NET_ERROR_RESPONSE", 503)],
+)
+async def test_empty_bodied_error_status_is_an_ordinary_upstream_status(
+    error_name: str,
+    status: int,
+) -> None:
+    context = FakeContext()
+    page = _empty_error_status_page(context, error_name=error_name, status=status)
+
+    result = await solve_request(
+        V1Request(cmd="request.get", url="https://example.com/busy", maxTimeout=60000),
+        context=context,
+        page=page,
+    )
+
+    assert result.status == "ok"
+    assert result.error_code is None
+    assert result.solution is not None
+    assert result.solution.status == status
+    assert result.solution.url == "https://example.com/busy"
+    assert result.solution.headers["retry-after"] == "5"
+    # The page itself is still about:blank; its document is not the target's body.
+    assert result.solution.response == ""
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("status", [None, 200])
+async def test_empty_response_error_without_an_error_status_stays_an_error(
+    status: int | None,
+) -> None:
+    context = FakeContext()
+    page = _empty_error_status_page(
+        context,
+        error_name="NS_ERROR_NET_EMPTY_RESPONSE",
+        status=status,
+    )
+
+    result = await solve_request(
+        V1Request(cmd="request.get", url="https://example.com/", maxTimeout=60000),
+        context=context,
+        page=page,
+    )
+
+    assert result.status == "error"
+    assert result.error_code is V1ErrorCode.INTERNAL_ERROR
+
+
 # A captured Cloudflare WAF block response (host and client IP replaced).
 _CLOUDFLARE_BLOCK_PAGE = (
     "<!DOCTYPE html>\n"

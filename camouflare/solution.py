@@ -44,6 +44,28 @@ BEST_EFFORT_BROWSER_ERROR_MARKERS = (
     "target crashed",
 )
 
+# Firefox network failures where the target could not deliver a response at all.
+# Proxy failures have their own NS_ERROR_PROXY_* / NS_ERROR_UNKNOWN_PROXY_HOST names.
+TARGET_UNREACHABLE_ERROR_NAMES = frozenset(
+    {
+        "NS_ERROR_UNKNOWN_HOST",
+        "NS_ERROR_CONNECTION_REFUSED",
+        "NS_ERROR_NET_RESET",
+        "NS_ERROR_NET_INTERRUPT",
+        "NS_ERROR_NET_PARTIAL_TRANSFER",
+    }
+)
+
+# Firefox fails a navigation whose 4xx (EMPTY) or 5xx (ERROR) response has an empty
+# body, after reporting that response; the target did answer.
+EMPTY_ERROR_RESPONSE_ERROR_NAMES = frozenset(
+    {"NS_ERROR_NET_EMPTY_RESPONSE", "NS_ERROR_NET_ERROR_RESPONSE"}
+)
+
+# Playwright puts the error name on the first line ("Page.goto: NS_ERROR_..."); the
+# call log after it can echo the target URL, so nothing past that token is matched.
+_BROWSER_ERROR_NAME_PATTERN = re.compile(r"(?:[A-Za-z]+\.[A-Za-z]+: )?(NS_[A-Z0-9_]+)\b")
+
 logger = logging.getLogger(__name__)
 
 
@@ -296,6 +318,22 @@ def log_best_effort_collection_failure(message: str, exc: Exception) -> None:
 def is_best_effort_browser_error(exc: Exception) -> bool:
     message = str(exc).lower()
     return any(marker in message for marker in BEST_EFFORT_BROWSER_ERROR_MARKERS)
+
+
+def browser_error_name(exc: Exception) -> str | None:
+    """Return the Firefox ``NS_*`` result name that leads a Playwright error, if any."""
+
+    first_line = str(exc).partition("\n")[0].strip()
+    match = _BROWSER_ERROR_NAME_PATTERN.match(first_line)
+    return match.group(1) if match else None
+
+
+def is_target_unreachable_error(exc: Exception) -> bool:
+    return browser_error_name(exc) in TARGET_UNREACHABLE_ERROR_NAMES
+
+
+def is_empty_error_response_error(exc: Exception) -> bool:
+    return browser_error_name(exc) in EMPTY_ERROR_RESPONSE_ERROR_NAMES
 
 
 def navigation_error_message(

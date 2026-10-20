@@ -5,11 +5,33 @@ All notable changes to Camouflare are documented here. The project follows
 
 ## [Unreleased]
 
+### Added
+
+- `TARGET_UNREACHABLE` error code for browser navigations that get no response from the
+  target: DNS failure, connection refused or reset, and interrupted or partial transfer
+  (Firefox `NS_ERROR_UNKNOWN_HOST`, `NS_ERROR_CONNECTION_REFUSED`, `NS_ERROR_NET_RESET`,
+  `NS_ERROR_NET_INTERRUPT`, `NS_ERROR_NET_PARTIAL_TRANSFER`). A GET is retryable; these
+  were `INTERNAL_ERROR` with a traceback before.
+- Error completion logs carry `error_message`: the first line of the response message,
+  at most 300 characters, redacted like every other field.
+
 ### Changed
 
 - The Docker Hub mirror points `latest` at a release when it is the newest
   `vMAJOR.MINOR.PATCH` tag in the repository; version tags stay immutable and GHCR keeps
   exact version tags only.
+- At `LOG_LEVEL=INFO` and above, the captcha solver's per-request prepare/cleanup INFO
+  lines (`playwright_captcha.solvers.base_solver`) are suppressed; `DEBUG` keeps them.
+  Challenge-solving progress and solver warnings are unchanged.
+
+### Fixed
+
+- A 4xx/5xx target response with an empty body returns `status: "ok"` with the upstream
+  status in `solution.status` and an empty `solution.response`, like any other upstream
+  error status. Firefox fails such navigations with `NS_ERROR_NET_EMPTY_RESPONSE` or
+  `NS_ERROR_NET_ERROR_RESPONSE`, which were reported as `INTERNAL_ERROR`.
+- `Failed to close browser.` logs the retire reason, exception type, and traceback;
+  failures whose message is empty, such as a cancellation, were logged with no cause.
 
 ## [2.0.2] - 2026-10-05
 

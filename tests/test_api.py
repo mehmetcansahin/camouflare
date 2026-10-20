@@ -1295,6 +1295,7 @@ async def test_v1_expected_error_has_completion_without_traceback(
     )
     assert response.json()["errorCode"] == "INVALID_REQUEST"
     assert completion.error_code == "INVALID_REQUEST"  # type: ignore[attr-defined]
+    assert completion.error_message == "Request parameter 'cmd' = 'nope' is invalid."  # type: ignore[attr-defined]
     assert completion.exc_info is None
     assert not any(record.exc_info for record in caplog.records)
 

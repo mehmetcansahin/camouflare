@@ -78,6 +78,10 @@ from camouflare.timer import TimeoutTimer
 
 logger = logging.getLogger(__name__)
 
+# Completion logs keep one bounded line of an error message: enough to name the
+# cause without copying multi-line browser call logs into every record.
+MAX_LOGGED_ERROR_MESSAGE_CHARS = 300
+
 AppLifespan = Callable[[FastAPI], AbstractAsyncContextManager[None]]
 
 # Private aliases are retained for callers that used the original single-module
@@ -577,11 +581,24 @@ def create_app(
                 "duration_ms": round((time.monotonic() - started) * 1000),
                 "target_host": target_host,
                 "fallback_used": bool(response.fallback_used),
+                "error_message": (
+                    _loggable_error_message(response.message)
+                    if response.status == "error"
+                    else None
+                ),
             },
         )
         return JSONResponse(payload, status_code=status_code)
 
     return app
+
+
+def _loggable_error_message(message: str | None) -> str | None:
+    """Return an error message's bounded first line; log formatters redact it."""
+
+    if not message:
+        return None
+    return message.partition("\n")[0][:MAX_LOGGED_ERROR_MESSAGE_CHARS]
 
 
 def _safe_target_host(url: str | None) -> str | None:

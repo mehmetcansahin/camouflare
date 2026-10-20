@@ -246,6 +246,8 @@ def _post_request_failure(exc: Exception) -> CamouflareError:
         error_code = V1ErrorCode.BROWSER_TRANSPORT_CLOSED
     elif _is_timeout_error(exc):
         error_code = V1ErrorCode.NAVIGATION_TIMEOUT
+    elif _solution.is_target_unreachable_error(exc):
+        error_code = V1ErrorCode.TARGET_UNREACHABLE
     else:
         error_code = V1ErrorCode.INTERNAL_ERROR
     return CamouflareError(
@@ -306,6 +308,7 @@ async def _run_solve_inner(
             ),
         )
 
+    navigation_error: Exception | None = None
     try:
         if request.cmd == "request.post":
             response = await _submit_post(
@@ -328,17 +331,33 @@ async def _run_solve_inner(
     except ResourceLimitError:
         raise
     except Exception as exc:
+        response = _empty_error_response(exc, final_response)
+        if response is None:
+            navigation_error = exc
+    if (exc := navigation_error) is not None:
+        domain_error = exc if isinstance(exc, CamouflareError) else None
         timed_out = _is_timeout_error(exc)
         transport_closed = _is_best_effort_browser_error(exc)
-        domain_error = exc if isinstance(exc, CamouflareError) else None
+        unreachable = (
+            domain_error is None
+            and not timed_out
+            and not transport_closed
+            and _solution.is_target_unreachable_error(exc)
+        )
         if timed_out:
             record_timeout("navigation")
         if transport_closed and request.cmd == "request.post":
             _emit_browser_transport_error(exc, phase="navigation")
-        if domain_error is None and not timed_out and not transport_closed:
-            logger.exception(
+        if unreachable:
+            logger.warning(
+                "Target unreachable during navigation.",
+                extra={"error": _solution.browser_error_name(exc)},
+            )
+        elif domain_error is None and not timed_out and not transport_closed:
+            logger.error(
                 "Unexpected navigation error.",
                 extra={"error_code": V1ErrorCode.INTERNAL_ERROR.value},
+                exc_info=exc,
             )
         content = await _safe_page_content(page, limits) if inspect_response_content else ""
         return V1Response(
@@ -351,6 +370,8 @@ async def _run_solve_inner(
                 if transport_closed
                 else V1ErrorCode.NAVIGATION_TIMEOUT
                 if timed_out
+                else V1ErrorCode.TARGET_UNREACHABLE
+                if unreachable
                 else V1ErrorCode.INTERNAL_ERROR
             ),
             retryable=(
@@ -358,7 +379,7 @@ async def _run_solve_inner(
                 if post_state.started
                 else domain_error.retryable
                 if domain_error is not None
-                else request.cmd == "request.get" and (transport_closed or timed_out)
+                else request.cmd == "request.get" and (transport_closed or timed_out or unreachable)
             ),
             request_outcome_unknown=(
                 (post_state.started or domain_error.request_outcome_unknown)
@@ -568,6 +589,27 @@ def _effective_response(response: Any, final_response: MainFrameResponseHolder) 
 def _response_status(response: Any) -> int | None:
     status = getattr(response, "status", None)
     return status if isinstance(status, int) else None
+
+
+def _empty_error_response(
+    exc: Exception,
+    final_response: MainFrameResponseHolder,
+) -> _navigation.RawResponse | None:
+    """Return the empty-bodied 4xx/5xx response a failed Firefox navigation reported.
+
+    Firefox refuses to render such a document and fails ``goto``, but the target did
+    answer: report it like any other upstream error status, with an empty body.
+    """
+    upstream = final_response["value"]
+    status = _response_status(upstream)
+    if status is None or status < 400 or not _solution.is_empty_error_response_error(exc):
+        return None
+    return _navigation.RawResponse(
+        url=_response_url(upstream),
+        status=status,
+        headers=dict(getattr(upstream, "headers", {}) or {}),
+        body="",
+    )
 
 
 async def _buffered_response_text(response: Any) -> str | None:

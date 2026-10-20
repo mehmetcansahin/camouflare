@@ -1234,7 +1234,13 @@ class BrowserPool:
                     succeeded = True
                     break
         except BaseException as exc:
-            logger.error("Failed to close browser (%s): %s", slot.retire_reason, exc)
+            # str() is empty for several failures (CancelledError, bare TimeoutError),
+            # so the type and traceback carry the diagnosis.
+            logger.error(
+                "Failed to close browser.",
+                extra={"retire_reason": slot.retire_reason, "error_type": type(exc).__name__},
+                exc_info=exc,
+            )
         finally:
             async with self._condition:
                 self._finish_close_slot_unlocked(slot, succeeded=succeeded)

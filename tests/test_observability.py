@@ -10,6 +10,7 @@ import pytest
 
 import camouflare.metrics as metrics
 from camouflare.observability import (
+    CAPTCHA_SOLVER_LIFECYCLE_LOGGER,
     MAX_REQUEST_ID_LENGTH,
     REDACTED,
     REDACTED_URL,
@@ -318,6 +319,35 @@ def test_configure_logging_supports_json_and_rejects_unknown_format() -> None:
 
     with pytest.raises(ValueError, match="text or json"):
         configure_logging(log_format="xml")
+
+
+@pytest.mark.parametrize(
+    ("level", "lifecycle_shown"),
+    [(logging.INFO, False), (logging.DEBUG, True)],
+)
+def test_configure_logging_keeps_captcha_solver_lifecycle_for_debug_only(
+    level: int,
+    lifecycle_shown: bool,
+) -> None:
+    stream = io.StringIO()
+    root = logging.getLogger()
+    original_level = root.level
+    lifecycle = logging.getLogger(CAPTCHA_SOLVER_LIFECYCLE_LOGGER)
+    original_lifecycle_level = lifecycle.level
+    handler = configure_logging(level=level, stream=stream, replace_handlers=False)
+    try:
+        lifecycle.info("Applying Camoufox optimizations...")
+        lifecycle.warning("ClickSolver is already prepared, skipping prepare()")
+        logging.getLogger("playwright_captcha.solvers.click.cloudflare").info("Solved successfully")
+    finally:
+        root.removeHandler(handler)
+        root.setLevel(original_level)
+        lifecycle.setLevel(original_lifecycle_level)
+
+    output = stream.getvalue()
+    assert ("Applying Camoufox optimizations" in output) is lifecycle_shown
+    assert "already prepared" in output
+    assert "Solved successfully" in output
 
 
 def test_metrics_hooks_bound_labels_and_publish_snapshots() -> None:

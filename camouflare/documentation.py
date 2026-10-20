@@ -715,7 +715,9 @@ DOCUMENTATION_HTML = """
         <code>TARGET_BLOCKED</code> without calling the challenge solver; an unresolved
         challenge still returns <code>CHALLENGE_FAILED</code>. A 403 or 503 status
         alone is not proof of a bot block: ordinary upstream errors remain
-        <code>status: "ok"</code> with that status in <code>solution.status</code>.
+        <code>status: "ok"</code> with that status in <code>solution.status</code>,
+        including a 4xx/5xx with an empty body that Firefox refuses to render (its
+        <code>solution.response</code> is empty).
         A cookies-only POST never reads its response body, so it cannot classify
         body-based challenges or blocks.
       </p>
@@ -734,7 +736,8 @@ DOCUMENTATION_HTML = """
         <code>RESOURCE_LIMIT_EXCEEDED</code>, <code>POOL_UNAVAILABLE</code>,
         <code>REQUEST_TIMEOUT</code>, <code>NAVIGATION_TIMEOUT</code>,
         <code>BROWSER_TRANSPORT_CLOSED</code>, <code>CHALLENGE_FAILED</code>,
-        <code>TARGET_BLOCKED</code>, <code>RESPONSE_DECODE_ERROR</code>, and
+        <code>TARGET_BLOCKED</code>, <code>TARGET_UNREACHABLE</code>,
+        <code>RESPONSE_DECODE_ERROR</code>, and
         <code>INTERNAL_ERROR</code>. New metadata is optional so existing clients can
         continue using <code>status</code> and <code>message</code> unchanged.
       </p>
@@ -803,6 +806,17 @@ DOCUMENTATION_HTML = """
             <td>
               <code>TARGET_BLOCKED</code>; not retryable. The solution retains the
               upstream status, and its body is omitted for cookies-only GET.
+            </td>
+          </tr>
+          <tr>
+            <td>
+              The browser gets no response from the target: DNS failure, connection
+              refused or reset, or an interrupted transfer.
+            </td>
+            <td>HTTP 500</td>
+            <td>
+              <code>TARGET_UNREACHABLE</code>; a GET is retryable, a POST is not
+              automatically retryable.
             </td>
           </tr>
           <tr>
