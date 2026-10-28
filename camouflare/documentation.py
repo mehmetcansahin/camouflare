@@ -7,13 +7,16 @@ Supported commands:
 - `sessions.create`: create or reuse a persistent browser session.
 - `sessions.list`: list active persistent session ids.
 - `sessions.destroy`: close and remove a persistent browser session.
-- `request.get`: navigate to a URL and return the solved page payload.
+- `request.get`: navigate to a URL and return the solved page payload, or with
+  `transport: "http"` send a browserless HTTPS GET.
 - `request.post`: submit form or raw JSON data to a URL and return the solved page payload.
+- `request.head`: send a browserless HTTPS HEAD request and return its status,
+  headers, and cookies.
 
 The endpoint always returns the Camouflare envelope with `status`, `message`,
-timestamps, and `version`. Browser capacity timeouts return HTTP 503. Invalid
-commands, missing required command fields, and session errors return the same
-envelope with HTTP 500.
+timestamps, and `version`. Browser and HTTP transport capacity timeouts return
+HTTP 503. Invalid commands, missing required command fields, and session errors
+return the same envelope with HTTP 500.
 """.strip()
 
 V1_REQUEST_EXAMPLES = {
@@ -24,6 +27,40 @@ V1_REQUEST_EXAMPLES = {
             "cmd": "request.get",
             "url": "https://example.com",
             "maxTimeout": 60000,
+        },
+    },
+    "request.get-http": {
+        "summary": "Fetch an image over the HTTP transport",
+        "description": (
+            "Send a browserless HTTPS GET through a SOCKS5 proxy and return the "
+            "exact image bytes as base64. Headers are forwarded as given."
+        ),
+        "value": {
+            "cmd": "request.get",
+            "url": "https://cdn.example.com/logo.png",
+            "transport": "http",
+            "responseEncoding": "base64",
+            "maxResponseBytes": 10485760,
+            "headers": {"Accept": "image/*", "Referer": "https://example.com/"},
+            "proxy": {
+                "url": "socks5h://proxy.example:1080",
+                "username": "user",
+                "password": "pass",
+            },
+            "maxTimeout": 30000,
+        },
+    },
+    "request.head": {
+        "summary": "Inspect a redirect without a body",
+        "description": (
+            "Send a browserless HTTPS HEAD request. With followRedirects 0 a "
+            "redirect is returned as-is, including its Location header."
+        ),
+        "value": {
+            "cmd": "request.head",
+            "url": "https://example.com/downloads/latest",
+            "followRedirects": 0,
+            "maxTimeout": 15000,
         },
     },
     "request.post": {
@@ -297,9 +334,10 @@ DOCUMENTATION_HTML = """
       <h1>Camouflare API Documentation</h1>
       <p class="lede">
         Camouflare exposes a FastAPI service for browser-backed requests,
-        persistent sessions, proxy routing, cookie capture, screenshots,
-        lightweight liveness checks, browser-readiness checks, optional challenge
-        handling, passive diagnostics, and optional Prometheus metrics.
+        browserless HTTP requests, persistent sessions, proxy routing, cookie
+        capture, screenshots, lightweight liveness checks, browser-readiness
+        checks, optional challenge handling, passive diagnostics, and optional
+        Prometheus metrics.
       </p>
       <p class="lede">
         Use Camouflare only on systems you own, administer, or have permission
@@ -326,6 +364,7 @@ DOCUMENTATION_HTML = """
       <a href="#command-examples">Command examples</a>
       <a href="#request-fields">Request fields</a>
       <a href="#responses">Responses</a>
+      <a href="#http-transport">HTTP transport</a>
       <a href="#error-reference">Errors</a>
       <a href="#sessions">Sessions</a>
       <a href="#proxy">Proxy</a>
@@ -399,9 +438,13 @@ DOCUMENTATION_HTML = """
         <div class="box">
           <p><span class="method">GET</span> <code>/diagnostics</code></p>
           <p>
-            Returns a passive, token-protected pool, session, cleanup, and runtime
-            snapshot without leasing browser capacity. A successful snapshot uses
-            HTTP 200 even when <code>capacity_state</code> is not available.
+            Returns a passive, token-protected pool, HTTP transport, session,
+            cleanup, and runtime snapshot without leasing browser capacity. A
+            successful snapshot uses HTTP 200 even when <code>capacity_state</code>
+            is not available. <code>capacity_state</code> describes browser capacity
+            only; the <code>http</code> object reports the HTTP transport's
+            <code>max_concurrency</code>, <code>active_requests</code>,
+            <code>waiting_requests</code>, and <code>available_slots</code>.
           </p>
         </div>
         <div class="box">
@@ -410,7 +453,7 @@ DOCUMENTATION_HTML = """
         </div>
         <div class="box">
           <p><span class="method">POST</span> <code>/v1</code></p>
-          <p>Runs all session and browser request commands.</p>
+          <p>Runs session, browser request, and HTTP transport commands.</p>
         </div>
       </div>
 
@@ -442,12 +485,20 @@ DOCUMENTATION_HTML = """
           <tr>
             <td><code>request.get</code></td>
             <td><code>url</code></td>
-            <td>Open a URL and return its browser-backed or origin-bounded response.</td>
+            <td>
+              Open a URL and return its browser-backed or origin-bounded response, or,
+              with <code>transport: "http"</code>, a browserless HTTPS response.
+            </td>
           </tr>
           <tr>
             <td><code>request.post</code></td>
             <td><code>url</code>, <code>postData</code></td>
             <td>Submit form or raw JSON data without following redirects.</td>
+          </tr>
+          <tr>
+            <td><code>request.head</code></td>
+            <td><code>url</code></td>
+            <td>Send a browserless HTTPS HEAD request and return status, headers, and cookies.</td>
           </tr>
         </tbody>
       </table>
@@ -499,7 +550,8 @@ DOCUMENTATION_HTML = """
         When non-<code>User-Agent</code> target headers are present, the request
         instead uses stateless direct HTTP so cross-origin redirects can remove
         those headers. That mode does not support sessions, proxies, screenshots,
-        JavaScript rendering, or browser challenge handling.
+        JavaScript rendering, or browser challenge handling. Use
+        <code>transport: "http"</code> to send such headers through a proxy.
       </p>
       <p>
         DOM readiness and commit grace each wait at most 15 seconds within the shared
@@ -516,6 +568,30 @@ DOCUMENTATION_HTML = """
   "maxTimeout": 60000,
   "returnScreenshot": true,
   "disableMedia": true
+}</code></pre>
+      <p>
+        With <code>transport: "http"</code>, <code>request.get</code> skips the browser
+        and sends one HTTPS request, optionally through a proxy, with headers
+        forwarded as given; see <a href="#http-transport">HTTP Transport</a>. This
+        example fetches an image through a SOCKS5 proxy and returns its exact bytes as
+        base64:
+      </p>
+      <pre><code>{
+  "cmd": "request.get",
+  "url": "https://cdn.example.com/logo.png",
+  "transport": "http",
+  "responseEncoding": "base64",
+  "maxResponseBytes": 10485760,
+  "headers": {
+    "Accept": "image/*",
+    "Referer": "https://example.com/"
+  },
+  "proxy": {
+    "url": "socks5h://proxy.example:1080",
+    "username": "user",
+    "password": "pass"
+  },
+  "maxTimeout": 30000
 }</code></pre>
 
       <h3 id="request-post"><code>request.post</code></h3>
@@ -537,6 +613,23 @@ DOCUMENTATION_HTML = """
   "maxTimeout": 60000
 }</code></pre>
 
+      <h3 id="request-head"><code>request.head</code></h3>
+      <p>
+        Sends a HEAD request over the <a href="#http-transport">HTTP transport</a> and
+        returns the final URL, status, headers, and cookies. <code>transport</code>
+        may be omitted or <code>"http"</code>; <code>"browser"</code> is rejected with
+        <code>INVALID_REQUEST</code>. The solution has <code>response: ""</code> and
+        <code>bodyBytes: 0</code>. With <code>followRedirects: 0</code> a redirect is
+        returned as-is, so its <code>Location</code> header can be read without
+        following it.
+      </p>
+      <pre><code>{
+  "cmd": "request.head",
+  "url": "https://example.com/downloads/latest",
+  "followRedirects": 0,
+  "maxTimeout": 15000
+}</code></pre>
+
       <h2 id="request-fields">Request Fields</h2>
       <table>
         <thead>
@@ -555,7 +648,11 @@ DOCUMENTATION_HTML = """
           <tr>
             <td><code>url</code></td>
             <td>string</td>
-            <td>Required for <code>request.get</code> and <code>request.post</code>.</td>
+            <td>
+              Required for <code>request.get</code>, <code>request.post</code>, and
+              <code>request.head</code>. The HTTP transport accepts only
+              <code>https</code> URLs.
+            </td>
           </tr>
           <tr>
             <td><code>maxTimeout</code></td>
@@ -578,13 +675,17 @@ DOCUMENTATION_HTML = """
           <tr>
             <td><code>proxy</code></td>
             <td>object</td>
-            <td>Supports <code>url</code> or <code>server</code>, plus credentials.</td>
+            <td>
+              Supports <code>url</code> or <code>server</code>, plus credentials. Used
+              by browser contexts and the HTTP transport; see <a href="#proxy">Proxy</a>.
+            </td>
           </tr>
           <tr>
             <td><code>cookies</code></td>
             <td>array</td>
             <td>
-              Cookies to inject before navigation. Each entry needs <code>name</code>
+              Cookies to inject before navigation, or to send with an HTTP transport
+              request. Each entry needs <code>name</code>
               and <code>value</code> plus <code>url</code> or <code>domain</code>;
               with neither, the cookie is scoped to the target <code>url</code>.
               <code>path</code>, <code>expires</code> (or Selenium's
@@ -600,18 +701,22 @@ DOCUMENTATION_HTML = """
             <td>
               Origin-bound target headers. Non-<code>User-Agent</code> headers make a
               stateless, proxyless <code>request.get</code> use direct HTTP, where they
-              are removed before cross-origin redirects. <code>request.post</code> uses
-              the browser context request transport with redirects disabled.
-              <code>User-Agent</code> is the compatibility exception: it configures
-              browser identity for the whole context.
+              are removed before cross-origin redirects. With
+              <code>transport: "http"</code> they are forwarded as given, also through a
+              proxy, and removed before cross-origin redirects;
+              <code>transport: "browser"</code> rejects them on <code>request.get</code>.
+              <code>request.post</code> uses the browser context request transport with
+              redirects disabled. <code>User-Agent</code> is the compatibility exception:
+              it configures browser identity for the whole context.
             </td>
           </tr>
           <tr>
             <td><code>userAgent</code></td>
             <td>string</td>
             <td>
-              Browser User-Agent override for new contexts. Takes precedence over
-              <code>User-Agent</code> in <code>headers</code>.
+              Browser User-Agent override for new contexts, and the
+              <code>User-Agent</code> header of an HTTP transport request. Takes
+              precedence over <code>User-Agent</code> in <code>headers</code>.
             </td>
           </tr>
           <tr>
@@ -619,7 +724,8 @@ DOCUMENTATION_HTML = """
             <td>boolean</td>
             <td>
               When true, returnOnlyCookies omits response HTML, headers, and
-              screenshots from <code>solution</code>.
+              screenshots from <code>solution</code>. The HTTP transport then never
+              reads the response body.
             </td>
           </tr>
           <tr>
@@ -647,6 +753,44 @@ DOCUMENTATION_HTML = """
               or another <code>+json</code> media type.
             </td>
           </tr>
+          <tr>
+            <td><code>transport</code></td>
+            <td>string</td>
+            <td>
+              <code>"http"</code> sends <code>request.get</code> as a browserless HTTPS
+              request; <code>"browser"</code> always navigates in a browser context.
+              When omitted, <code>request.get</code> and <code>request.post</code> keep
+              automatic transport selection and <code>request.head</code> uses
+              <code>"http"</code>. See <a href="#http-transport">HTTP Transport</a>.
+            </td>
+          </tr>
+          <tr>
+            <td><code>responseEncoding</code></td>
+            <td>string</td>
+            <td>
+              HTTP transport only. <code>"text"</code> (default) decodes the body with
+              its charset; <code>"base64"</code> returns the exact body bytes, after
+              <code>gzip</code> or <code>deflate</code> removal, as base64.
+            </td>
+          </tr>
+          <tr>
+            <td><code>maxResponseBytes</code></td>
+            <td>integer</td>
+            <td>
+              HTTP transport only. Response body byte limit, greater than zero and at
+              most <code>MAX_RESPONSE_BODY_BYTES</code>, which is also the default. A
+              larger body returns <code>RESOURCE_LIMIT_EXCEEDED</code>.
+            </td>
+          </tr>
+          <tr>
+            <td><code>followRedirects</code></td>
+            <td>integer</td>
+            <td>
+              HTTP transport only. Redirects to follow, from 0 to 10 (default 10). With
+              0 any redirect response is returned as-is; a redirect beyond the limit is
+              returned as the response.
+            </td>
+          </tr>
         </tbody>
       </table>
 
@@ -668,7 +812,8 @@ DOCUMENTATION_HTML = """
 }</code></pre>
       <p>
         Errors use the same envelope with <code>status: "error"</code>.
-        Pool saturation returns HTTP 503; malformed commands return HTTP 500.
+        Browser pool or HTTP transport capacity exhaustion returns HTTP 503; malformed
+        commands return HTTP 500.
         Optional <code>errorCode</code> and <code>retryable</code> fields let clients
         classify failures without parsing <code>message</code>.
         <code>requestOutcomeUnknown</code> is true when a failed POST may have reached
@@ -690,25 +835,41 @@ DOCUMENTATION_HTML = """
         Unsupported or invalid direct HTTP compression instead ends the request with
         <code>RESPONSE_DECODE_ERROR</code>, without a browser retry.
         Neither the preflight nor the transport-failure fallback runs when a
-        request-level or environment proxy is set.
+        request-level or environment proxy is set, or when the request sets
+        <code>transport: "browser"</code>.
       </p>
       <p>
         A GET with non-<code>User-Agent</code> target headers always uses the same
         bounded direct HTTP transport, even without <code>ajax=true</code>, and never
         falls back to browser navigation. It is rejected when a session, proxy, or
         screenshot is requested because those features cannot preserve the header
-        boundary. A POST never follows redirects and reports its first response.
+        boundary; set <code>transport: "http"</code> to send such headers through a
+        proxy. A POST never follows redirects and reports its first response.
       </p>
       <p>
-        Direct HTTP GET advertises <code>gzip, deflate</code> by default and decodes
-        content encodings before applying the response charset. Concatenated gzip
-        members and up to four stacked encodings are supported. The response byte
-        limit applies to the wire body and every decoded layer under the shared
-        request deadline. Unsupported, malformed, or truncated compression returns
-        <code>RESPONSE_DECODE_ERROR</code>; size violations return
-        <code>RESOURCE_LIMIT_EXCEEDED</code>. Upstream response headers are preserved.
-        Cookies-only GET inspects at most a 64 KiB decoded prefix and does not
-        validate an unread remainder.
+        Direct HTTP requests made by the browser path, meaning the preflight, the
+        fallbacks, and header-bearing GETs, accept <code>http</code> and
+        <code>https</code> targets including private addresses, never use a proxy, and
+        follow up to ten redirects; a redirect beyond the tenth, or to a URL that cannot
+        be requested, is returned as the response instead of failing. They share the
+        <code>HTTP_MAX_CONCURRENCY</code> slots of the HTTP transport, but only a
+        header-bearing GET waits for a free slot: the preflight and the fallbacks fall
+        back to browser navigation at once when every slot is busy. A header-bearing
+        GET that cannot reach the target (DNS failure, refused or reset connection, or
+        failed TLS handshake) returns <code>TARGET_UNREACHABLE</code>, retryable unless
+        the target certificate failed verification.
+      </p>
+      <p>
+        Direct HTTP GET and the HTTP transport advertise <code>gzip, deflate</code> by
+        default and remove those content encodings before applying the response
+        charset or base64 encoding. Concatenated gzip members and up to four stacked
+        encodings are supported. The response byte limit applies to the wire body and
+        every decoded layer under the shared request deadline. Any other encoding, such
+        as <code>br</code> or <code>zstd</code>, and malformed or truncated compression
+        return <code>RESPONSE_DECODE_ERROR</code>; size violations return
+        <code>RESOURCE_LIMIT_EXCEEDED</code>. Direct HTTP preserves upstream response
+        headers. Cookies-only GET over direct HTTP inspects at most a 64 KiB decoded
+        prefix and does not validate an unread remainder.
       </p>
       <p>
         Confirmed Cloudflare-style hard block documents return
@@ -729,6 +890,149 @@ DOCUMENTATION_HTML = """
   "requestOutcomeUnknown": true
 }</code></pre>
 
+      <h2 id="http-transport">HTTP Transport</h2>
+      <p>
+        <code>request.head</code>, and <code>request.get</code> with
+        <code>transport: "http"</code>, send one stateless HTTP request without a
+        browser. They never lease a browser context; instead they use the HTTP
+        transport's own <code>HTTP_MAX_CONCURRENCY</code> slots, which the browser
+        path's direct HTTP requests share. A request that finds every slot busy waits
+        within its own <code>maxTimeout</code>, not <code>POOL_ACQUIRE_TIMEOUT_MS</code>,
+        and then returns HTTP 503 <code>POOL_UNAVAILABLE</code>. A target that does not
+        respond within <code>maxTimeout</code>, less a reserve of up to one second,
+        returns <code>NAVIGATION_TIMEOUT</code>.
+      </p>
+      <ul>
+        <li>
+          Only <code>https</code> URLs are accepted, for the request and for every
+          redirect target; an <code>http</code> URL returns
+          <code>INVALID_REQUEST</code>.
+        </li>
+        <li>
+          Without a proxy, targets on private, loopback, link-local, cloud-metadata,
+          carrier-grade NAT, multicast, or other non-public addresses return
+          <code>INVALID_REQUEST</code>, including IPv4 addresses embedded in IPv6 and
+          hostnames whose DNS answer contains such an address. The connection goes to
+          the checked address, and TLS still verifies the certificate for the URL
+          hostname against the system trust store.
+        </li>
+        <li>
+          The request-level <code>proxy</code>, or else <code>PROXY_URL</code> /
+          <code>PROXY_SERVER</code>, is used when set: HTTP proxies through
+          <code>CONNECT</code>, HTTPS proxies, and SOCKS5 or SOCKS5h proxies, with
+          optional credentials. Both SOCKS5 forms let the proxy resolve the target
+          hostname, and the private-address check does not apply through a proxy.
+          A SOCKS4 proxy returns <code>INVALID_REQUEST</code>.
+        </li>
+        <li>
+          <code>headers</code> are sent as given, including <code>Referer</code>,
+          <code>Cookie</code>, and <code>Authorization</code>. Defaults only fill in a
+          missing <code>User-Agent</code>, <code>Accept</code>,
+          <code>Accept-Language</code>, and <code>Accept-Encoding: gzip, deflate</code>;
+          <code>userAgent</code> overrides <code>User-Agent</code>. Header values must
+          be Latin-1. <code>Host</code>, <code>Content-Length</code>,
+          <code>Transfer-Encoding</code>, <code>Connection</code>,
+          <code>Keep-Alive</code>, <code>Upgrade</code>, <code>TE</code>,
+          <code>Trailer</code>, <code>Proxy-Authorization</code>, and
+          <code>Proxy-Connection</code> belong to the transport and return
+          <code>INVALID_REQUEST</code>; put proxy credentials in <code>proxy</code>.
+          Every caller header except <code>User-Agent</code> is removed on redirect
+          hops to another origin.
+        </li>
+        <li>
+          <code>cookies</code> are sent to matching URLs, cookies the target sets are
+          kept across redirects, and <code>solution.cookies</code> returns both.
+        </li>
+        <li>
+          <code>followRedirects</code> (0 to 10, default 10) limits how many 301, 302,
+          303, 307, and 308 responses with a <code>Location</code> are followed, using
+          the same method. With 0 any redirect response is returned as-is, including
+          its <code>Location</code> header. A redirect beyond the limit, or one whose
+          <code>Location</code> cannot be requested (for example an <code>ftp:</code>
+          URL or an invalid port), is returned as the response instead of failing.
+        </li>
+        <li>
+          Only <code>gzip</code> and <code>deflate</code> are decoded. Any other
+          content encoding, for example <code>br</code> requested through a
+          caller-supplied <code>Accept-Encoding</code>, returns
+          <code>RESPONSE_DECODE_ERROR</code>.
+        </li>
+        <li>
+          <code>maxResponseBytes</code> (default and maximum
+          <code>MAX_RESPONSE_BODY_BYTES</code>) applies to the wire body and every
+          decoded layer. A larger body, including a declared
+          <code>Content-Length</code> over the limit, returns
+          <code>RESOURCE_LIMIT_EXCEEDED</code>; a <code>maxResponseBytes</code> above
+          <code>MAX_RESPONSE_BODY_BYTES</code> returns the same code before any request
+          is sent.
+        </li>
+        <li>
+          There is no challenge or block detection and no browser fallback: every
+          upstream status, including 403 and 503, is returned with
+          <code>status: "ok"</code>, and <code>fallbackUsed</code> is never set.
+        </li>
+        <li>
+          <code>session</code>, <code>session_ttl_minutes</code>,
+          <code>returnScreenshot</code>, a non-zero <code>waitInSeconds</code>,
+          <code>disableMedia</code>, and <code>postData</code> return
+          <code>INVALID_REQUEST</code>, as do <code>request.post</code> with
+          <code>transport: "http"</code> and <code>responseEncoding</code>,
+          <code>maxResponseBytes</code>, or <code>followRedirects</code> without the
+          HTTP transport. <code>transport: "http"</code> and the HTTP-only fields also
+          return <code>INVALID_REQUEST</code> on <code>sessions.*</code> commands.
+        </li>
+      </ul>
+      <p>
+        A completed request returns <code>status: "ok"</code> with the message
+        <code>HTTP request completed.</code>; <code>solution.url</code> is the final URL
+        and <code>solution.status</code> its status. <code>solution.headers</code> uses
+        lower-case names and combines repeated fields, <code>Set-Cookie</code> with
+        newlines and others with <code>", "</code>. Once gzip or deflate was removed,
+        <code>Content-Encoding</code> and <code>Content-Length</code> are omitted
+        because they describe the wire body. <code>solution.response</code> holds the
+        body as text decoded with the response charset (UTF-8 by default, invalid bytes
+        replaced) or, with <code>responseEncoding: "base64"</code>, the exact decoded
+        bytes as base64. <code>solution.responseEncoding</code> names that encoding,
+        <code>solution.bodyBytes</code> is the body's byte length, and
+        <code>solution.userAgent</code> is the <code>User-Agent</code> that was sent.
+        A <code>request.head</code> solution has <code>response: ""</code>,
+        <code>bodyBytes: 0</code>, and the headers as sent, including
+        <code>Content-Encoding</code> and <code>Content-Length</code>. With
+        <code>returnOnlyCookies</code> the body is never read and the solution holds
+        only <code>url</code>, <code>status</code>, <code>cookies</code>, and
+        <code>userAgent</code>.
+      </p>
+      <pre><code>{
+  "status": "ok",
+  "message": "HTTP request completed.",
+  "solution": {
+    "url": "https://cdn.example.com/logo.png",
+    "status": 200,
+    "headers": {
+      "content-type": "image/png",
+      "content-length": "5120",
+      "cache-control": "max-age=86400"
+    },
+    "response": "iVBORw0KGgoAAAANSUhEUgAA...",
+    "cookies": [],
+    "userAgent": "Mozilla/5.0 ...",
+    "responseEncoding": "base64",
+    "bodyBytes": 5120
+  },
+  "startTimestamp": 1770000000000,
+  "endTimestamp": 1770000000420,
+  "version": "2.1.0"
+}</code></pre>
+      <p>
+        <code>transport: "browser"</code> always navigates in a browser context. It
+        disables the <code>ajax=true</code> direct HTTP preflight and the direct HTTP
+        fallbacks after a browser transport failure or navigation timeout, rejects
+        non-<code>User-Agent</code> headers on <code>request.get</code> with
+        <code>INVALID_REQUEST</code>, and is rejected for <code>request.head</code>.
+        <code>request.post</code> keeps its browser context request transport. See the
+        <a href="#error-reference">Error Reference</a> for network and proxy failures.
+      </p>
+
       <h2 id="error-reference">Error Reference</h2>
       <p>
         Stable <code>errorCode</code> values are
@@ -737,7 +1041,7 @@ DOCUMENTATION_HTML = """
         <code>REQUEST_TIMEOUT</code>, <code>NAVIGATION_TIMEOUT</code>,
         <code>BROWSER_TRANSPORT_CLOSED</code>, <code>CHALLENGE_FAILED</code>,
         <code>TARGET_BLOCKED</code>, <code>TARGET_UNREACHABLE</code>,
-        <code>RESPONSE_DECODE_ERROR</code>, and
+        <code>PROXY_CONNECTION_ERROR</code>, <code>RESPONSE_DECODE_ERROR</code>, and
         <code>INTERNAL_ERROR</code>. New metadata is optional so existing clients can
         continue using <code>status</code> and <code>message</code> unchanged.
       </p>
@@ -752,6 +1056,15 @@ DOCUMENTATION_HTML = """
         <tbody>
           <tr>
             <td>Browser pool capacity is unavailable before timeout.</td>
+            <td>HTTP 503</td>
+            <td><code>POOL_UNAVAILABLE</code>; retryable.</td>
+          </tr>
+          <tr>
+            <td>
+              A <code>transport: "http"</code> or <code>request.head</code> request finds
+              every <code>HTTP_MAX_CONCURRENCY</code> slot busy until its deadline, or
+              the service is shutting down.
+            </td>
             <td>HTTP 503</td>
             <td><code>POOL_UNAVAILABLE</code>; retryable.</td>
           </tr>
@@ -811,18 +1124,67 @@ DOCUMENTATION_HTML = """
           <tr>
             <td>
               The browser gets no response from the target: DNS failure, connection
-              refused or reset, or an interrupted transfer.
+              refused or reset, or an interrupted transfer. Direct HTTP and the HTTP
+              transport also report a failed TLS handshake this way, and the HTTP
+              transport reports a proxy that cannot reach the target (SOCKS host or
+              network unreachable, connection refused, or TTL expired; HTTP
+              <code>CONNECT</code> 502 or 504).
             </td>
             <td>HTTP 500</td>
             <td>
-              <code>TARGET_UNREACHABLE</code>; a GET is retryable, a POST is not
-              automatically retryable.
+              <code>TARGET_UNREACHABLE</code>; a GET or HEAD is retryable, a POST is not
+              automatically retryable. A target certificate that fails verification
+              over direct HTTP or the HTTP transport is not retryable.
             </td>
           </tr>
           <tr>
-            <td>Direct HTTP compression is unsupported, malformed, or truncated.</td>
+            <td>
+              Direct HTTP or HTTP transport compression is unsupported, malformed, or
+              truncated.
+            </td>
             <td>HTTP 500</td>
             <td><code>RESPONSE_DECODE_ERROR</code>; not retryable.</td>
+          </tr>
+          <tr>
+            <td>
+              Through a proxy, the connection fails before the proxy reached the
+              target: the proxy is unreachable, times out, is not the configured proxy
+              type, closes the handshake, fails TLS verification as an HTTPS proxy, or
+              refuses the request (for example <code>403</code> or rejected
+              credentials).
+            </td>
+            <td>HTTP 500</td>
+            <td>
+              <code>PROXY_CONNECTION_ERROR</code>; retryable, except for rejected
+              credentials, a <code>4xx</code> answer to <code>CONNECT</code>, and an
+              HTTPS proxy certificate that fails verification.
+            </td>
+          </tr>
+          <tr>
+            <td>
+              The HTTP transport target does not respond before the request deadline,
+              including a TLS handshake that stalls after a proxy connected to it.
+            </td>
+            <td>HTTP 500</td>
+            <td><code>NAVIGATION_TIMEOUT</code>; retryable.</td>
+          </tr>
+          <tr>
+            <td>
+              An HTTP transport request targets an <code>http</code> URL or redirect, or
+              a non-public address without a proxy; uses a SOCKS4 proxy, a
+              transport-managed header, a non-Latin-1 header value, or an unsupported
+              field; or HTTP-only fields are sent without the HTTP transport.
+            </td>
+            <td>HTTP 500</td>
+            <td><code>INVALID_REQUEST</code>; not retryable without correction.</td>
+          </tr>
+          <tr>
+            <td>
+              A response body exceeds the response byte limit, or
+              <code>maxResponseBytes</code> exceeds <code>MAX_RESPONSE_BODY_BYTES</code>.
+            </td>
+            <td>HTTP 500</td>
+            <td><code>RESOURCE_LIMIT_EXCEEDED</code>; not retryable.</td>
           </tr>
         </tbody>
       </table>
@@ -858,6 +1220,16 @@ DOCUMENTATION_HTML = """
         session's existing proxy so later requests keep the same egress path.
         Request-level proxy settings take precedence over environment defaults.
         Use <code>url</code> or <code>server</code> for the proxy endpoint.
+      </p>
+      <p>
+        The HTTP transport (<code>transport: "http"</code> and
+        <code>request.head</code>) uses the same request-level or environment proxy.
+        It supports HTTP proxies through <code>CONNECT</code>, HTTPS proxies, and
+        SOCKS5 or SOCKS5h proxies with optional credentials; both SOCKS5 forms let the
+        proxy resolve the target hostname. SOCKS4 proxies return
+        <code>INVALID_REQUEST</code> there. The browser path's own direct HTTP requests
+        never use a proxy, so its <code>ajax=true</code> preflight and direct HTTP
+        fallbacks do not run when a proxy is set.
       </p>
       <pre><code>{
   "cmd": "request.get",
@@ -913,7 +1285,7 @@ DOCUMENTATION_HTML = """
           <tr>
             <td><code>PROXY_URL</code> / <code>PROXY_SERVER</code></td>
             <td>unset</td>
-            <td>Default proxy endpoint for browser contexts.</td>
+            <td>Default proxy endpoint for browser contexts and the HTTP transport.</td>
           </tr>
           <tr>
             <td><code>PROXY_USERNAME</code></td>
@@ -964,6 +1336,18 @@ DOCUMENTATION_HTML = """
             </td>
           </tr>
           <tr>
+            <td><code>HTTP_MAX_CONCURRENCY</code></td>
+            <td><code>8</code></td>
+            <td>
+              Concurrent requests on the browserless HTTP transport, separate from
+              browser context slots and shared by <code>transport: "http"</code>,
+              <code>request.head</code>, and the browser path's direct HTTP requests.
+              An HTTP transport request that finds every slot busy waits within its own
+              <code>maxTimeout</code>, not <code>POOL_ACQUIRE_TIMEOUT_MS</code>, before
+              HTTP 503 <code>POOL_UNAVAILABLE</code>. Must be greater than zero.
+            </td>
+          </tr>
+          <tr>
             <td><code>BROWSER_MAX_USES</code></td>
             <td><code>200</code></td>
             <td>
@@ -1008,7 +1392,10 @@ DOCUMENTATION_HTML = """
           <tr>
             <td><code>MAX_RESPONSE_BODY_BYTES</code></td>
             <td><code>33554432</code></td>
-            <td>Maximum returned HTML, JSON, XML, or text body.</td>
+            <td>
+              Maximum returned HTML, JSON, XML, or text body, and the default and upper
+              bound for <code>maxResponseBytes</code>.
+            </td>
           </tr>
           <tr>
             <td><code>MAX_SCREENSHOT_BYTES</code></td>
@@ -1052,7 +1439,7 @@ DOCUMENTATION_HTML = """
           <tr>
             <td><code>SHUTDOWN_TIMEOUT_SECONDS</code></td>
             <td><code>30</code></td>
-            <td>Shared browser and session shutdown deadline.</td>
+            <td>Shared browser, session, and HTTP transport shutdown deadline.</td>
           </tr>
           <tr>
             <td><code>CLEANUP_TIMEOUT_SECONDS</code></td>
@@ -1104,9 +1491,17 @@ DOCUMENTATION_HTML = """
           accepted as compatibility no-ops.
         </li>
         <li>
-          Origin-bound GET headers and all POST bodies use buffered HTTP transports
-          instead of a browser document navigation. JavaScript rendering, browser
-          challenge handling, and screenshots therefore do not apply to those responses.
+          Origin-bound GET headers, the HTTP transport, and all POST bodies use buffered
+          HTTP transports instead of a browser document navigation. JavaScript
+          rendering, browser challenge handling, and screenshots therefore do not apply
+          to those responses.
+        </li>
+        <li>
+          <code>transport</code>, <code>request.head</code>,
+          <code>responseEncoding</code>, <code>maxResponseBytes</code>,
+          <code>followRedirects</code>, and the solution's
+          <code>responseEncoding</code> and <code>bodyBytes</code> are Camouflare
+          extensions. Requests that omit them keep their previous behavior.
         </li>
         <li>
           Browser behavior still depends on target-site rules, IP reputation,

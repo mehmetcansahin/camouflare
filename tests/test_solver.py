@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 import camouflare.metrics as metrics_module
+import camouflare.navigation as navigation_module
 import camouflare.solver as solver_module
 from camouflare.errors import CamouflareError, V1ErrorCode
 from camouflare.limits import MAX_COOKIE_BYTES, ResourceLimitError, ResourceLimits, json_size
@@ -16,6 +17,7 @@ from camouflare.models import V1Request
 from camouflare.solver import MEDIA_PATTERNS, solve_request
 from camouflare.timer import TimeoutTimer
 from tests.fakes import FakeContext, FakePage, FakeResponse
+from tests.http_fakes import FakeHttpResponse, fake_transport
 
 
 def _metric_sample_value(collector: object, sample_name: str, **labels: str) -> float:
@@ -1477,50 +1479,24 @@ async def test_ajax_get_direct_challenge_falls_back_to_browser_navigation(
     assert page.goto_calls[-1]["url"] == "https://example.com/search?ajax=true"
 
 
-def test_direct_http_get_percent_encodes_non_ascii_url(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    opened_urls: list[str] = []
-
-    class Headers:
-        def get_content_charset(self) -> str:
-            return "utf-8"
-
-        def items(self) -> list[tuple[str, str]]:
-            return [("content-type", "text/html; charset=utf-8")]
-
-    class UrlopenResponse:
-        status = 200
-        headers = Headers()
-
-        def __enter__(self):  # type: ignore[no-untyped-def]
-            return self
-
-        def __exit__(self, *args: object) -> None:
-            return None
-
-        def read(self) -> bytes:
-            return b"ok"
-
-        def geturl(self) -> str:
-            return opened_urls[-1]
-
-    def fake_open(http_request: Any, timeout: float) -> UrlopenResponse:
-        opened_urls.append(http_request.full_url)
-        assert 0 < timeout <= 5
-        return UrlopenResponse()
-
-    monkeypatch.setattr(solver_module._HTTP_OPENER, "open", fake_open)
-
-    response = solver_module._direct_http_get_sync(
-        "https://biletino.example/search?location=İstanbul&ajax=true",
-        V1Request(cmd="request.get", url="https://biletino.example"),
-        5,
+@pytest.mark.anyio
+async def test_direct_http_get_percent_encodes_non_ascii_url() -> None:
+    transport, connector = fake_transport(
+        [FakeHttpResponse(200, [("Content-Type", "text/html; charset=utf-8")], body=b"ok")]
     )
 
-    assert opened_urls == ["https://biletino.example/search?location=%C4%B0stanbul&ajax=true"]
+    with navigation_module.active_http_transport(transport):
+        response = await navigation_module._direct_http_get(
+            "https://biletino.example/search?location=İstanbul&ajax=true",
+            V1Request(cmd="request.get", url="https://biletino.example"),
+            TimeoutTimer(5000),
+        )
+
+    encoded_url = "https://biletino.example/search?location=%C4%B0stanbul&ajax=true"
+    assert [hop.url for hop in connector.hops] == [encoded_url]
+    assert 0 < connector.hops[0].timeout_seconds <= 5
     assert response.status == 200
-    assert response.url == opened_urls[-1]
+    assert response.url == encoded_url
 
 
 @pytest.mark.anyio
@@ -1990,44 +1966,27 @@ async def test_turnstile_widget_input_on_normal_page_is_not_treated_as_challenge
     assert "Real page body" in result.solution.response
 
 
-def test_direct_http_get_falls_back_to_utf8_for_unknown_charset(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class Headers:
-        def get_content_charset(self) -> str:
-            return "totally-bogus-charset"
-
-        def items(self) -> list[tuple[str, str]]:
-            return [("content-type", "text/html; charset=totally-bogus-charset")]
-
-    class OpenerResponse:
-        status = 200
-        headers = Headers()
-
-        def __enter__(self):  # type: ignore[no-untyped-def]
-            return self
-
-        def __exit__(self, *args: object) -> None:
-            return None
-
-        def read(self) -> bytes:
-            return "café".encode()
-
-        def geturl(self) -> str:
-            return "https://example.com/x?ajax=true"
-
-    monkeypatch.setattr(
-        solver_module._HTTP_OPENER, "open", lambda request, timeout: OpenerResponse()
+@pytest.mark.anyio
+async def test_direct_http_get_falls_back_to_utf8_for_unknown_charset() -> None:
+    transport, _connector = fake_transport(
+        [
+            FakeHttpResponse(
+                200,
+                [("Content-Type", "text/html; charset=totally-bogus-charset")],
+                body="café".encode(),
+            )
+        ]
     )
 
-    response = solver_module._direct_http_get_sync(
-        "https://example.com/x?ajax=true",
-        V1Request(cmd="request.get", url="https://example.com/x?ajax=true"),
-        5,
-    )
+    with navigation_module.active_http_transport(transport):
+        response = await navigation_module._direct_http_get(
+            "https://example.com/x?ajax=true",
+            V1Request(cmd="request.get", url="https://example.com/x?ajax=true"),
+            TimeoutTimer(5000),
+        )
 
     assert response.status == 200
-    assert "café" in response._body
+    assert "café" in await response.text()
 
 
 @pytest.mark.anyio
@@ -2198,48 +2157,22 @@ async def test_oversized_api_response_is_disposed_before_error() -> None:
     assert response.disposed is True
 
 
-def test_direct_http_reads_only_limit_plus_one(monkeypatch: pytest.MonkeyPatch) -> None:
-    read_sizes: list[int] = []
+@pytest.mark.anyio
+async def test_direct_http_reads_only_limit_plus_one() -> None:
+    transport, connector = fake_transport([FakeHttpResponse(200, body=[b"x"] * 10)])
 
-    class Headers:
-        def get_content_charset(self) -> str:
-            return "utf-8"
-
-        def items(self) -> list[tuple[str, str]]:
-            return []
-
-    class Response:
-        status = 200
-        headers = Headers()
-
-        def __enter__(self) -> Response:
-            return self
-
-        def __exit__(self, *args: object) -> None:
-            return None
-
-        def read(self, size: int) -> bytes:
-            read_sizes.append(size)
-            return b"x" * size
-
-        def geturl(self) -> str:
-            return "https://example.com"
-
-    monkeypatch.setattr(
-        solver_module._HTTP_OPENER,
-        "open",
-        lambda request, timeout: Response(),
-    )
-
-    with pytest.raises(ResourceLimitError, match="Response body"):
-        solver_module._direct_http_get_sync(
+    with (
+        navigation_module.active_http_transport(transport),
+        navigation_module.active_resource_limits(ResourceLimits(response_body_bytes=4)),
+        pytest.raises(ResourceLimitError, match="Response body"),
+    ):
+        await navigation_module._direct_http_get(
             "https://example.com",
             V1Request(cmd="request.get", url="https://example.com"),
-            1,
-            maximum_body_bytes=4,
+            TimeoutTimer(1000),
         )
 
-    assert read_sizes == [5]
+    assert connector.consumed_bytes == [5]
 
 
 @pytest.mark.anyio
@@ -2359,55 +2292,28 @@ async def test_post_context_request_challenge_does_not_retry_with_browser_form()
     assert "Just a moment" in result.solution.response
 
 
-def test_direct_http_get_sends_matching_cookies_as_header(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    captured: dict[str, Any] = {}
-
-    class Headers:
-        def get_content_charset(self) -> str:
-            return "utf-8"
-
-        def items(self) -> list[tuple[str, str]]:
-            return [("content-type", "text/html; charset=utf-8")]
-
-    class OpenerResponse:
-        status = 200
-        headers = Headers()
-
-        def __enter__(self):  # type: ignore[no-untyped-def]
-            return self
-
-        def __exit__(self, *args: object) -> None:
-            return None
-
-        def read(self) -> bytes:
-            return b"ok"
-
-        def geturl(self) -> str:
-            return "https://example.com/x?ajax=true"
-
-    def fake_open(http_request: Any, timeout: float) -> OpenerResponse:
-        captured["headers"] = dict(http_request.headers)
-        return OpenerResponse()
-
-    monkeypatch.setattr(solver_module._HTTP_OPENER, "open", fake_open)
-
-    solver_module._direct_http_get_sync(
-        "https://example.com/x?ajax=true",
-        V1Request(
-            cmd="request.get",
-            url="https://example.com/x?ajax=true",
-            cookies=[
-                {"name": "sid", "value": "abc", "domain": "example.com"},
-                {"name": "other", "value": "z", "domain": "other.test"},
-            ],
-        ),
-        5,
+@pytest.mark.anyio
+async def test_direct_http_get_sends_matching_cookies_as_header() -> None:
+    transport, connector = fake_transport(
+        [FakeHttpResponse(200, [("Content-Type", "text/html; charset=utf-8")], body=b"ok")]
     )
 
-    # urllib title-cases header names; only the example.com cookie should be sent.
-    assert captured["headers"].get("Cookie") == "sid=abc"
+    with navigation_module.active_http_transport(transport):
+        await navigation_module._direct_http_get(
+            "https://example.com/x?ajax=true",
+            V1Request(
+                cmd="request.get",
+                url="https://example.com/x?ajax=true",
+                cookies=[
+                    {"name": "sid", "value": "abc", "domain": "example.com"},
+                    {"name": "other", "value": "z", "domain": "other.test"},
+                ],
+            ),
+            TimeoutTimer(5000),
+        )
+
+    # Only the example.com cookie should be sent.
+    assert connector.hops[0].headers.get("cookie") == "sid=abc"
 
 
 @pytest.mark.anyio

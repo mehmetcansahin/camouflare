@@ -21,9 +21,11 @@ separate users, run separate container instances.
 - `/health` is intentionally unauthenticated and reports only process liveness without
   reading browser state. `/ready`, `/diagnostics`, `/metrics`, documentation, and `/v1`
   require the configured token.
-- Private and loopback target URLs remain available because local-network automation is an
-  intentional use case. Restrict network egress at the container or host boundary when the
-  target set is narrower.
+- Private and loopback target URLs remain available to browser requests and their direct
+  HTTP preflight and fallbacks because local-network automation is an intentional use
+  case. The browserless HTTP transport (`transport: "http"` and `request.head`) rejects
+  non-public targets unless it uses a proxy. Restrict network egress at the container or
+  host boundary when the target set is narrower.
 
 ## Container resources
 
@@ -51,6 +53,17 @@ Add concurrent sessions by raising
 capacity for stateless requests until they expire, and `/ready` reports `saturated` for
 that whole time.
 
+Browserless HTTP transport requests (`transport: "http"` and `request.head`) do not use
+these context slots. They run on a separate limit, `HTTP_MAX_CONCURRENCY` (8 by default),
+which the direct HTTP requests made inside browser requests share. A request that finds
+every HTTP slot busy waits within its own `maxTimeout` and then returns HTTP 503
+`POOL_UNAVAILABLE`; the `ajax=true` preflight and the browser fallbacks do not wait and
+fall back to browser navigation instead. Each in-flight HTTP request can hold several
+copies of a body of up to `MAX_RESPONSE_BODY_BYTES`: the received wire bytes, the
+decoded body, and the text or base64 copy serialized into the response. Plan about
+four times `MAX_RESPONSE_BODY_BYTES` per slot, times `HTTP_MAX_CONCURRENCY`, and lower
+`MAX_RESPONSE_BODY_BYTES` for image or API workloads that never need 32 MiB.
+
 A browser retired by `BROWSER_MAX_USES` or `BROWSER_MAX_AGE_MINUTES` is replaced in the
 background after it closes. The maintenance tick (`POOL_MAINTENANCE_INTERVAL_SECONDS`,
 15 seconds by default) also retires browsers that age out between requests. Request-driven
@@ -77,10 +90,10 @@ only after load testing the configured pool and payload limits.
 The image runs `dumb-init` in single-child mode, so a stop signal reaches only the Python
 process; the Playwright driver and Xvfb stay available while the application closes its
 browsers. Uvicorn stops accepting connections, gives in-flight requests up to 10 seconds to
-finish, and cancels any still running. The application then closes sessions and browsers
-within `SHUTDOWN_TIMEOUT_SECONDS` (30 seconds by default). When Python exits, `dumb-init`
-exits with it and the container runtime terminates anything cleanup left behind. The
-10-second drain is set by the `camouflare` command; an external
+finish, and cancels any still running. The application then closes sessions, browsers,
+and the HTTP transport within `SHUTDOWN_TIMEOUT_SECONDS` (30 seconds by default). When
+Python exits, `dumb-init` exits with it and the container runtime terminates anything
+cleanup left behind. The 10-second drain is set by the `camouflare` command; an external
 `uvicorn camouflare.asgi:app` command must pass `--timeout-graceful-shutdown`, because
 Uvicorn otherwise waits for in-flight requests without limit before cleanup starts.
 
@@ -136,7 +149,10 @@ therefore means the pool could not produce a working browser within
 `POOL_ACQUIRE_TIMEOUT_MS` and `READINESS_TIMEOUT_MS`, not that it is merely full. Give
 external probes a client timeout above `READINESS_TIMEOUT_MS`. Diagnostics returns HTTP 200
 when the snapshot succeeds; alert from `capacity_state` and its counters, not from the
-endpoint status alone.
+endpoint status alone. `/ready` and `capacity_state` describe browser capacity only. The
+`http` object in `/diagnostics` reports the HTTP transport's `max_concurrency`,
+`active_requests`, `waiting_requests`, and `available_slots`; sustained
+`waiting_requests` means HTTP requests are waiting for `HTTP_MAX_CONCURRENCY` slots.
 
 Enable Prometheus in production. Alert on two consecutive readiness failures,
 `active_contexts == 0` with `usable_context_slots == 0`, any cleanup timeout, and sustained

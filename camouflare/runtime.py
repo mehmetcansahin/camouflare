@@ -54,7 +54,7 @@ def make_runtime_lifespan(settings: Settings) -> AppLifespan:
                     await shutdown_runtime(
                         sessions=app.state.sessions,
                         pool=app.state.pool,
-                        direct_http=getattr(app.state, "direct_http", None),
+                        http_transport=getattr(app.state, "http_transport", None),
                         cleanup=getattr(app.state, "cleanup", None),
                         timeout_seconds=settings.shutdown_timeout_seconds,
                     )
@@ -109,7 +109,7 @@ async def shutdown_runtime(
     *,
     sessions: AsyncClose,
     pool: AsyncClose,
-    direct_http: AsyncClose | None = None,
+    http_transport: AsyncClose | None = None,
     cleanup: AsyncClose | None = None,
     timeout_seconds: float,
 ) -> None:
@@ -117,7 +117,7 @@ async def shutdown_runtime(
         _shutdown_runtime_owned(
             sessions=sessions,
             pool=pool,
-            direct_http=direct_http,
+            http_transport=http_transport,
             cleanup=cleanup,
             timeout_seconds=timeout_seconds,
         ),
@@ -139,7 +139,7 @@ async def _shutdown_runtime_owned(
     *,
     sessions: AsyncClose,
     pool: AsyncClose,
-    direct_http: AsyncClose | None = None,
+    http_transport: AsyncClose | None = None,
     cleanup: AsyncClose | None = None,
     timeout_seconds: float,
 ) -> None:
@@ -191,16 +191,16 @@ async def _shutdown_runtime_owned(
             "browser-pool-acquisition",
             cast(Callable[[], Awaitable[None]], quiesce),
         )
-    direct_http_quiesce = getattr(direct_http, "quiesce", None)
-    if callable(direct_http_quiesce):
+    http_transport_quiesce = getattr(http_transport, "quiesce", None)
+    if callable(http_transport_quiesce):
         await close_resource(
-            "direct-http-acquisition",
-            cast(Callable[[], Awaitable[None]], direct_http_quiesce),
+            "http-transport-acquisition",
+            cast(Callable[[], Awaitable[None]], http_transport_quiesce),
         )
     await close_resource("sessions", sessions.close)
     await close_resource("browser-pool", pool.close)
-    if direct_http is not None:
-        await close_resource("direct-http-workers", direct_http.close)
+    if http_transport is not None:
+        await close_resource("http-transport", http_transport.close)
     if isinstance(cleanup, CleanupSupervisor):
         remaining = max(0.0, deadline - loop.time())
         await cleanup.close(timeout_seconds=remaining)

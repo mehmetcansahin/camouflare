@@ -88,6 +88,7 @@ class Settings:
     pool_acquire_timeout_ms: int = field(
         default_factory=lambda: _int_env("POOL_ACQUIRE_TIMEOUT_MS", 30000)
     )
+    http_max_concurrency: int = field(default_factory=lambda: _int_env("HTTP_MAX_CONCURRENCY", 8))
     max_sessions: int = field(default_factory=lambda: _int_env("MAX_SESSIONS", 32))
     session_ttl_minutes: int = field(default_factory=lambda: _int_env("SESSION_TTL_MINUTES", 60))
     browser_max_uses: int = field(default_factory=lambda: _int_env("BROWSER_MAX_USES", 200))
@@ -200,6 +201,7 @@ def _validate_settings(settings: Settings) -> None:
     if settings.browser_max_age_minutes <= 0:
         raise ValueError("BROWSER_MAX_AGE_MINUTES must be greater than zero.")
     positive_limits = {
+        "HTTP_MAX_CONCURRENCY": settings.http_max_concurrency,
         "MAX_REQUEST_BODY_BYTES": settings.max_request_body_bytes,
         "MAX_RESPONSE_BODY_BYTES": settings.max_response_body_bytes,
         "MAX_SCREENSHOT_BYTES": settings.max_screenshot_bytes,

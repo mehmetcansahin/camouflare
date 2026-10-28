@@ -17,6 +17,7 @@ from camouflare.errors import CamouflareError, V1ErrorCode
 from camouflare.limits import (
     MAX_COOKIE_BYTES,
     MAX_COOKIES,
+    MAX_HTTP_REDIRECTS,
     MAX_SESSION_ID_LENGTH,
     MAX_TARGET_HEADER_BYTES,
     MAX_TARGET_HEADERS,
@@ -58,7 +59,7 @@ class V1Request(BaseModel):
         default=None,
         description=(
             "Command to run. Supported values are sessions.create, sessions.list, "
-            "sessions.destroy, request.get, and request.post."
+            "sessions.destroy, request.get, request.post, and request.head."
         ),
         examples=["request.get"],
     )
@@ -191,6 +192,46 @@ class V1Request(BaseModel):
         default=None,
         description="Accepted for FlareSolverr compatibility; currently ignored.",
         validation_alias=AliasChoices("returnRawHtml", "return_raw_html"),
+    )
+    transport: Literal["http", "browser"] | None = Field(
+        default=None,
+        description=(
+            "Request transport. 'http' sends a stateless HTTP request without a browser, "
+            "honors the proxy, and forwards headers as given. 'browser' always navigates "
+            "in a browser context. When omitted, request.get and request.post keep their "
+            "automatic transport selection and request.head uses 'http'."
+        ),
+        examples=["http"],
+    )
+    response_encoding: Literal["text", "base64"] | None = Field(
+        default=None,
+        description=(
+            "Encoding of solution.response for transport 'http': 'text' (default) decodes "
+            "the body with its charset, 'base64' returns the exact body bytes."
+        ),
+        examples=["base64"],
+        validation_alias=AliasChoices("responseEncoding", "response_encoding"),
+    )
+    max_response_bytes: int | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Body byte limit for transport 'http', at most MAX_RESPONSE_BODY_BYTES. "
+            "A larger body returns RESOURCE_LIMIT_EXCEEDED."
+        ),
+        examples=[10485760],
+        validation_alias=AliasChoices("maxResponseBytes", "max_response_bytes"),
+    )
+    follow_redirects: int | None = Field(
+        default=None,
+        ge=0,
+        le=MAX_HTTP_REDIRECTS,
+        description=(
+            "Redirects transport 'http' may follow (default 10). A redirect beyond the "
+            "limit, or any redirect with 0, is returned as the response."
+        ),
+        examples=[0],
+        validation_alias=AliasChoices("followRedirects", "follow_redirects"),
     )
 
     @field_validator("url")
@@ -499,6 +540,17 @@ class Solution(BaseModel):
         default=None,
         description="Captcha provider token when a Turnstile solve returns one.",
     )
+    response_encoding: Literal["text", "base64"] | None = Field(
+        default=None,
+        description="Encoding of response for transport 'http'.",
+        serialization_alias="responseEncoding",
+    )
+    body_bytes: int | None = Field(
+        default=None,
+        ge=0,
+        description="Byte length of the body returned for transport 'http'.",
+        serialization_alias="bodyBytes",
+    )
 
 
 class V1Response(BaseModel):
@@ -620,6 +672,15 @@ class DiagnosticsPoolStatus(BaseModel):
     max_slots: int = Field(ge=1)
 
 
+class DiagnosticsHttpStatus(BaseModel):
+    """Capacity of the browserless HTTP transport, separate from browser slots."""
+
+    max_concurrency: int = Field(ge=1)
+    active_requests: int = Field(ge=0)
+    waiting_requests: int = Field(ge=0)
+    available_slots: int = Field(ge=0)
+
+
 class DiagnosticsSessionStatus(BaseModel):
     active: int = Field(ge=0)
     in_use: int = Field(ge=0)
@@ -642,6 +703,7 @@ class DiagnosticsResponse(BaseModel):
     status: str = "ok"
     capacity_state: Literal["available", "saturated", "recovering", "unavailable"]
     pool: DiagnosticsPoolStatus
+    http: DiagnosticsHttpStatus
     sessions: DiagnosticsSessionStatus
     cleanup: DiagnosticsCleanupStatus
     runtime: DiagnosticsRuntimeStatus

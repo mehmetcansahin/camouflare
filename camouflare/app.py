@@ -43,6 +43,7 @@ from camouflare.documentation import (
     V1_REQUEST_EXAMPLES,
 )
 from camouflare.errors import CamouflareError, V1ErrorCode
+from camouflare.http_transport import HttpConnector, HttpTransport
 from camouflare.limits import ResourceLimitError, ensure_json_size, json_size
 from camouflare.metrics import (
     REQUEST_COUNTER,
@@ -58,6 +59,7 @@ from camouflare.metrics import (
 )
 from camouflare.models import (
     DiagnosticsCleanupStatus,
+    DiagnosticsHttpStatus,
     DiagnosticsPoolStatus,
     DiagnosticsResponse,
     DiagnosticsRuntimeStatus,
@@ -68,7 +70,6 @@ from camouflare.models import (
     V1Request,
     V1Response,
 )
-from camouflare.navigation import DirectHttpExecutor
 from camouflare.observability import bind_request_id, reset_request_id, resolve_request_id
 from camouflare.pool import BrowserPool, PersistentCapacityError, PoolAcquireTimeout
 from camouflare.protocols import BrowserFactory
@@ -104,6 +105,7 @@ def create_app(
     settings: Settings | None = None,
     browser_factory: BrowserFactory | None = None,
     captcha_provider: CaptchaProvider | None = None,
+    http_connector: HttpConnector | None = None,
     lifespan: AppLifespan | None = None,
     lifespan_enabled: bool = True,
 ) -> FastAPI:
@@ -138,14 +140,17 @@ def create_app(
         cleanup_timeout_seconds=settings.cleanup_timeout_seconds,
         cleanup_supervisor=cleanup,
     )
-    direct_http = DirectHttpExecutor()
+    http_transport = HttpTransport(
+        max_concurrency=settings.http_max_concurrency,
+        connector=http_connector,
+    )
     command_service = CommandService(
         settings=settings,
         pool=pool,
         sessions=sessions,
         captcha_provider=provider,
         cleanup=cleanup,
-        direct_http=direct_http,
+        http_transport=http_transport,
     )
 
     if lifespan is None and lifespan_enabled:
@@ -171,7 +176,7 @@ def create_app(
     app.state.sessions = sessions
     app.state.captcha_provider = provider
     app.state.command_service = command_service
-    app.state.direct_http = direct_http
+    app.state.http_transport = http_transport
     app.state.resource_limits = settings.resource_limits
     app.state.cleanup = cleanup
 
@@ -711,6 +716,13 @@ def _diagnostics_response(app: FastAPI, settings: Settings) -> DiagnosticsRespon
         max_contexts_per_browser=max_contexts_per_browser,
         max_slots=max_slots,
     )
+    http_snapshot = app.state.http_transport.snapshot()
+    http_status = DiagnosticsHttpStatus(
+        max_concurrency=http_snapshot["max_concurrency"],
+        active_requests=http_snapshot["active_requests"],
+        waiting_requests=http_snapshot["waiting_requests"],
+        available_slots=http_snapshot["available_slots"],
+    )
     sessions = DiagnosticsSessionStatus(
         active=_snapshot_int(session_snapshot, "active", 0),
         in_use=_snapshot_int(session_snapshot, "in_use", 0),
@@ -737,6 +749,7 @@ def _diagnostics_response(app: FastAPI, settings: Settings) -> DiagnosticsRespon
     return DiagnosticsResponse(
         capacity_state=_capacity_state(pool, cleanup),
         pool=pool,
+        http=http_status,
         sessions=sessions,
         cleanup=cleanup,
         runtime=runtime,
@@ -832,6 +845,7 @@ async def _dispatch_v1(
         captcha_provider=app.state.captcha_provider,
         cleanup=getattr(app.state, "cleanup", None),
         start_timestamp=start_timestamp,
+        http_transport=getattr(app.state, "http_transport", None),
     )
 
 
@@ -873,6 +887,14 @@ def _validate_request_runtime_limits(request: V1Request, settings: Settings) -> 
         raise ResourceLimitError(
             "Request parameter 'session_ttl_minutes' exceeds the configured "
             f"{settings.max_session_ttl_minutes}-minute limit."
+        )
+    if (
+        request.max_response_bytes is not None
+        and request.max_response_bytes > settings.max_response_body_bytes
+    ):
+        raise ResourceLimitError(
+            "Request parameter 'maxResponseBytes' exceeds the configured "
+            f"{settings.max_response_body_bytes}-byte limit."
         )
 
 

@@ -11,6 +11,7 @@ small browser pool running and supports both isolated requests and persistent se
 [![Watch the Camouflare launch video on YouTube](docs/assets/camouflare-launch-cover.png)](https://www.youtube.com/watch?v=oEZkk81Et4w)
 
 - FlareSolverr-style GET, POST, and session commands
+- Browserless HTTPS GET and HEAD with proxy support and exact base64 bodies
 - Configurable browser and context limits
 - Per-request cookies, headers, proxy, screenshots, and wait time
 - Health, readiness, diagnostics, and optional Prometheus endpoints
@@ -67,7 +68,9 @@ wait, screenshot, and persistent-session fields. It preserves the familiar respo
 envelope and adds optional machine-readable error metadata.
 
 `download`, `returnRawHtml`, and `tabs_till_verify` are accepted but ignored.
-Unknown fields are also ignored for compatibility.
+Unknown fields are also ignored for compatibility. `request.head`, `transport`,
+`responseEncoding`, `maxResponseBytes`, and `followRedirects` are Camouflare
+extensions; requests that omit them behave as before.
 
 No named third-party client integration is currently part of CI, so the project
 does not claim verified drop-in compatibility with Prowlarr, Jackett, Sonarr, or
@@ -205,13 +208,16 @@ empty add-on directory.
 
 - `request.get`
 - `request.post`
+- `request.head`
 - `sessions.create`
 - `sessions.list`
 - `sessions.destroy`
 
 Common request fields are `url`, `maxTimeout`, `session`, `proxy`, `cookies`,
 `headers`, `userAgent`, `postData`, `waitInSeconds`, `disableMedia`,
-`returnOnlyCookies`, and `returnScreenshot`.
+`returnOnlyCookies`, and `returnScreenshot`. `transport`, `responseEncoding`,
+`maxResponseBytes`, and `followRedirects` control the
+[HTTP transport](#http-transport).
 
 Caller-supplied non-`User-Agent` headers select transports with enforceable redirect
 boundaries. A `request.get` carrying them uses direct HTTP, strips them before any
@@ -220,21 +226,28 @@ screenshots. A `request.post` uses the browser context request transport and ret
 redirect response without following it. These transport paths return the buffered HTTP
 response rather than a JavaScript-rendered page, so browser challenge handling does not
 apply. `User-Agent` is the compatibility exception: whether supplied through `headers`
-or `userAgent`, it defines browser identity for the whole context.
+or `userAgent`, it defines browser identity for the whole context. To send other
+headers through a proxy, use the [HTTP transport](#http-transport).
 
-Direct HTTP GET decodes `gzip` and `deflate` before charset conversion, including
-concatenated gzip members and up to four stacked encodings. The response byte limit
-applies to the wire body and every decoded layer under the same request deadline.
-Unsupported, malformed, or truncated encodings return `RESPONSE_DECODE_ERROR`;
-oversized bodies return `RESOURCE_LIMIT_EXCEEDED`. Cookies-only GET inspects only a
-bounded 64 KiB decoded prefix, without validating the unread remainder.
+Direct HTTP GET and the HTTP transport decode `gzip` and `deflate` before charset
+conversion, including concatenated gzip members and up to four stacked encodings. The
+response byte limit applies to the wire body and every decoded layer under the same
+request deadline. Other, malformed, or truncated encodings return
+`RESPONSE_DECODE_ERROR`; oversized bodies return `RESOURCE_LIMIT_EXCEEDED`. A
+cookies-only direct HTTP GET inspects only a bounded 64 KiB decoded prefix, without
+validating the unread remainder. Direct HTTP never uses a proxy, accepts `http` and
+`https` targets, follows at most ten redirects (a redirect beyond the tenth, or to a URL
+that cannot be requested, is returned as the response), and shares the
+`HTTP_MAX_CONCURRENCY` slots of the HTTP transport. Only a header-bearing GET waits for
+a free slot; the preflight and the fallbacks fall back to browser navigation at once
+when every slot is busy.
 
 GET navigation shares the command's absolute `maxTimeout` with setup, challenge handling,
 and collection. DOM readiness and commit grace each wait at most 15 seconds. Navigation
 keeps up to one second for collection (at most half the remaining time for short budgets),
 and eligible `ajax=true` timeout fallback keeps up to 15 seconds or half the navigation
-budget left after preflight. These stage caps are not a fresh timeout: direct HTTP workers
-use the shortened deadline too. An already-committed page remains on the browser path
+budget left after preflight. These stage caps are not a fresh timeout: direct HTTP uses
+the shortened deadline too. An already-committed page remains on the browser path
 with the original request budget for challenge clearance; sessions, proxies, screenshots,
 and POST do not gain new direct HTTP eligibility.
 
@@ -245,7 +258,9 @@ errors remain successful fetches with the upstream status in `solution.status`. 
 includes a 4xx/5xx with an empty body, which Firefox refuses to render; its
 `solution.response` is empty. When the browser cannot get a response at all (DNS
 failure, connection refused or reset, interrupted transfer), the request returns
-`TARGET_UNREACHABLE`, retryable for `request.get`.
+`TARGET_UNREACHABLE`, retryable for `request.get`. Direct HTTP and the HTTP transport
+report DNS, connection, and TLS handshake failures the same way; a target certificate
+that fails verification is not retryable.
 `request.post` with `returnOnlyCookies` does not read its response body, so that mode
 cannot classify body-based challenges or blocks.
 
@@ -257,8 +272,9 @@ Other endpoints:
 - `GET /ready` checks that the browser pool can create a page and evaluate JS. When
   every context slot is held by a browser that is still serving it returns 200 with
   `capacity_state: saturated` instead of queueing a probe behind live requests.
-- `GET /diagnostics` returns a passive pool, session, and cleanup snapshot without
-  leasing browser capacity.
+- `GET /diagnostics` returns a passive pool, HTTP transport, session, and cleanup
+  snapshot without leasing browser capacity. Its `capacity_state` describes browser
+  capacity only; the `http` object reports HTTP transport slots.
 - `GET /metrics` returns Prometheus metrics when `PROMETHEUS_ENABLED=true`.
 
 Send either `Authorization: Bearer <token>` or `X-API-Token: <token>` on every
@@ -271,6 +287,73 @@ Use the `camouflare` command or `python -m camouflare` for tokenless local devel
 The reusable `camouflare.asgi:app` entry point always requires
 `CAMOUFLARE_API_TOKEN`, because an external ASGI server can override the configured
 bind address.
+
+### HTTP transport
+
+`request.head`, and `request.get` with `"transport": "http"`, send one stateless HTTPS
+request without a browser. They never lease a browser context and run on their own
+concurrency limit, `HTTP_MAX_CONCURRENCY` (default 8), which the browser path's direct
+HTTP requests share. A request that finds every slot busy waits within its own
+`maxTimeout`, not `POOL_ACQUIRE_TIMEOUT_MS`, and then returns HTTP 503
+`POOL_UNAVAILABLE`.
+
+- Only `https` URLs and redirect targets are allowed. Without a proxy, private,
+  loopback, link-local, cloud-metadata, carrier-grade NAT, and other non-public targets
+  return `INVALID_REQUEST`, including hostnames that resolve to them and IPv4 addresses
+  embedded in IPv6; the connection goes to the checked address.
+- The request `proxy`, or else `PROXY_URL`, is used: HTTP (`CONNECT`), HTTPS, SOCKS5,
+  and SOCKS5h proxies with optional credentials. Both SOCKS5 forms let the proxy
+  resolve the target. SOCKS4 returns `INVALID_REQUEST`.
+- `headers` are forwarded as given; defaults only fill in a missing `User-Agent`,
+  `Accept`, `Accept-Language`, and `Accept-Encoding: gzip, deflate`. `Host`,
+  `Content-Length`, `Transfer-Encoding`, `Connection`, `Keep-Alive`, `Upgrade`, `TE`,
+  `Trailer`, `Proxy-Authorization`, and `Proxy-Connection` return `INVALID_REQUEST`.
+  Every caller header except `User-Agent` is removed on redirect hops to another
+  origin. Request `cookies` are sent, and `solution.cookies` includes the cookies the
+  target set.
+- `followRedirects` (0 to 10, default 10) caps followed redirects: with 0 any redirect
+  is returned as-is with its `Location`. A redirect beyond the limit, or to a URL that
+  cannot be requested (such as `ftp:` or an invalid port), is returned as the response.
+- `responseEncoding` is `text` (default, decoded with the response charset) or
+  `base64` (the exact body bytes after gzip or deflate removal). `maxResponseBytes`
+  lowers the body limit; a value above `MAX_RESPONSE_BODY_BYTES`, or a larger body,
+  returns `RESOURCE_LIMIT_EXCEEDED`. Only gzip and deflate are decoded, so a `br`
+  response to a caller-supplied `Accept-Encoding` returns `RESPONSE_DECODE_ERROR`.
+- The solution adds `responseEncoding` and `bodyBytes`. `solution.headers` uses
+  lower-case names, combines repeated fields (`Set-Cookie` with newlines, others with
+  `, `), and omits `Content-Encoding` and `Content-Length` once gzip or deflate was
+  removed. HEAD returns `response: ""` and `bodyBytes: 0`; `returnOnlyCookies` returns
+  only `url`, `status`, `cookies`, and `userAgent` without reading the body.
+- There is no challenge or block detection and no browser fallback: every upstream
+  status comes back as `status: "ok"`, without `fallbackUsed`.
+- `session`, `session_ttl_minutes`, `returnScreenshot`, a non-zero `waitInSeconds`,
+  `disableMedia`, `postData`, and `request.post` with `"transport": "http"` return
+  `INVALID_REQUEST`, as do the HTTP-only fields without the HTTP transport and
+  `transport: "http"` or the HTTP-only fields on `sessions.*` commands.
+- Through a proxy, a failure before the proxy reached the target returns
+  `PROXY_CONNECTION_ERROR`: an unreachable or timed-out proxy, a port that does not
+  speak the configured proxy protocol, a dropped handshake, or a refusal. It is
+  retryable except for rejected credentials, a `4xx` answer to `CONNECT`, and an HTTPS
+  proxy certificate that fails verification. A proxy that cannot reach the target, a
+  DNS failure, a refused or reset connection, and a TLS handshake failure with the
+  target return `TARGET_UNREACHABLE`; a target that does not answer in time, including
+  a TLS handshake that stalls behind an open proxy tunnel, returns
+  `NAVIGATION_TIMEOUT`.
+
+`"transport": "browser"` always navigates in the browser: it turns off the `ajax=true`
+direct HTTP preflight and the direct HTTP fallbacks, rejects non-`User-Agent` headers on
+`request.get`, and is rejected for `request.head`.
+
+```json
+{
+  "cmd": "request.get",
+  "url": "https://cdn.example.com/logo.png",
+  "transport": "http",
+  "responseEncoding": "base64",
+  "maxResponseBytes": 10485760,
+  "proxy": {"url": "socks5h://proxy.example:1080", "username": "user", "password": "pass"}
+}
+```
 
 ## Configuration
 
@@ -287,6 +370,7 @@ The most commonly used environment variables are:
 | `POOL_MAX_CONTEXTS_PER_BROWSER` | `1` | Concurrent contexts per browser |
 | `POOL_RESERVED_TRANSIENT_CONTEXTS` | `1` | Context slots withheld from sessions |
 | `POOL_ACQUIRE_TIMEOUT_MS` | `30000` | Wait for free capacity before HTTP 503 |
+| `HTTP_MAX_CONCURRENCY` | `8` | Concurrent browserless HTTP requests, separate from browser slots |
 | `MAX_SESSIONS` | `32` | Session registry cap, above the context limit |
 | `SESSION_TTL_MINUTES` | `60` | Default session lifetime |
 | `PROXY_URL` | unset | Default proxy URL |

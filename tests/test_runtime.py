@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import asyncio
-import threading
+from collections.abc import AsyncGenerator, Mapping
+from contextlib import asynccontextmanager
 
 import pytest
 
 from camouflare.app import create_app
 from camouflare.cleanup import CleanupSupervisor
 from camouflare.config import Settings
-from camouflare.models import V1Request
-from camouflare.navigation import DirectHttpExecutor, RawResponse
+from camouflare.errors import CamouflareError, V1ErrorCode
+from camouflare.http_transport import HopSender, HttpFetch, HttpTransport
 from camouflare.pool import BrowserPool
 from camouflare.runtime import (
     make_runtime_lifespan,
@@ -18,8 +19,8 @@ from camouflare.runtime import (
     shutdown_runtime,
 )
 from camouflare.sessions import SessionManager
-from camouflare.timer import TimeoutTimer
 from tests.fakes import FakeBrowserFactory, FakeContext
+from tests.http_fakes import FakeConnector, FakeHttpResponse
 
 
 @pytest.mark.anyio
@@ -155,18 +156,18 @@ async def test_cancelling_shutdown_caller_still_initiates_every_phase() -> None:
         async def close(self) -> None:
             events.append("cleanup")
 
-    class DirectHttp:
+    class HttpTransportResource:
         async def quiesce(self) -> None:
-            events.append("direct-quiesce")
+            events.append("http-quiesce")
 
         async def close(self) -> None:
-            events.append("direct-close")
+            events.append("http-close")
 
     shutdown = asyncio.create_task(
         shutdown_runtime(
             sessions=Sessions(),
             pool=Pool(),
-            direct_http=DirectHttp(),
+            http_transport=HttpTransportResource(),
             cleanup=Cleanup(),
             timeout_seconds=0.01,
         )
@@ -179,66 +180,69 @@ async def test_cancelling_shutdown_caller_still_initiates_every_phase() -> None:
 
     assert events == [
         "quiesce",
-        "direct-quiesce",
+        "http-quiesce",
         "sessions",
         "pool",
-        "direct-close",
+        "http-close",
         "cleanup",
     ]
 
 
 @pytest.mark.anyio
-async def test_shutdown_quiesces_direct_http_and_owns_running_workers(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    worker_started = threading.Event()
-    finish_worker = threading.Event()
+async def test_shutdown_quiesces_http_transport_and_drains_in_flight_requests() -> None:
+    request_started = asyncio.Event()
+    finish_request = asyncio.Event()
 
-    def blocking_get(*args: object, **kwargs: object) -> RawResponse:
-        worker_started.set()
-        finish_worker.wait()
-        return RawResponse(url="https://example.com", status=200, headers={}, body="ok")
-
-    monkeypatch.setattr("camouflare.navigation._direct_http_get_sync", blocking_get)
+    class BlockingConnector(FakeConnector):
+        @asynccontextmanager
+        async def session(
+            self,
+            *,
+            proxy: Mapping[str, str] | None,
+            block_private_targets: bool,
+        ) -> AsyncGenerator[HopSender]:
+            request_started.set()
+            await finish_request.wait()
+            async with super().session(
+                proxy=proxy, block_private_targets=block_private_targets
+            ) as send:
+                yield send
 
     class Resource:
         async def close(self) -> None:
             return None
 
-    direct_http = DirectHttpExecutor(max_workers=1)
+    connector = BlockingConnector([FakeHttpResponse(200, body=b"ok")])
+    transport = HttpTransport(max_concurrency=1, connector=connector)
     request = asyncio.create_task(
-        direct_http.get(
-            "https://example.com",
-            V1Request(cmd="request.get", url="https://example.com"),
-            TimeoutTimer(1000),
-        )
+        transport.fetch(HttpFetch(url="https://example.com"), timeout_seconds=5)
     )
-    for _ in range(100):
-        if worker_started.is_set():
-            break
-        await asyncio.sleep(0.001)
+    await asyncio.wait_for(request_started.wait(), timeout=1)
 
     try:
         await shutdown_runtime(
             sessions=Resource(),
             pool=Resource(),
-            direct_http=direct_http,
+            http_transport=transport,
             timeout_seconds=0.01,
         )
 
-        assert direct_http.accepting is False
-        assert direct_http.active_workers == 1
-        with pytest.raises(RuntimeError, match="quiesced"):
-            await direct_http.get(
-                "https://example.com",
-                V1Request(cmd="request.get", url="https://example.com"),
-                TimeoutTimer(1000),
-            )
+        assert transport.accepting is False
+        assert transport.active_requests == 1
+        assert connector.closed is False
+        with pytest.raises(CamouflareError) as rejected:
+            await transport.fetch(HttpFetch(url="https://example.com"), timeout_seconds=5)
+        assert rejected.value.error_code == V1ErrorCode.POOL_UNAVAILABLE
     finally:
-        finish_worker.set()
-        await request
-        await direct_http.close()
-    assert direct_http.active_workers == 0
+        finish_request.set()
+        result = await request
+        await transport.close()
+
+    assert result.status == 200
+    assert result.body == b"ok"
+    assert transport.active_requests == 0
+    assert connector.closed is True
+    assert len(connector.hops) == 1
 
 
 @pytest.mark.anyio
@@ -350,4 +354,4 @@ async def test_runtime_lifespan_runs_the_pool_maintainer_beside_the_reaper() -> 
     names = {task.get_name() for task in asyncio.all_tasks()}
     assert "camouflare-pool-maintainer" not in names
     assert "camouflare-session-reaper" not in names
-    assert app.state.direct_http.accepting is False
+    assert app.state.http_transport.accepting is False

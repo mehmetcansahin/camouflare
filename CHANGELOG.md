@@ -5,6 +5,75 @@ All notable changes to Camouflare are documented here. The project follows
 
 ## [Unreleased]
 
+### Added
+
+- Browserless HTTP transport: `"transport": "http"` on `request.get` and the new
+  `request.head` command send one stateless HTTPS request without leasing a browser
+  context. It uses the request `proxy` or `PROXY_URL` (HTTP `CONNECT`, HTTPS, SOCKS5, and
+  SOCKS5h; SOCKS4 returns `INVALID_REQUEST`), forwards caller headers as given, rejects
+  transport-managed headers such as `Host` and `Proxy-Authorization`, accepts only
+  `https` targets, and without a proxy rejects private, loopback, link-local, metadata,
+  and other non-public targets, including hostnames that resolve to them. It performs no
+  challenge detection and never falls back to the browser. Sessions, screenshots, waits,
+  `disableMedia`, `postData`, and `request.post` are rejected with `INVALID_REQUEST`.
+- HTTP transport request fields `responseEncoding` (`text` or `base64`),
+  `maxResponseBytes` (at most `MAX_RESPONSE_BODY_BYTES`), and `followRedirects` (0 to
+  10, default 10; `0` returns any redirect as-is), plus `solution.responseEncoding` and
+  `solution.bodyBytes`. The fields return `INVALID_REQUEST` without the HTTP transport.
+- `"transport": "browser"` always navigates in the browser: it disables the `ajax=true`
+  direct HTTP preflight and the direct HTTP fallbacks, and rejects non-`User-Agent`
+  headers on `request.get`.
+- `PROXY_CONNECTION_ERROR` error code for an HTTP transport request that fails before
+  its proxy reached the target: an unreachable or timed-out proxy, a port that does not
+  speak the configured proxy protocol, a dropped handshake, or a refusal. It is
+  retryable except for rejected credentials, a `4xx` answer to `CONNECT`, and an HTTPS
+  proxy certificate that fails verification. Failures after the proxy connected the
+  target are reported as the target's, like requests without a proxy.
+- `HTTP_MAX_CONCURRENCY` (default 8) limits browserless HTTP requests separately from
+  browser context slots; a request that gets no slot before its deadline returns HTTP 503
+  `POOL_UNAVAILABLE`. `/diagnostics` reports these slots in a new `http` object, and
+  `capacity_state` still describes browser capacity only.
+- Runtime dependencies `httpcore` and `socksio`.
+
+### Changed
+
+- Direct HTTP GET (the `ajax=true` preflight, the browser fallbacks, and GETs with
+  non-`User-Agent` headers) runs on the shared httpcore transport instead of four
+  dedicated worker threads, so its concurrency follows `HTTP_MAX_CONCURRENCY`. Only a
+  GET with non-`User-Agent` headers waits for a free slot; the preflight and fallbacks
+  fall back to browser navigation at once when every slot is busy. A redirect beyond
+  the ten-redirect limit, or to a `Location` that cannot be requested, is returned as
+  the response instead of failing, and content-decoding error messages start with
+  `HTTP response` instead of `Direct HTTP response`.
+
+### Fixed
+
+- Direct HTTP DNS, connection, and TLS failures were reported as `INTERNAL_ERROR`. They
+  now return `TARGET_UNREACHABLE`, retryable unless the target certificate failed
+  verification.
+
+### Removed
+
+- Python-level direct HTTP internals replaced by `camouflare.http_transport`:
+  `camouflare.navigation.DirectHttpExecutor`, `DIRECT_HTTP_MAX_WORKERS`,
+  `DIRECT_HTTP_MAX_REDIRECTS` (now `camouflare.limits.MAX_HTTP_REDIRECTS`),
+  `DIRECT_HTTP_DEFAULT_HEADERS` (now `camouflare.http_transport.DEFAULT_HEADERS`),
+  `active_direct_http_executor`, `_direct_http_get_sync`, `_build_http_opener`, and
+  `_HTTP_OPENER`, plus the matching `camouflare.solver` aliases
+  (`DIRECT_HTTP_DEFAULT_HEADERS`, `_HTTP_OPENER`, `_build_http_opener`,
+  `_direct_http_get_sync`, `_has_header`, `_quote_url_for_http`).
+  `CommandService(direct_http=...)`, `shutdown_runtime(direct_http=...)`, and
+  `app.state.direct_http` are now `http_transport`. Code that patched the direct HTTP
+  seam should patch `camouflare.solver._direct_http_get` or pass
+  `create_app(http_connector=...)`. The `/v1` API, configuration, and responses keep
+  every existing field.
+
+### Security
+
+- The lockfile selects certifi 2026.10.23, removing the emSign roots with compromised
+  intermediate keys (PYSEC-2026-4320, GHSA-6q48-6c7w-9gw2). The HTTP transport verifies
+  targets against the system trust store.
+
 ## [2.1.0] - 2026-10-20
 
 ### Added

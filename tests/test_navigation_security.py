@@ -5,13 +5,11 @@ import gzip
 import hashlib
 import json
 import logging
-import threading
 import time
 import zlib
-from collections.abc import Iterator
-from email.message import Message
+from collections.abc import AsyncGenerator, Callable, Iterable, Mapping
+from contextlib import asynccontextmanager
 from fractions import Fraction
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, cast
 
 import pytest
@@ -23,101 +21,86 @@ import camouflare.timer as timer_module
 from camouflare.app import create_app
 from camouflare.challenge import content_has_challenge_markers
 from camouflare.errors import CamouflareError, V1ErrorCode
+from camouflare.http_transport import HopRequest, HopResponse, HopSender, HttpTransport
 from camouflare.limits import ResourceLimitError, ResourceLimits
 from camouflare.models import V1Request
 from camouflare.observability import JsonLogFormatter
 from camouflare.solver import solve_request
 from camouflare.timer import TimeoutTimer
 from tests.fakes import FakeBrowserFactory, FakeContext, FakePage, FakeResponse
+from tests.http_fakes import FakeConnector, FakeHttpResponse, fake_transport
 
 
-class _HttpResponse:
-    def __init__(
-        self,
-        *,
-        url: str,
-        status: int,
-        headers: list[tuple[str, str]] | None = None,
-        body: bytes = b"ok",
-    ) -> None:
-        self._url = url
-        self.status = status
-        self.headers = Message()
-        for name, value in headers or []:
-            self.headers.add_header(name, value)
-        self._body = body
-
-    def __enter__(self) -> _HttpResponse:
-        return self
-
-    def __exit__(self, *args: object) -> None:
-        return None
-
-    def info(self) -> Message:
-        return self.headers
-
-    def geturl(self) -> str:
-        return self._url
-
-    def read(self, size: int | None = None) -> bytes:
-        return self._body if size is None else self._body[:size]
+async def _direct_get(
+    request: V1Request,
+    responses: Iterable[FakeHttpResponse] | Callable[[HopRequest], FakeHttpResponse],
+    *,
+    limits: ResourceLimits | None = None,
+) -> tuple[navigation.RawResponse, FakeConnector]:
+    """Run the browser path's direct HTTP GET for ``request`` against scripted hops."""
+    transport, connector = fake_transport(responses)
+    with (
+        navigation.active_http_transport(transport),
+        navigation.active_resource_limits(limits or ResourceLimits()),
+    ):
+        response = await navigation._direct_http_get(
+            cast(str, request.url), request, TimeoutTimer(5_000)
+        )
+    return response, connector
 
 
-class _EncodedResponseServer(ThreadingHTTPServer):
-    daemon_threads = True
+def _encoded_response(
+    body: bytes,
+    *,
+    status: int = 200,
+    content_encoding: str | None = None,
+    content_type: str = "text/html; charset=utf-8",
+) -> FakeHttpResponse:
+    headers = [("Content-Type", content_type), ("Content-Length", str(len(body)))]
+    if content_encoding is not None:
+        headers.append(("Content-Encoding", content_encoding))
+    return FakeHttpResponse(status, headers, body)
+
+
+async def _chunks(*parts: bytes) -> AsyncGenerator[bytes]:
+    for part in parts:
+        yield part
+
+
+class _StalledConnector:
+    """A connector whose hops get no answer until ``release`` is set."""
 
     def __init__(self) -> None:
-        super().__init__(("127.0.0.1", 0), _EncodedResponseHandler)
-        self.routes: dict[str, tuple[int, list[tuple[str, str]], bytes]] = {}
+        self.release = asyncio.Event()
+        self.unanswered_hops = 0
+        self.max_unanswered_hops = 0
+        self.cancelled_hops = 0
+        self.closed = False
 
-    def route(
+    @asynccontextmanager
+    async def session(
         self,
-        path: str,
-        body: bytes,
         *,
-        status: int = 200,
-        content_encoding: str | None = None,
-        content_type: str = "text/html; charset=utf-8",
-    ) -> str:
-        headers = [("Content-Type", content_type)]
-        if content_encoding is not None:
-            headers.append(("Content-Encoding", content_encoding))
-        self.routes[path] = (status, headers, body)
-        return f"http://127.0.0.1:{self.server_port}{path}"
+        proxy: Mapping[str, str] | None,
+        block_private_targets: bool,
+    ) -> AsyncGenerator[HopSender]:
+        yield self._send
 
+    @asynccontextmanager
+    async def _send(self, hop: HopRequest) -> AsyncGenerator[HopResponse]:
+        self.unanswered_hops += 1
+        self.max_unanswered_hops = max(self.max_unanswered_hops, self.unanswered_hops)
+        try:
+            await self.release.wait()
+        except asyncio.CancelledError:
+            self.cancelled_hops += 1
+            raise
+        finally:
+            self.unanswered_hops -= 1
+        yield HopResponse(status=200, headers=[], chunks=_chunks(b"ok"))
 
-class _EncodedResponseHandler(BaseHTTPRequestHandler):
-    protocol_version = "HTTP/1.1"
-
-    def log_message(self, format: str, *args: Any) -> None:
-        return
-
-    def do_GET(self) -> None:
-        status, headers, body = cast(_EncodedResponseServer, self.server).routes[self.path]
-        self.send_response(status)
-        for name, value in headers:
-            self.send_header(name, value)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Connection", "close")
-        self.end_headers()
-        self.wfile.write(body)
-
-
-@pytest.fixture
-def encoded_http_server() -> Iterator[_EncodedResponseServer]:
-    server = _EncodedResponseServer()
-    thread = threading.Thread(
-        target=server.serve_forever,
-        kwargs={"poll_interval": 0.01},
-        daemon=True,
-    )
-    thread.start()
-    try:
-        yield server
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
+    async def aclose(self) -> None:
+        self.closed = True
 
 
 def _raw_deflate(data: bytes) -> bytes:
@@ -125,7 +108,7 @@ def _raw_deflate(data: bytes) -> bytes:
     return compressor.compress(data) + compressor.flush()
 
 
-# Hex tokens keep the compressed body larger than one socket read.
+# Hex tokens keep the compressed body larger than one 64 KiB transport chunk.
 _JSON_BODY = json.dumps(
     {
         "city": "İstanbul",
@@ -142,44 +125,40 @@ _GZIP_JSON_BODY_WITH_BAD_CRC = (
 )
 
 
-def test_direct_http_cross_origin_redirect_strips_all_caller_headers_and_scopes_cookies(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    opened_headers: list[dict[str, str]] = []
-    timeouts: list[float] = []
-    responses = iter(
+@pytest.mark.anyio
+async def test_direct_http_cross_origin_redirect_strips_all_caller_headers_and_scopes_cookies() -> (
+    None
+):
+    scripted = iter(
         [
-            _HttpResponse(
-                url="https://origin.test/start",
-                status=302,
-                headers=[
+            FakeHttpResponse(
+                302,
+                [
                     ("Location", "https://destination.test/final"),
                     ("Set-Cookie", "origin_only=1; Path=/; HttpOnly"),
                 ],
             ),
-            _HttpResponse(
-                url="https://destination.test/final",
-                status=200,
-                headers=[
+            FakeHttpResponse(
+                200,
+                [
                     (
                         "Set-Cookie",
                         "destination_only=2; Path=/; Secure; HttpOnly; SameSite=Lax",
                     )
                 ],
+                b"ok",
             ),
         ]
     )
 
-    def fake_open(request: Any, timeout: float) -> _HttpResponse:
-        opened_headers.append({name.lower(): value for name, value in request.header_items()})
-        timeouts.append(timeout)
-        if len(timeouts) == 1:
+    def answer(hop: HopRequest) -> FakeHttpResponse:
+        response = next(scripted)
+        if response.status == 302:
+            # The redirect hop spends part of the request's one deadline.
             time.sleep(0.01)
-        return next(responses)
+        return response
 
-    monkeypatch.setattr(navigation._HTTP_OPENER, "open", fake_open)
-    response = navigation._direct_http_get_sync(
-        "https://origin.test/start",
+    response, connector = await _direct_get(
         V1Request(
             cmd="request.get",
             url="https://origin.test/start",
@@ -195,21 +174,23 @@ def test_direct_http_cross_origin_redirect_strips_all_caller_headers_and_scopes_
                 "User-Agent": "BrowserIdentity/1.0",
             },
         ),
-        1,
+        answer,
     )
 
-    assert opened_headers[0]["authorization"] == "Bearer secret"
-    assert opened_headers[0]["cookie"] == "manual=secret"
-    assert "authorization" not in opened_headers[1]
-    assert "proxy-authorization" not in opened_headers[1]
-    assert "host" not in opened_headers[1]
-    assert "cookie" not in opened_headers[1]
-    assert "x-api-key" not in opened_headers[1]
-    assert "x-trace" not in opened_headers[1]
-    assert "referer" not in opened_headers[1]
-    assert "accept" not in opened_headers[1]
-    assert opened_headers[1]["user-agent"] == "BrowserIdentity/1.0"
-    assert timeouts[1] < timeouts[0]
+    first, second = connector.hops
+    assert first.headers["authorization"] == "Bearer secret"
+    assert first.headers["cookie"] == "manual=secret"
+    assert second.url == "https://destination.test/final"
+    assert "authorization" not in second.headers
+    assert "proxy-authorization" not in second.headers
+    assert "host" not in second.headers
+    assert "cookie" not in second.headers
+    assert "x-api-key" not in second.headers
+    assert "x-trace" not in second.headers
+    assert "referer" not in second.headers
+    assert "accept" not in second.headers
+    assert second.headers["user-agent"] == "BrowserIdentity/1.0"
+    assert second.timeout_seconds < first.timeout_seconds
     assert {cookie["name"] for cookie in response.cookies} == {
         "origin_only",
         "destination_only",
@@ -222,36 +203,23 @@ def test_direct_http_cross_origin_redirect_strips_all_caller_headers_and_scopes_
     assert destination_cookie["sameSite"] == "Lax"
 
 
-def test_direct_http_rejects_public_suffix_cookie_across_redirect(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    opened_headers: list[dict[str, str]] = []
-    responses = iter(
+@pytest.mark.anyio
+async def test_direct_http_rejects_public_suffix_cookie_across_redirect() -> None:
+    response, connector = await _direct_get(
+        V1Request(cmd="request.get", url="https://attacker.co.uk/start"),
         [
-            _HttpResponse(
-                url="https://attacker.co.uk/start",
-                status=302,
-                headers=[
+            FakeHttpResponse(
+                302,
+                [
                     ("Location", "https://victim.co.uk/final"),
                     ("Set-Cookie", "supercookie=secret; Domain=co.uk; Path=/"),
                 ],
             ),
-            _HttpResponse(url="https://victim.co.uk/final", status=200),
-        ]
+            FakeHttpResponse(200, body=b"ok"),
+        ],
     )
 
-    def fake_open(request: Any, timeout: float) -> _HttpResponse:
-        opened_headers.append({name.lower(): value for name, value in request.header_items()})
-        return next(responses)
-
-    monkeypatch.setattr(navigation._HTTP_OPENER, "open", fake_open)
-    response = navigation._direct_http_get_sync(
-        "https://attacker.co.uk/start",
-        V1Request(cmd="request.get", url="https://attacker.co.uk/start"),
-        1,
-    )
-
-    assert "cookie" not in opened_headers[1]
+    assert "cookie" not in connector.hops[1].headers
     assert all(cookie["name"] != "supercookie" for cookie in response.cookies)
 
 
@@ -402,6 +370,7 @@ async def test_submit_post_prefers_context_request_and_disables_automatic_redire
     assert page.goto_calls == []
 
 
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("target", "expected_cookie_header"),
     [
@@ -411,8 +380,7 @@ async def test_submit_post_prefers_context_request_and_disables_automatic_redire
         ("https://example.com/administrator", None),
     ],
 )
-def test_direct_http_cookie_header_respects_host_path_secure_and_expiry(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_direct_http_cookie_header_respects_host_path_secure_and_expiry(
     target: str,
     expected_cookie_header: str | None,
 ) -> None:
@@ -439,20 +407,13 @@ def test_direct_http_cookie_header_respects_host_path_secure_and_expiry(
             "expires": time.time() - 60,
         },
     ]
-    opened_headers: list[dict[str, str]] = []
 
-    def fake_open(request: Any, timeout: float) -> _HttpResponse:
-        opened_headers.append({name.lower(): value for name, value in request.header_items()})
-        return _HttpResponse(url=target, status=200)
-
-    monkeypatch.setattr(navigation._HTTP_OPENER, "open", fake_open)
-    navigation._direct_http_get_sync(
-        target,
+    _, connector = await _direct_get(
         V1Request(cmd="request.get", url=target, cookies=cookies),
-        1,
+        [FakeHttpResponse(200, body=b"ok")],
     )
 
-    assert opened_headers[0].get("cookie") == expected_cookie_header
+    assert connector.hops[0].headers.get("cookie") == expected_cookie_header
 
 
 @pytest.mark.anyio
@@ -600,193 +561,182 @@ async def test_ajax_preflight_fallback_json_log_identifies_only_target_origin(
 
 
 @pytest.mark.anyio
-async def test_direct_http_worker_returns_at_deadline_even_if_thread_is_still_running(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def slow_get(*args: Any, **kwargs: Any) -> navigation.RawResponse:
-        time.sleep(0.05)
-        return navigation.RawResponse(url="https://example.com", status=200, headers={}, body="ok")
-
-    monkeypatch.setattr(navigation, "_direct_http_get_sync", slow_get)
-    executor = navigation.DirectHttpExecutor()
+async def test_direct_http_returns_at_its_deadline_and_cancels_the_unanswered_hop() -> None:
+    connector = _StalledConnector()
+    transport = HttpTransport(max_concurrency=1, connector=connector)
     started = time.monotonic()
-    with (
-        navigation.active_direct_http_executor(executor),
-        pytest.raises(TimeoutError, match="deadline"),
-    ):
-        await navigation._direct_http_get(
-            "https://example.com",
-            V1Request(cmd="request.get", url="https://example.com"),
-            TimeoutTimer(5),
-        )
-    assert time.monotonic() - started < 0.04
-    await asyncio.sleep(0.06)
-    await executor.close()
+    # The guard only fires if the request deadline is not enforced.
+    async with asyncio.timeout(5):
+        with (
+            navigation.active_http_transport(transport),
+            pytest.raises(CamouflareError) as excinfo,
+        ):
+            await navigation._direct_http_get(
+                "https://example.com",
+                V1Request(cmd="request.get", url="https://example.com"),
+                TimeoutTimer(50),
+            )
+
+    assert time.monotonic() - started < 1
+    assert excinfo.value.error_code is V1ErrorCode.NAVIGATION_TIMEOUT
+    assert excinfo.value.retryable is True
+    # Nothing outlives the deadline: the hop is cancelled and its slot is free again.
+    assert connector.cancelled_hops == 1
+    assert connector.unanswered_hops == 0
+    assert transport.snapshot()["active_requests"] == 0
+    await transport.close()
+    assert connector.closed
 
 
 @pytest.mark.anyio
-async def test_direct_http_worker_concurrency_is_bounded(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    lock = threading.Lock()
-    active = 0
-    maximum_active = 0
-
-    def slow_get(*args: Any, **kwargs: Any) -> navigation.RawResponse:
-        nonlocal active, maximum_active
-        with lock:
-            active += 1
-            maximum_active = max(maximum_active, active)
-        try:
-            time.sleep(0.02)
-            return navigation.RawResponse(
-                url="https://example.com", status=200, headers={}, body="ok"
+async def test_direct_http_concurrency_is_bounded_by_the_shared_transport() -> None:
+    connector = _StalledConnector()
+    transport = HttpTransport(max_concurrency=2, connector=connector)
+    # A GET with origin-bound headers has no browser alternative, so it waits for a slot.
+    request = V1Request(
+        cmd="request.get",
+        url="https://example.com",
+        headers={"X-Requested-With": "XMLHttpRequest"},
+    )
+    with navigation.active_http_transport(transport):
+        gets = [
+            asyncio.create_task(
+                navigation._direct_http_get("https://example.com", request, TimeoutTimer(5_000))
             )
-        finally:
-            with lock:
-                active -= 1
+            for _ in range(6)
+        ]
+    async with asyncio.timeout(5):
+        while connector.unanswered_hops + transport.snapshot()["waiting_requests"] < len(gets):
+            await asyncio.sleep(0)
 
-    monkeypatch.setattr(navigation, "_direct_http_get_sync", slow_get)
-    request = V1Request(cmd="request.get", url="https://example.com")
-    executor = navigation.DirectHttpExecutor()
-    with navigation.active_direct_http_executor(executor):
-        await asyncio.gather(
-            *(
-                navigation._direct_http_get(
-                    "https://example.com",
-                    request,
-                    TimeoutTimer(1000),
-                )
-                for _ in range(navigation.DIRECT_HTTP_MAX_WORKERS * 2)
-            )
-        )
-    await executor.close()
+    assert connector.unanswered_hops == 2
+    connector.release.set()
+    responses = await asyncio.gather(*gets)
+    await transport.close()
 
-    assert maximum_active <= navigation.DIRECT_HTTP_MAX_WORKERS
+    assert [response.status for response in responses] == [200] * len(gets)
+    assert connector.max_unanswered_hops == 2
 
 
 @pytest.mark.anyio
-async def test_app_command_uses_its_runtime_owned_direct_http_executor(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def direct_get(*args: Any, **kwargs: Any) -> navigation.RawResponse:
-        return navigation.RawResponse(
-            url="https://example.com/data?ajax=true",
-            status=200,
-            headers={"content-type": "text/html; charset=utf-8"},
-            body="<html><title>Direct</title><body>owned worker</body></html>",
+async def test_ajax_preflight_gives_way_to_the_browser_when_http_capacity_is_full() -> None:
+    connector = _StalledConnector()
+    transport = HttpTransport(max_concurrency=1, connector=connector)
+    busy_request = V1Request(
+        cmd="request.get",
+        url="https://example.com/busy",
+        headers={"X-Requested-With": "XMLHttpRequest"},
+    )
+    context = FakeContext()
+    page = await context.new_page()
+    with navigation.active_http_transport(transport):
+        busy = asyncio.create_task(
+            navigation._direct_http_get(busy_request.url, busy_request, TimeoutTimer(5_000))
         )
+        async with asyncio.timeout(5):
+            while connector.unanswered_hops < 1:
+                await asyncio.sleep(0)
+        started = time.monotonic()
+        response = await navigation.navigate_get(
+            page,
+            V1Request(cmd="request.get", url="https://example.com/data?ajax=true"),
+            TimeoutTimer(5_000),
+            ResourceLimits(),
+        )
+        elapsed = time.monotonic() - started
+    connector.release.set()
+    await busy
+    await transport.close()
 
-    monkeypatch.setattr(navigation, "_direct_http_get_sync", direct_get)
-    app = create_app(browser_factory=FakeBrowserFactory(), lifespan_enabled=False)
+    # The preflight did not queue behind the busy slot; the browser navigated instead.
+    assert elapsed < 1
+    assert [call["url"] for call in page.goto_calls] == ["https://example.com/data?ajax=true"]
+    assert response is not None
+    # Only the busy request ever reached the connector.
+    assert connector.max_unanswered_hops == 1
+    assert connector.unanswered_hops == 0
+
+
+@pytest.mark.anyio
+async def test_app_command_uses_its_runtime_owned_http_transport() -> None:
+    url = "https://example.com/data?ajax=true"
+    connector = FakeConnector(
+        [
+            FakeHttpResponse(
+                200,
+                [("Content-Type", "text/html; charset=utf-8")],
+                b"<html><title>Direct</title><body>owned transport</body></html>",
+            )
+        ]
+    )
+    app = create_app(
+        browser_factory=FakeBrowserFactory(),
+        http_connector=connector,
+        lifespan_enabled=False,
+    )
     await app.state.pool.start()
     try:
         async with AsyncClient(
             transport=ASGITransport(app=app),
             base_url="http://127.0.0.1",
         ) as client:
-            response = await client.post(
-                "/v1",
-                json={
-                    "cmd": "request.get",
-                    "url": "https://example.com/data?ajax=true",
-                },
-            )
+            response = await client.post("/v1", json={"cmd": "request.get", "url": url})
     finally:
         await app.state.sessions.close()
         await app.state.pool.close()
-        await app.state.direct_http.close()
+        await app.state.http_transport.close()
 
     assert response.status_code == 200
-    assert "owned worker" in response.json()["solution"]["response"]
+    assert "owned transport" in response.json()["solution"]["response"]
+    assert [hop.url for hop in connector.hops] == [url]
 
 
-def test_direct_http_keeps_prior_secure_cookie_across_https_to_http_redirect(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    opened_headers: list[dict[str, str]] = []
-    responses = iter(
+@pytest.mark.anyio
+async def test_direct_http_keeps_prior_secure_cookie_across_https_to_http_redirect() -> None:
+    response, connector = await _direct_get(
+        V1Request(cmd="request.get", url="https://origin.test/start"),
         [
-            _HttpResponse(
-                url="https://origin.test/start",
-                status=302,
-                headers=[
+            FakeHttpResponse(
+                302,
+                [
                     ("Location", "http://origin.test/final"),
                     ("Set-Cookie", "keep=1; Secure; Path=/"),
                 ],
             ),
-            _HttpResponse(url="http://origin.test/final", status=200),
-        ]
+            FakeHttpResponse(200, body=b"ok"),
+        ],
     )
 
-    def fake_open(request: Any, timeout: float) -> _HttpResponse:
-        opened_headers.append({name.lower(): value for name, value in request.header_items()})
-        return next(responses)
-
-    monkeypatch.setattr(navigation._HTTP_OPENER, "open", fake_open)
-    response = navigation._direct_http_get_sync(
-        "https://origin.test/start",
-        V1Request(cmd="request.get", url="https://origin.test/start"),
-        1,
-    )
-
-    assert "cookie" not in opened_headers[1]
+    assert connector.hops[1].url == "http://origin.test/final"
+    assert "cookie" not in connector.hops[1].headers
     assert [cookie["name"] for cookie in response.solution_cookies] == ["keep"]
     assert response.solution_cookies[0]["domain"] == "origin.test"
     assert response.solution_cookies[0]["path"] == "/"
 
 
-def test_direct_http_rejects_case_insensitive_unsafe_cookie_attributes(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        navigation._HTTP_OPENER,
-        "open",
-        lambda request, timeout: _HttpResponse(
-            url="http://origin.test/",
-            status=200,
-            headers=[
-                ("Set-Cookie", "partitioned_cookie=1; partitioned; Secure; Path=/"),
-                ("Set-Cookie", "none_cookie=1; SameSite=none; Path=/"),
-            ],
-        ),
-    )
-
-    response = navigation._direct_http_get_sync(
-        "http://origin.test/",
+@pytest.mark.anyio
+async def test_direct_http_rejects_case_insensitive_unsafe_cookie_attributes() -> None:
+    response, _ = await _direct_get(
         V1Request(cmd="request.get", url="http://origin.test/"),
-        1,
+        [
+            FakeHttpResponse(
+                200,
+                [
+                    ("Set-Cookie", "partitioned_cookie=1; partitioned; Secure; Path=/"),
+                    ("Set-Cookie", "none_cookie=1; SameSite=none; Path=/"),
+                ],
+                b"ok",
+            )
+        ],
     )
 
     assert response.cookies == []
     assert response.solution_cookies == []
 
 
-def test_direct_http_rejects_domain_cookie_from_ip_literal_origin(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    opened_headers: list[dict[str, str]] = []
-    responses = iter(
-        [
-            _HttpResponse(
-                url="http://127.0.0.1/start",
-                status=302,
-                headers=[
-                    ("Location", "http://10.0.0.1/final"),
-                    ("Set-Cookie", "partial_ip=secret; Domain=0.0.1; Path=/"),
-                ],
-            ),
-            _HttpResponse(url="http://10.0.0.1/final", status=200),
-        ]
-    )
-
-    def fake_open(request: Any, timeout: float) -> _HttpResponse:
-        opened_headers.append({name.lower(): value for name, value in request.header_items()})
-        return next(responses)
-
-    monkeypatch.setattr(navigation._HTTP_OPENER, "open", fake_open)
-    response = navigation._direct_http_get_sync(
-        "http://127.0.0.1/start",
+@pytest.mark.anyio
+async def test_direct_http_rejects_domain_cookie_from_ip_literal_origin() -> None:
+    response, connector = await _direct_get(
         V1Request(
             cmd="request.get",
             url="http://127.0.0.1/start",
@@ -799,73 +749,73 @@ def test_direct_http_rejects_domain_cookie_from_ip_literal_origin(
                 }
             ],
         ),
-        1,
+        [
+            FakeHttpResponse(
+                302,
+                [
+                    ("Location", "http://10.0.0.1/final"),
+                    ("Set-Cookie", "partial_ip=secret; Domain=0.0.1; Path=/"),
+                ],
+            ),
+            FakeHttpResponse(200, body=b"ok"),
+        ],
     )
 
-    assert "cookie" not in opened_headers[0]
-    assert "cookie" not in opened_headers[1]
+    assert [hop.url for hop in connector.hops] == [
+        "http://127.0.0.1/start",
+        "http://10.0.0.1/final",
+    ]
+    assert "cookie" not in connector.hops[0].headers
+    assert "cookie" not in connector.hops[1].headers
     assert response.cookies == []
 
 
-def test_direct_http_cookies_only_reads_bounded_challenge_probe(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    response_body = b"x" * (navigation.DIRECT_HTTP_CHALLENGE_PROBE_BYTES * 2)
-    read_sizes: list[int | None] = []
-    response = _HttpResponse(url="https://origin.test/", status=200, body=response_body)
-    original_read = response.read
+@pytest.mark.anyio
+async def test_direct_http_cookies_only_reads_bounded_challenge_probe() -> None:
+    probe_bytes = navigation.DIRECT_HTTP_CHALLENGE_PROBE_BYTES
+    chunk = b"x" * 4_096
+    body_bytes = probe_bytes * 2
 
-    def tracked_read(size: int | None = None) -> bytes:
-        read_sizes.append(size)
-        return original_read(size)
-
-    response.read = tracked_read  # type: ignore[method-assign]
-    monkeypatch.setattr(navigation._HTTP_OPENER, "open", lambda request, timeout: response)
-
-    result = navigation._direct_http_get_sync(
-        "https://origin.test/",
+    result, connector = await _direct_get(
         V1Request(
             cmd="request.get",
             url="https://origin.test/",
             returnOnlyCookies=True,
         ),
-        1,
-        maximum_body_bytes=20,
+        [
+            FakeHttpResponse(
+                200,
+                [("Content-Length", str(body_bytes))],
+                [chunk] * (body_bytes // len(chunk)),
+            )
+        ],
+        # The probe has its own bound, independent of the configured body limit.
+        limits=ResourceLimits(response_body_bytes=20),
     )
 
-    assert read_sizes == [navigation.DIRECT_HTTP_CHALLENGE_PROBE_BYTES + 1]
-    assert len(result._body) == navigation.DIRECT_HTTP_CHALLENGE_PROBE_BYTES
-    assert result._body == "x" * navigation.DIRECT_HTTP_CHALLENGE_PROBE_BYTES
+    assert result._body == "x" * probe_bytes
+    # Reading stops just past the probe instead of draining the rest of the body.
+    assert connector.consumed_bytes[0] <= probe_bytes + len(chunk)
 
 
-def test_direct_http_materializes_error_status_and_reports_exact_user_agent(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        navigation._HTTP_OPENER,
-        "open",
-        lambda request, timeout: _HttpResponse(
-            url="https://origin.test/challenge",
-            status=403,
-            body=b"<html><title>Just a moment...</title></html>",
-        ),
-    )
-
-    response = navigation._direct_http_get_sync(
-        "https://origin.test/challenge",
+@pytest.mark.anyio
+async def test_direct_http_materializes_error_status_and_reports_exact_user_agent() -> None:
+    response, connector = await _direct_get(
         V1Request(
             cmd="request.get",
             url="https://origin.test/challenge",
             userAgent="Exact-UA/1.0",
         ),
-        1,
+        [FakeHttpResponse(403, body=b"<html><title>Just a moment...</title></html>")],
     )
 
     assert response.status == 403
     assert response._body == "<html><title>Just a moment...</title></html>"
     assert response.user_agent == "Exact-UA/1.0"
+    assert connector.hops[0].headers["user-agent"] == "Exact-UA/1.0"
 
 
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("content_encoding", "wire_body"),
     [
@@ -885,43 +835,46 @@ def test_direct_http_materializes_error_status_and_reports_exact_user_agent(
         ),
     ],
 )
-def test_direct_http_decodes_supported_content_encodings(
-    encoded_http_server: _EncodedResponseServer,
+async def test_direct_http_decodes_supported_content_encodings(
     content_encoding: str | None,
     wire_body: bytes,
 ) -> None:
-    url = encoded_http_server.route(
-        "/data.json",
-        wire_body,
-        content_encoding=content_encoding,
-        content_type="application/json; charset=utf-8",
+    response, _ = await _direct_get(
+        V1Request(cmd="request.get", url="https://origin.test/data.json"),
+        [
+            _encoded_response(
+                wire_body,
+                content_encoding=content_encoding,
+                content_type="application/json; charset=utf-8",
+            )
+        ],
     )
-
-    response = navigation._direct_http_get_sync(url, V1Request(cmd="request.get", url=url), 5)
 
     assert response.status == 200
     assert response._body == _JSON_BODY.decode("utf-8")
 
 
+@pytest.mark.anyio
 @pytest.mark.parametrize("status", [403, 503])
-def test_direct_http_returns_decoded_error_status_pages(
-    encoded_http_server: _EncodedResponseServer,
-    status: int,
-) -> None:
+async def test_direct_http_returns_decoded_error_status_pages(status: int) -> None:
     page = "<html><title>Upstream refused</title><body>İstanbul</body></html>"
-    url = encoded_http_server.route(
-        "/refused",
-        gzip.compress(page.encode("utf-8")),
-        status=status,
-        content_encoding="gzip",
-    )
 
-    response = navigation._direct_http_get_sync(url, V1Request(cmd="request.get", url=url), 5)
+    response, _ = await _direct_get(
+        V1Request(cmd="request.get", url="https://origin.test/refused"),
+        [
+            _encoded_response(
+                gzip.compress(page.encode("utf-8")),
+                status=status,
+                content_encoding="gzip",
+            )
+        ],
+    )
 
     assert response.status == status
     assert response._body == page
 
 
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("content_encoding", "wire_body"),
     [
@@ -936,95 +889,83 @@ def test_direct_http_returns_decoded_error_status_pages(
         pytest.param("deflate", zlib.compress(_JSON_BODY)[:-4], id="truncated-deflate"),
     ],
 )
-def test_direct_http_rejects_unsupported_or_malformed_content_encodings(
-    encoded_http_server: _EncodedResponseServer,
+async def test_direct_http_rejects_unsupported_or_malformed_content_encodings(
     content_encoding: str,
     wire_body: bytes,
 ) -> None:
-    url = encoded_http_server.route("/broken", wire_body, content_encoding=content_encoding)
-
     with pytest.raises(CamouflareError) as excinfo:
-        navigation._direct_http_get_sync(url, V1Request(cmd="request.get", url=url), 5)
+        await _direct_get(
+            V1Request(cmd="request.get", url="https://origin.test/broken"),
+            [_encoded_response(wire_body, content_encoding=content_encoding)],
+        )
 
     assert excinfo.value.error_code is V1ErrorCode.RESPONSE_DECODE_ERROR
     assert excinfo.value.retryable is False
 
 
+@pytest.mark.anyio
 @pytest.mark.parametrize(("status", "encoding"), [(204, "gzip"), (304, "br")])
-def test_bodyless_http_status_does_not_require_an_encoded_body(
-    encoded_http_server: _EncodedResponseServer,
+async def test_bodyless_http_status_does_not_require_an_encoded_body(
     status: int,
     encoding: str,
 ) -> None:
-    url = encoded_http_server.route("/no-body", b"", status=status, content_encoding=encoding)
-
-    response = navigation._direct_http_get_sync(url, V1Request(cmd="request.get", url=url), 5)
+    response, _ = await _direct_get(
+        V1Request(cmd="request.get", url="https://origin.test/no-body"),
+        [_encoded_response(b"", status=status, content_encoding=encoding)],
+    )
 
     assert response.status == status
     assert response._body == ""
 
 
-def test_direct_http_limits_decoded_and_intermediate_bytes_not_only_wire_bytes(
-    encoded_http_server: _EncodedResponseServer,
-) -> None:
+@pytest.mark.anyio
+async def test_direct_http_limits_decoded_and_intermediate_bytes_not_only_wire_bytes() -> None:
     limit = 4_096
-    at_limit = encoded_http_server.route(
-        "/at-limit",
-        gzip.compress(b"0" * limit),
-        content_encoding="gzip",
-    )
-    over_limit = encoded_http_server.route(
-        "/over-limit",
-        gzip.compress(b"0" * (limit + 1)),
-        content_encoding="gzip",
-    )
-    # The inner layer decodes to two bytes, but the outer layer first inflates it
-    # (with legal NUL member padding) past the limit.
-    oversized_layer = encoded_http_server.route(
-        "/oversized-layer",
-        gzip.compress(gzip.compress(b"ok") + b"\x00" * (limit * 2)),
-        content_encoding="gzip, gzip",
+    limits = ResourceLimits(response_body_bytes=limit)
+    request = V1Request(cmd="request.get", url="https://origin.test/data")
+
+    response, _ = await _direct_get(
+        request,
+        [_encoded_response(gzip.compress(b"0" * limit), content_encoding="gzip")],
+        limits=limits,
     )
 
-    response = navigation._direct_http_get_sync(
-        at_limit,
-        V1Request(cmd="request.get", url=at_limit),
-        5,
-        maximum_body_bytes=limit,
-    )
     assert response._body == "0" * limit
-    for url in (over_limit, oversized_layer):
+    oversized = [
+        ("gzip", gzip.compress(b"0" * (limit + 1))),
+        # The inner layer decodes to two bytes, but the outer layer first inflates it
+        # (with legal NUL member padding) past the limit.
+        ("gzip, gzip", gzip.compress(gzip.compress(b"ok") + b"\x00" * (limit * 2))),
+    ]
+    for content_encoding, wire_body in oversized:
         with pytest.raises(ResourceLimitError):
-            navigation._direct_http_get_sync(
-                url,
-                V1Request(cmd="request.get", url=url),
-                5,
-                maximum_body_bytes=limit,
+            await _direct_get(
+                request,
+                [_encoded_response(wire_body, content_encoding=content_encoding)],
+                limits=limits,
             )
 
 
-def test_direct_http_cookies_only_inspects_decoded_prefix_of_compressed_challenge(
-    encoded_http_server: _EncodedResponseServer,
-) -> None:
+@pytest.mark.anyio
+async def test_direct_http_cookies_only_inspects_decoded_prefix_of_compressed_challenge() -> None:
     challenge = b"<html><head><title>Just a moment...</title></head><body>" + b"x" * 4_194_304
     # The gzip trailer is missing: a full read is malformed, while the cookies-only
     # probe stops after the decoded prefix it inspects and never reaches the trailer.
-    url = encoded_http_server.route(
-        "/challenge",
-        gzip.compress(challenge)[:-8],
-        content_encoding="gzip",
-    )
+    wire_body = gzip.compress(challenge)[:-8]
+    url = "https://origin.test/challenge"
 
-    probe = navigation._direct_http_get_sync(
-        url,
+    probe, _ = await _direct_get(
         V1Request(cmd="request.get", url=url, returnOnlyCookies=True),
-        5,
+        [_encoded_response(wire_body, content_encoding="gzip")],
     )
 
     assert probe._body == challenge[: navigation.DIRECT_HTTP_CHALLENGE_PROBE_BYTES].decode()
     assert content_has_challenge_markers(probe._body)
     with pytest.raises(CamouflareError) as excinfo:
-        navigation._direct_http_get_sync(url, V1Request(cmd="request.get", url=url), 5)
+        await _direct_get(
+            V1Request(cmd="request.get", url=url),
+            [_encoded_response(wire_body, content_encoding="gzip")],
+        )
     assert excinfo.value.error_code is V1ErrorCode.RESPONSE_DECODE_ERROR
 
 
@@ -1043,33 +984,29 @@ def test_direct_http_cookies_only_inspects_decoded_prefix_of_compressed_challeng
     ],
 )
 async def test_direct_http_decode_errors_surface_from_every_direct_get_path(
-    encoded_http_server: _EncodedResponseServer,
     allow_direct_http_first: bool,
     goto_failure: Exception | None,
     commit_times_out: bool,
 ) -> None:
-    url = encoded_http_server.route("/data?ajax=true", b"opaque", content_encoding="br")
+    transport, _ = fake_transport([_encoded_response(b"opaque", content_encoding="br")])
     context = FakeContext()
     page = await context.new_page()
     if goto_failure is not None:
         page.goto_failures["domcontentloaded"] = goto_failure
     if commit_times_out:
         page.wait_failures.add("commit")
-    executor = navigation.DirectHttpExecutor()
-    try:
-        with (
-            navigation.active_direct_http_executor(executor),
-            pytest.raises(CamouflareError) as excinfo,
-        ):
-            await navigation.navigate_get(
-                page,
-                V1Request(cmd="request.get", url=url),
-                TimeoutTimer(5_000),
-                ResourceLimits(),
-                allow_direct_http_first=allow_direct_http_first,
-            )
-    finally:
-        await executor.close()
+
+    with (
+        navigation.active_http_transport(transport),
+        pytest.raises(CamouflareError) as excinfo,
+    ):
+        await navigation.navigate_get(
+            page,
+            V1Request(cmd="request.get", url="https://origin.test/data?ajax=true"),
+            TimeoutTimer(5_000),
+            ResourceLimits(),
+            allow_direct_http_first=allow_direct_http_first,
+        )
 
     assert excinfo.value.error_code is V1ErrorCode.RESPONSE_DECODE_ERROR
     assert excinfo.value.retryable is False

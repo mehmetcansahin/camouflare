@@ -1501,7 +1501,7 @@ async def test_session_transport_failure_does_not_make_stateless_direct_fallback
     finally:
         await app.state.sessions.close()
         await app.state.pool.close()
-        await app.state.direct_http.close()
+        await app.state.http_transport.close()
 
     assert created.status_code == 200
     assert response.status_code == 500
@@ -1567,7 +1567,7 @@ async def test_session_page_crash_preserves_healthy_persistent_context() -> None
     finally:
         await app.state.sessions.close()
         await app.state.pool.close()
-        await app.state.direct_http.close()
+        await app.state.http_transport.close()
 
 
 @pytest.mark.anyio
@@ -1631,7 +1631,7 @@ async def test_session_new_page_disconnect_evicts_session_and_releases_capacity(
     finally:
         await app.state.sessions.close()
         await app.state.pool.close()
-        await app.state.direct_http.close()
+        await app.state.http_transport.close()
 
     assert replacement is not None
     assert replacement.status_code == 200
@@ -1676,7 +1676,7 @@ async def test_stateless_new_page_disconnect_is_classified_before_send(
         snapshot = app.state.pool.snapshot()
     finally:
         await app.state.pool.close()
-        await app.state.direct_http.close()
+        await app.state.http_transport.close()
 
     body = response.json()
     assert response.status_code == 500
@@ -1722,7 +1722,7 @@ async def test_request_queued_behind_evicted_session_is_retryable_before_send(
     finally:
         await app.state.sessions.close()
         await app.state.pool.close()
-        await app.state.direct_http.close()
+        await app.state.http_transport.close()
 
     body = response.json()
     assert response.status_code == 500
@@ -2862,7 +2862,7 @@ async def test_dispatch_does_not_wait_for_expired_session_cleanup() -> None:
         finish_close.set()
         await app.state.sessions.close()
         await app.state.pool.close()
-        await app.state.direct_http.close()
+        await app.state.http_transport.close()
 
 
 @pytest.mark.anyio
@@ -2972,7 +2972,7 @@ async def test_same_id_create_waits_for_slow_winner_while_other_ids_are_rejected
         finish_build.set()
         await app.state.sessions.close()
         await app.state.pool.close()
-        await app.state.direct_http.close()
+        await app.state.http_transport.close()
 
     assert other.status_code == 503
     assert other.json()["errorCode"] == "POOL_UNAVAILABLE"
@@ -3114,7 +3114,7 @@ async def test_challenge_budget_includes_time_spent_before_the_solve(
             )
     finally:
         await app.state.pool.close()
-        await app.state.direct_http.close()
+        await app.state.http_transport.close()
 
     # A solve budget restarted after page creation would poll past the /v1
     # supervisor and lose the partial solution to a bare request timeout.

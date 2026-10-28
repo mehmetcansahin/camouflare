@@ -72,19 +72,13 @@ logger = logging.getLogger(__name__)
 # Kept as module aliases for compatibility with existing integrations and tests
 # that patch the private direct-HTTP seam. New code should import navigation.
 ALLOWED_URL_SCHEMES = _navigation.ALLOWED_URL_SCHEMES
-DIRECT_HTTP_DEFAULT_HEADERS = _navigation.DIRECT_HTTP_DEFAULT_HEADERS
 DOMCONTENTLOADED_NAVIGATION_TIMEOUT_MS = _navigation.DOMCONTENTLOADED_NAVIGATION_TIMEOUT_MS
 RawResponse = _navigation.RawResponse
-_HTTP_OPENER = _navigation._HTTP_OPENER
 _ACTIVE_LIMITS = _navigation._ACTIVE_LIMITS
-_build_http_opener = _navigation._build_http_opener
 _direct_http_get = _navigation._direct_http_get
-_direct_http_get_sync = _navigation._direct_http_get_sync
 _clean_url = _navigation.clean_url
-_has_header = _navigation.has_header
 _is_timeout_error = _navigation.is_timeout_error
 _post_with_context_request = _navigation.post_with_context_request
-_quote_url_for_http = _navigation.quote_url_for_http
 _raw_response_from_api_response = _navigation.raw_response_from_api_response
 _set_default_header = _navigation.set_default_header
 _should_try_direct_get_after_navigation_timeout = (

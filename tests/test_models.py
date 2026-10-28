@@ -422,6 +422,12 @@ def test_diagnostics_response_validates_bounded_operational_snapshot() -> None:
                 "max_contexts_per_browser": 2,
                 "max_slots": 4,
             },
+            "http": {
+                "max_concurrency": 8,
+                "active_requests": 3,
+                "waiting_requests": 2,
+                "available_slots": 5,
+            },
             "sessions": {"active": 1, "in_use": 1, "closing": 1, "max_sessions": 32},
             "cleanup": {
                 "in_flight": 1,
@@ -437,6 +443,8 @@ def test_diagnostics_response_validates_bounded_operational_snapshot() -> None:
 
     assert response.capacity_state == "recovering"
     assert response.pool.max_slots == 4
+    assert response.http.max_concurrency == 8
+    assert response.http.available_slots == 5
     assert response.cleanup.by_kind == {"request": 1}
 
 
@@ -459,6 +467,12 @@ def test_diagnostics_response_rejects_unknown_capacity_state() -> None:
                     "max_browsers": 1,
                     "max_contexts_per_browser": 1,
                     "max_slots": 1,
+                },
+                "http": {
+                    "max_concurrency": 1,
+                    "active_requests": 0,
+                    "waiting_requests": 0,
+                    "available_slots": 1,
                 },
                 "sessions": {"active": 0, "in_use": 0, "closing": 0, "max_sessions": 1},
                 "cleanup": {"in_flight": 0, "by_kind": {}},

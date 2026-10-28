@@ -1,24 +1,38 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 from camouflare.captcha import CaptchaProvider
 from camouflare.cleanup import CleanupSupervisor
 from camouflare.config import Settings, normalize_proxy
 from camouflare.errors import CamouflareError, V1ErrorCode
-from camouflare.metrics import record_session_event
-from camouflare.models import V1Request, V1Response
-from camouflare.navigation import DirectHttpExecutor, active_direct_http_executor
+from camouflare.http_transport import HttpFetch, HttpResult, HttpTransport, with_default_headers
+from camouflare.limits import (
+    MAX_COOKIE_BYTES,
+    MAX_COOKIES,
+    MAX_HTTP_REDIRECTS,
+    ResourceLimitError,
+    ensure_json_size,
+    utf8_size,
+)
+from camouflare.metrics import observe_payload_size, record_session_event
+from camouflare.models import Solution, V1Request, V1Response
+from camouflare.navigation import (
+    active_http_transport,
+    origin_bound_target_headers,
+    target_request_headers,
+)
 from camouflare.pool import BrowserPool, PersistentCapacityError
 from camouflare.protocols import BrowserProxy, ContextOptions, PageLike
 from camouflare.proxy import open_proxy_lease
 from camouflare.sessions import Session, SessionManager, SessionUnavailableError
-from camouflare.solution import is_best_effort_browser_error
+from camouflare.solution import is_best_effort_browser_error, response_charset
 from camouflare.solver import solve_request
 from camouflare.timer import TimeoutTimer
 
@@ -31,8 +45,33 @@ KNOWN_COMMANDS = frozenset(
         "sessions.destroy",
         "request.get",
         "request.post",
+        "request.head",
     }
 )
+
+# Parameters that only the HTTP transport can honor.
+_HTTP_TRANSPORT_PARAMETERS = (
+    ("responseEncoding", "response_encoding"),
+    ("maxResponseBytes", "max_response_bytes"),
+    ("followRedirects", "follow_redirects"),
+)
+# Framing and proxy headers belong to the transport, never to the caller.
+_HTTP_TRANSPORT_FORBIDDEN_HEADERS = frozenset(
+    {
+        "connection",
+        "content-length",
+        "host",
+        "keep-alive",
+        "proxy-authorization",
+        "proxy-connection",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+    }
+)
+# Keeps a classified transport error ahead of the /v1 hard deadline.
+_HTTP_TRANSPORT_RESERVE_MS = 1000
 
 
 @dataclass(frozen=True)
@@ -42,7 +81,7 @@ class CommandService:
     sessions: SessionManager
     captcha_provider: CaptchaProvider
     cleanup: CleanupSupervisor | None = None
-    direct_http: DirectHttpExecutor | None = None
+    http_transport: HttpTransport | None = None
 
     async def dispatch(
         self,
@@ -51,9 +90,9 @@ class CommandService:
         start_timestamp: int,
         timer: TimeoutTimer | None = None,
     ) -> V1Response:
-        if self.direct_http is None:
+        if self.http_transport is None:
             return await self._dispatch(request, start_timestamp=start_timestamp, timer=timer)
-        with active_direct_http_executor(self.direct_http):
+        with active_http_transport(self.http_transport):
             return await self._dispatch(request, start_timestamp=start_timestamp, timer=timer)
 
     async def _dispatch(
@@ -72,6 +111,7 @@ class CommandService:
             cleanup=self.cleanup,
             start_timestamp=start_timestamp,
             timer=timer,
+            http_transport=self.http_transport,
         )
 
 
@@ -85,6 +125,7 @@ async def dispatch_v1(
     start_timestamp: int,
     cleanup: CleanupSupervisor | None = None,
     timer: TimeoutTimer | None = None,
+    http_transport: HttpTransport | None = None,
 ) -> V1Response:
     # maxTimeout is one absolute budget for the whole command: session-creation
     # and solve waits share it instead of restarting it once a page is ready.
@@ -94,6 +135,19 @@ async def dispatch_v1(
             "Request parameter 'cmd' is mandatory.",
             error_code=V1ErrorCode.INVALID_REQUEST,
         )
+    if request.cmd in {"sessions.create", "sessions.list", "sessions.destroy"}:
+        given = [
+            name
+            for name, field in _HTTP_TRANSPORT_PARAMETERS
+            if getattr(request, field) is not None
+        ]
+        if request.transport == "http":
+            given.insert(0, "transport")
+        if given:
+            raise _invalid_request(
+                f"Request parameters {', '.join(given)} apply only to request commands "
+                "over transport 'http'."
+            )
     if request.cmd != "sessions.destroy":
         # Keep the target alive until session_for_request can rotate it while
         # preserving its proxy and TTL.
@@ -125,7 +179,7 @@ async def dispatch_v1(
             message="The session has been removed.",
             version=settings.version,
         )
-    if request.cmd in {"request.get", "request.post"}:
+    if request.cmd in {"request.get", "request.post", "request.head"}:
         return await execute_request(
             request,
             pool=pool,
@@ -135,6 +189,7 @@ async def dispatch_v1(
             cleanup=cleanup,
             start_timestamp=start_timestamp,
             timer=timer,
+            http_transport=http_transport,
         )
     raise CamouflareError(
         f"Request parameter 'cmd' = '{request.cmd}' is invalid.",
@@ -259,16 +314,12 @@ async def execute_request(
     start_timestamp: int,
     cleanup: CleanupSupervisor | None = None,
     timer: TimeoutTimer | None = None,
+    http_transport: HttpTransport | None = None,
 ) -> V1Response:
     timer = timer if timer is not None else TimeoutTimer(request.max_timeout)
-    if request.cmd == "request.get" and not request.url:
+    if request.cmd in {"request.get", "request.post", "request.head"} and not request.url:
         raise CamouflareError(
-            "Request parameter 'url' is mandatory in 'request.get' command.",
-            error_code=V1ErrorCode.INVALID_REQUEST,
-        )
-    if request.cmd == "request.post" and not request.url:
-        raise CamouflareError(
-            "Request parameter 'url' is mandatory in 'request.post' command.",
+            f"Request parameter 'url' is mandatory in '{request.cmd}' command.",
             error_code=V1ErrorCode.INVALID_REQUEST,
         )
     if request.cmd == "request.post" and request.post_data is None:
@@ -276,6 +327,22 @@ async def execute_request(
             "Request parameter 'postData' is mandatory in 'request.post' command.",
             error_code=V1ErrorCode.INVALID_REQUEST,
         )
+
+    transport = request_transport(request)
+    if transport == "http":
+        if http_transport is None:
+            raise RuntimeError("HTTP transport is not configured for this runtime.")
+        response = await execute_http_request(
+            request,
+            http_transport=http_transport,
+            settings=settings,
+            timer=timer,
+        )
+        response.version = settings.version
+        response.start_timestamp = start_timestamp
+        return response
+    # An explicit browser transport never substitutes a direct HTTP request.
+    allow_direct_http = transport is None
 
     if request.session:
         session = await session_for_request(
@@ -367,8 +434,8 @@ async def execute_request(
                             page=page,
                             captcha_provider=captcha_provider,
                             limits=settings.resource_limits,
-                            allow_direct_http_fallback=proxy is None,
-                            allow_direct_http_first=proxy is None,
+                            allow_direct_http_fallback=allow_direct_http and proxy is None,
+                            allow_direct_http_first=allow_direct_http and proxy is None,
                             cleanup_supervisor=cleanup,
                             cleanup_timeout_seconds=settings.cleanup_timeout_seconds,
                             timer=timer,
@@ -414,6 +481,162 @@ async def execute_request(
     response.version = settings.version
     response.start_timestamp = start_timestamp
     return response
+
+
+def request_transport(request: V1Request) -> Literal["http", "browser"] | None:
+    """Return the requested transport after rejecting options it cannot honor.
+
+    None keeps the automatic browser-or-direct-HTTP selection of request.get and
+    request.post.
+    """
+
+    transport = request.transport
+    if request.cmd == "request.head":
+        if transport == "browser":
+            raise _invalid_request("request.head supports only transport 'http'.")
+        transport = "http"
+    if transport != "http":
+        given = [
+            name
+            for name, field in _HTTP_TRANSPORT_PARAMETERS
+            if getattr(request, field) is not None
+        ]
+        if given:
+            raise _invalid_request(
+                f"Request parameters {', '.join(given)} require transport 'http'."
+            )
+        if (
+            transport == "browser"
+            and request.cmd == "request.get"
+            and origin_bound_target_headers(request)
+        ):
+            raise _invalid_request(
+                "Transport 'browser' cannot send non-User-Agent headers on request.get; "
+                "use transport 'http'."
+            )
+        return transport
+    if request.cmd == "request.post":
+        raise _invalid_request("request.post does not support transport 'http'.")
+    unsupported = [
+        name
+        for name, present in (
+            ("session", bool(request.session)),
+            ("session_ttl_minutes", request.session_ttl_minutes is not None),
+            ("returnScreenshot", request.return_screenshot),
+            ("waitInSeconds", bool(request.wait_in_seconds)),
+            ("disableMedia", bool(request.disable_media)),
+            ("postData", request.post_data is not None),
+        )
+        if present
+    ]
+    if unsupported:
+        raise _invalid_request(
+            f"Transport 'http' does not support request parameters {', '.join(unsupported)}."
+        )
+    forbidden = sorted(
+        {
+            str(name)
+            for name in request.headers or {}
+            if str(name).lower() in _HTTP_TRANSPORT_FORBIDDEN_HEADERS
+        }
+    )
+    if forbidden:
+        raise _invalid_request(
+            f"Transport 'http' manages these request headers itself: {', '.join(forbidden)}."
+        )
+    return "http"
+
+
+async def execute_http_request(
+    request: V1Request,
+    *,
+    http_transport: HttpTransport,
+    settings: Settings,
+    timer: TimeoutTimer,
+) -> V1Response:
+    """Run request.get or request.head over the HTTP transport, without a browser."""
+
+    timeout_ms = timer.remaining_ms - min(_HTTP_TRANSPORT_RESERVE_MS, timer.remaining_ms // 10)
+    result = await http_transport.fetch(
+        HttpFetch(
+            url=cast(str, request.url),
+            method="HEAD" if request.cmd == "request.head" else "GET",
+            headers=with_default_headers(target_request_headers(request)),
+            origin_bound_header_names=frozenset(
+                name.lower() for name in origin_bound_target_headers(request)
+            ),
+            cookies=request.cookies,
+            proxy=resolve_proxy(request.proxy, settings.env_proxy),
+            max_redirects=(
+                MAX_HTTP_REDIRECTS if request.follow_redirects is None else request.follow_redirects
+            ),
+            max_body_bytes=request.max_response_bytes or settings.max_response_body_bytes,
+            body="none" if request.return_only_cookies else "full",
+            require_https=True,
+            block_private_targets=True,
+        ),
+        timeout_seconds=timeout_ms / 1000,
+    )
+    return V1Response(
+        status="ok",
+        message="HTTP request completed.",
+        solution=_http_solution(request, result),
+    )
+
+
+def _http_solution(request: V1Request, result: HttpResult) -> Solution:
+    cookies = result.solution_cookies
+    if len(cookies) > MAX_COOKIES:
+        raise ResourceLimitError(
+            f"Response cookies exceed the configured {MAX_COOKIES}-item limit."
+        )
+    ensure_json_size(cookies, MAX_COOKIE_BYTES, label="Response cookies")
+    user_agent = result.user_agent or ""
+    if request.return_only_cookies:
+        return Solution(
+            url=result.url, status=result.status, cookies=cookies, user_agent=user_agent
+        )
+
+    encoding = request.response_encoding or "text"
+    if encoding == "base64":
+        response = base64.b64encode(result.body).decode("ascii")
+    else:
+        response = result.body.decode(response_charset(result.message), errors="replace")
+    observe_payload_size("response", utf8_size(response))
+    return Solution(
+        url=result.url,
+        status=result.status,
+        headers=_http_solution_headers(result),
+        response=response,
+        cookies=cookies,
+        user_agent=user_agent,
+        response_encoding=encoding,
+        body_bytes=len(result.body),
+    )
+
+
+def _http_solution_headers(result: HttpResult) -> dict[str, str]:
+    """Lower-cased response headers that describe the body actually returned.
+
+    Repeated fields are combined (Set-Cookie with newlines, others with commas).
+    Once content codings are removed, Content-Encoding and Content-Length describe
+    the wire body, not the returned one, so they are omitted; bodyBytes is exact.
+    """
+
+    combined: dict[str, str] = {}
+    for name, value in result.headers:
+        key = name.lower()
+        if result.content_decoded and key in {"content-encoding", "content-length"}:
+            continue
+        if key in combined:
+            combined[key] += ("\n" if key == "set-cookie" else ", ") + value
+        else:
+            combined[key] = value
+    return combined
+
+
+def _invalid_request(message: str) -> CamouflareError:
+    return CamouflareError(message, error_code=V1ErrorCode.INVALID_REQUEST)
 
 
 async def session_for_request(

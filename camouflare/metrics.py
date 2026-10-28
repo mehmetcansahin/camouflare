@@ -60,6 +60,7 @@ _V1_COMMANDS = frozenset(
         "sessions.destroy",
         "request.get",
         "request.post",
+        "request.head",
         "invalid",
         "unknown",
     }

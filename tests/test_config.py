@@ -102,6 +102,7 @@ def test_settings_require_api_token_for_non_loopback_host() -> None:
         ({"pool_max_contexts_per_browser": 0}, "POOL_MAX_CONTEXTS_PER_BROWSER"),
         ({"pool_reserved_transient_contexts": -1}, "POOL_RESERVED_TRANSIENT_CONTEXTS"),
         ({"pool_acquire_timeout_ms": 0}, "POOL_ACQUIRE_TIMEOUT_MS"),
+        ({"http_max_concurrency": 0}, "HTTP_MAX_CONCURRENCY"),
         ({"max_sessions": 0}, "MAX_SESSIONS"),
         ({"session_ttl_minutes": 0}, "SESSION_TTL_MINUTES"),
         ({"browser_max_uses": 0}, "BROWSER_MAX_USES"),
