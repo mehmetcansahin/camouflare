@@ -5,6 +5,8 @@ All notable changes to Camouflare are documented here. The project follows
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-10-29
+
 ### Added
 
 - Browserless HTTP transport: `"transport": "http"` on `request.get` and the new
@@ -407,7 +409,8 @@ All notable changes to Camouflare are documented here. The project follows
 - High and critical dependency or container findings block releases unless covered by a
   reasoned, time-bounded exception.
 
-[Unreleased]: https://github.com/mehmetcansahin/camouflare/compare/v2.1.0...HEAD
+[Unreleased]: https://github.com/mehmetcansahin/camouflare/compare/v2.2.0...HEAD
+[2.2.0]: https://github.com/mehmetcansahin/camouflare/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/mehmetcansahin/camouflare/compare/v2.0.2...v2.1.0
 [2.0.2]: https://github.com/mehmetcansahin/camouflare/compare/v2.0.1...v2.0.2
 [2.0.1]: https://github.com/mehmetcansahin/camouflare/compare/v2.0.0...v2.0.1

@@ -528,7 +528,7 @@ DOCUMENTATION_HTML = """
       <pre><code>{
   "status": "ok",
   "sessions": ["account-a"],
-  "version": "2.1.0"
+  "version": "2.2.0"
 }</code></pre>
 
       <h3 id="sessions-destroy"><code>sessions.destroy</code></h3>
@@ -808,7 +808,7 @@ DOCUMENTATION_HTML = """
   },
   "startTimestamp": 1770000000000,
   "endTimestamp": 1770000001500,
-  "version": "2.1.0"
+  "version": "2.2.0"
 }</code></pre>
       <p>
         Errors use the same envelope with <code>status: "error"</code>.
@@ -1021,7 +1021,7 @@ DOCUMENTATION_HTML = """
   },
   "startTimestamp": 1770000000000,
   "endTimestamp": 1770000000420,
-  "version": "2.1.0"
+  "version": "2.2.0"
 }</code></pre>
       <p>
         <code>transport: "browser"</code> always navigates in a browser context. It
