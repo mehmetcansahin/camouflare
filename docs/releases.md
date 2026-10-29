@@ -23,6 +23,29 @@ docker inspect <container> \
 The per-architecture digests are recorded for evidence and for pinning a single platform.
 Normal deployments use the index digest and let the runtime select the platform.
 
+## 2.2.0 - 2026-10-29
+
+- Commit: `46ca203ee2563d410eac41ec509df6ec0e842b45`
+- Release run: https://github.com/mehmetcansahin/camouflare/actions/runs/40850852343
+- Index: `sha256:b152ce5db6ec3c1bbfd67e8e8f1cbbfd2490052f8212a1e7d712fc964ba65ae5`
+- linux/amd64: `sha256:53295fd052bc222e981ce30ab25229d9b0bccc1f349cb2a69c5f71adb69bcd16`
+- linux/arm64: `sha256:27be514fb0379d267676549d74acf2badddf831a067636738b31d1de0d7fa8b2`
+- Docker Hub mirror: [mehmetcansahin/camouflare:2.2.0](https://hub.docker.com/r/mehmetcansahin/camouflare/tags)
+  and `latest`, with the same index and platform digests. The first mirror attempt copied
+  `2.2.0` but could not move `latest` because the Docker Hub tag-immutability rule `.*`
+  also covered `latest`; the second attempt of the same run moved it after the rule was
+  changed.
+
+## 2.1.0 - 2026-10-20
+
+- Commit: `3f0827afb9931b540a47d31b6d6b2da83db453a0`
+- Release run: https://github.com/mehmetcansahin/camouflare/actions/runs/39425225596
+- Index: `sha256:45591b36f2f9cdd99a30b90def41788b1a5f5f1e53039d1b3628fad9b693b1d9`
+- linux/amd64: `sha256:dfe5a4329c39b6bcd7fb7193722c27d04f5516a1f901ab6657b59169267f69f3`
+- linux/arm64: `sha256:831d74862733fc4153182d838aee6a0f41ffbc96a06c40d7b45b6f08bbd9aaf9`
+- Docker Hub mirror: [mehmetcansahin/camouflare:2.1.0](https://hub.docker.com/r/mehmetcansahin/camouflare/tags),
+  mirrored in the same release run with the same index digest.
+
 ## 2.0.2 - 2026-10-05
 
 - Commit: `8f090b1e8afb95423aea589acf70e904da1c7aca`
